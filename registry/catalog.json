@@ -1,0 +1,277 @@
+{
+  "$schema": "./catalog.schema.json",
+  "registryVersion": 1,
+  "updated": "2026-07-12",
+  "minAppVersion": "0.1.0",
+  "entries": [
+    {
+      "id": "rtk",
+      "name": "RTK",
+      "plainLabel": "Shrink terminal noise",
+      "description": "Compresses command output (git, tests, builds) before Claude reads it",
+      "layer": "tool_output",
+      "installType": "binary+hook",
+      "status": "curated_v1",
+      "defaultOn": true,
+      "license": "Apache-2.0",
+      "source": {
+        "type": "github_release",
+        "repo": "rtk-ai/rtk",
+        "pinnedVersion": "v0.43.0",
+        "assets": {
+          "darwin-aarch64": "rtk-v0.43.0-aarch64-apple-darwin.tar.gz",
+          "darwin-x86_64": "rtk-v0.43.0-x86_64-apple-darwin.tar.gz"
+        },
+        "checksumFile": "checksums.txt"
+      },
+      "install": {
+        "steps": [
+          { "step": "download_release_asset", "verify": "sha256_from_checksum_file" },
+          { "step": "extract_binary", "binary": "rtk", "dest": "~/.piggy/bin/rtk" },
+          { "step": "merge_hooks", "hooks": {
+              "PreToolUse": [
+                {
+                  "matcher": "Bash",
+                  "hooks": [
+                    { "type": "command", "command": "~/.piggy/bin/rtk claude-hook", "timeout": 10 }
+                  ]
+                }
+              ]
+            },
+            "note": "VERIFY-BEFORE-SHIP: M2 must confirm exact hook JSON by running `rtk init -g` against a sandboxed HOME and capturing the settings.json diff; update this pinned shape to match v0.43.0 exactly."
+          }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "remove_hooks", "ownedOnly": true },
+          { "step": "delete_file", "path": "~/.piggy/bin/rtk" }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "binary_runs", "cmd": ["~/.piggy/bin/rtk", "--version"] },
+          { "check": "hook_present", "event": "PreToolUse", "commandContains": "rtk" }
+        ]
+      },
+      "conflictsWith": [],
+      "ordering": 10,
+      "behaviorChanging": false,
+      "claimedSavings": "~80% on shell output (author estimate, TypeScript/Rust projects)",
+      "risk": "low",
+      "notes": "Hook only intercepts the Bash tool; Read/Grep/Glob untouched. Telemetry opt-in only (RTK_TELEMETRY_DISABLED=1 set by Piggy at install)."
+    },
+    {
+      "id": "caveman",
+      "name": "Caveman",
+      "plainLabel": "Terse replies",
+      "description": "Claude answers in short caveman speak — fewer words, same code",
+      "layer": "reply_style",
+      "installType": "claude_plugin",
+      "status": "curated_v1",
+      "defaultOn": false,
+      "license": "MIT",
+      "source": {
+        "type": "claude_plugin_marketplace",
+        "repo": "JuliusBrussee/caveman",
+        "marketplace": "caveman",
+        "plugin": "caveman"
+      },
+      "install": {
+        "steps": [
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "add", "JuliusBrussee/caveman"] },
+          { "step": "claude_cli", "args": ["plugin", "install", "caveman@caveman"] }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "claude_cli", "args": ["plugin", "uninstall", "caveman@caveman"] },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "remove", "caveman"], "ignoreFailure": true }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "plugin_enabled", "plugin": "caveman@caveman" }
+        ]
+      },
+      "conflictsWith": ["ponytail"],
+      "ordering": 50,
+      "behaviorChanging": true,
+      "warning": "Independent JetBrains A/B test (82–86 tasks) measured ~8.5% real-world savings vs the 65% claim — with no quality loss. Modest but real.",
+      "claimedSavings": "65% fewer output tokens (author, chat-only benchmark)",
+      "measuredPrior": { "source": "JetBrains SkillsBench A/B, July 2026", "outputTokenDelta": -0.085, "qualityP": 0.82 },
+      "risk": "low",
+      "notes": "Skill adds ~1–1.5k input tokens per turn (author's own honest caveat). Zero telemetry."
+    },
+    {
+      "id": "ponytail",
+      "name": "Ponytail",
+      "plainLabel": "Write less code",
+      "description": "Nudges Claude to build only what you asked for — no gold-plating",
+      "layer": "reply_style",
+      "installType": "claude_plugin",
+      "status": "curated_v1",
+      "defaultOn": false,
+      "license": "MIT",
+      "source": {
+        "type": "claude_plugin_marketplace",
+        "repo": "DietrichGebert/ponytail",
+        "marketplace": "ponytail",
+        "plugin": "ponytail"
+      },
+      "install": {
+        "steps": [
+          { "step": "require_binary", "binary": "node", "reason": "lifecycle hooks; degrades to skill-only without it", "soft": true },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "add", "DietrichGebert/ponytail"] },
+          { "step": "claude_cli", "args": ["plugin", "install", "ponytail@ponytail"] }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "run_plugin_script", "script": "scripts/uninstall.js", "runner": "node", "ignoreFailure": true, "note": "must run BEFORE plugin uninstall — cleans ~/.config/ponytail and any statusLine entry" },
+          { "step": "claude_cli", "args": ["plugin", "uninstall", "ponytail@ponytail"] },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "remove", "ponytail"], "ignoreFailure": true },
+          { "step": "verify_no_setting", "path": "statusLine", "contains": "ponytail" }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "plugin_enabled", "plugin": "ponytail@ponytail" }
+        ]
+      },
+      "conflictsWith": ["caveman"],
+      "ordering": 60,
+      "behaviorChanging": true,
+      "warning": "Changes how Claude writes code (less of it). Authors retracted their early 80–94% claim themselves; current honest benchmark: −22% tokens.",
+      "claimedSavings": "−22% tokens / −20% cost (author agentic benchmark, n=4)",
+      "risk": "low",
+      "notes": "Node.js soft dependency. Authors publicly self-corrected inflated benchmarks — good honesty signal."
+    },
+    {
+      "id": "sweep",
+      "name": "Sweep",
+      "plainLabel": "Clean unused extras",
+      "description": "Finds add-ons you never use that cost tokens on every request, and switches them off",
+      "layer": "static_config",
+      "installType": "builtin",
+      "status": "curated_v1",
+      "defaultOn": true,
+      "license": "MIT",
+      "source": { "type": "builtin" },
+      "install": { "steps": [{ "step": "builtin_enable", "module": "sweep" }] },
+      "uninstall": { "steps": [{ "step": "builtin_disable", "module": "sweep", "restoresDisabledItems": true }] },
+      "healthCheck": { "checks": [{ "check": "builtin", "module": "sweep" }] },
+      "conflictsWith": [],
+      "ordering": 5,
+      "behaviorChanging": false,
+      "claimedSavings": "depends on your setup (Piggy measures it)",
+      "risk": "low",
+      "notes": "Piggy's own code. Static-config cleanup only; every disable is one-click reversible."
+    },
+    {
+      "id": "cto",
+      "name": "Claude Token Optimizer",
+      "plainLabel": "Tidy project docs",
+      "description": "Restructures a project's CLAUDE.md so sessions start lighter",
+      "layer": "static_config",
+      "installType": "npx_tool",
+      "status": "curated_v1_1",
+      "defaultOn": false,
+      "license": "MIT",
+      "source": { "type": "npm", "package": "claude-token-optimizer", "pinnedVersion": "2.3.20" },
+      "install": { "steps": [{ "step": "todo_v1_1", "note": "per-project npx run; needs project picker UI. Its hook templates are NOT installed — Piggy's merge engine would own that if ever enabled." }] },
+      "uninstall": { "steps": [{ "step": "todo_v1_1" }] },
+      "healthCheck": { "checks": [] },
+      "conflictsWith": [],
+      "ordering": 20,
+      "behaviorChanging": false,
+      "claimedSavings": "83–87% of session-start tokens (author, tokenizer-estimated)",
+      "risk": "low",
+      "notes": "v1.1: per-project operation doesn't fit the v1 global-toggle UX yet."
+    },
+    {
+      "id": "token-optimizer",
+      "name": "Token Optimizer",
+      "plainLabel": "Smart file re-reads",
+      "description": "Sends Claude only what changed in files it already saw",
+      "layer": "context_input",
+      "installType": "claude_plugin",
+      "status": "curated_v1_1",
+      "defaultOn": false,
+      "license": "PolyForm-Noncommercial-1.0.0",
+      "licenseNote": "Source-available, NOT open source. Free for individuals and small teams (<5 people or <$20k/mo). Piggy shows this label before install.",
+      "source": { "type": "claude_plugin_marketplace", "repo": "alexgreensh/token-optimizer", "marketplace": "alexgreensh-token-optimizer", "plugin": "token-optimizer" },
+      "install": { "steps": [{ "step": "todo_v1_1", "note": "plugin install + one-time /token-optimizer wiring run; needs license-acknowledge UI." }] },
+      "uninstall": { "steps": [{ "step": "claude_cli", "args": ["plugin", "uninstall", "token-optimizer@alexgreensh-token-optimizer"] }] },
+      "healthCheck": { "checks": [{ "check": "plugin_enabled", "plugin": "token-optimizer@alexgreensh-token-optimizer" }] },
+      "conflictsWith": [],
+      "ordering": 30,
+      "behaviorChanging": false,
+      "claimedSavings": "~18% overall (author, 684-session counterfactual, methodology unusually honest)",
+      "risk": "low"
+    },
+    {
+      "id": "context-mode",
+      "name": "Context Mode",
+      "plainLabel": "Sandbox big outputs",
+      "description": "Keeps huge tool outputs out of Claude's context until needed",
+      "layer": "context_input",
+      "installType": "claude_plugin",
+      "status": "curated_v1_1",
+      "defaultOn": false,
+      "license": "Elastic-2.0",
+      "licenseNote": "Source-available, NOT open source. Fine for personal use; restricts hosted resale. Piggy shows this label before install.",
+      "source": { "type": "claude_plugin_marketplace", "repo": "mksglu/context-mode", "marketplace": "context-mode", "plugin": "context-mode" },
+      "install": { "steps": [{ "step": "todo_v1_1", "note": "bundles an MCP server + 6 hook events; uninstall path unverified upstream — must be empirically tested before enabling." }] },
+      "uninstall": { "steps": [{ "step": "todo_v1_1" }] },
+      "healthCheck": { "checks": [{ "check": "plugin_enabled", "plugin": "context-mode@context-mode" }] },
+      "conflictsWith": [],
+      "ordering": 40,
+      "behaviorChanging": false,
+      "claimedSavings": "98% on sandboxed tool output (author; unverified 'used at' logo wall — ignore it)",
+      "risk": "medium"
+    },
+    {
+      "id": "headroom",
+      "name": "Headroom",
+      "plainLabel": "Deep compression engine",
+      "description": "Proxy-level compression for everything Claude reads",
+      "layer": "proxy",
+      "installType": "proxy",
+      "status": "deferred_v2",
+      "defaultOn": false,
+      "license": "Apache-2.0",
+      "source": { "type": "pip", "package": "headroom-ai" },
+      "install": { "steps": [{ "step": "todo_v2", "note": "Python 3.10+ runtime dependency; paid competitor 'headroom-desktop' exists (name collision, user-confusion risk)." }] },
+      "uninstall": { "steps": [{ "step": "todo_v2" }] },
+      "healthCheck": { "checks": [] },
+      "conflictsWith": ["rtk"],
+      "ordering": 90,
+      "behaviorChanging": false,
+      "claimedSavings": "47–92% by workload (author, reproducible eval suite)",
+      "risk": "medium",
+      "notes": "Wraps rtk internally — conflictsWith rtk to avoid double-compression."
+    },
+    {
+      "id": "token-optimizer-mcp",
+      "name": "token-optimizer-mcp",
+      "plainLabel": null,
+      "description": "MCP server with 65 tools + hook pipeline",
+      "layer": "context_input",
+      "installType": "mcp_server",
+      "status": "listed_only",
+      "defaultOn": false,
+      "license": "MIT",
+      "source": { "type": "npm", "package": "@ooples/token-optimizer-mcp" },
+      "install": { "steps": [] },
+      "uninstall": { "steps": [] },
+      "healthCheck": { "checks": [] },
+      "conflictsWith": [],
+      "ordering": 99,
+      "behaviorChanging": false,
+      "claimedSavings": "60–90% (author; GPT-4 tokenizer approximation)",
+      "risk": "high",
+      "exclusionReason": "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months. Shown in Discovered tab with this explanation — never installable until fixed upstream."
+    }
+  ]
+}
