@@ -32,8 +32,8 @@ test('mapNodeArchToAssetArch: maps arm64 and x64, rejects anything else', () => 
 // ---------------------------------------------------------------------------
 
 test('resolveConfig: falls back to placeholder repo and "latest" when piggy field is absent', () => {
-  assert.deepEqual(lib.resolveConfig({}), { repo: 'piggy-app/piggy', version: 'latest' });
-  assert.deepEqual(lib.resolveConfig(undefined), { repo: 'piggy-app/piggy', version: 'latest' });
+  assert.deepEqual(lib.resolveConfig({}), { repo: 'amirdoramir/piggy', version: 'latest' });
+  assert.deepEqual(lib.resolveConfig(undefined), { repo: 'amirdoramir/piggy', version: 'latest' });
 });
 
 test('resolveConfig: reads repo/version from package.json piggy field', () => {
@@ -47,7 +47,7 @@ test('resolveConfig: partial piggy field fills in the missing half with defaults
     version: 'latest',
   });
   assert.deepEqual(lib.resolveConfig({ piggy: { version: 'v9.9.9' } }), {
-    repo: 'piggy-app/piggy',
+    repo: 'amirdoramir/piggy',
     version: 'v9.9.9',
   });
 });
@@ -58,19 +58,19 @@ test('resolveConfig: partial piggy field fills in the missing half with defaults
 
 test('buildReleaseApiUrl: "latest" hits the /releases/latest endpoint', () => {
   assert.equal(
-    lib.buildReleaseApiUrl('piggy-app/piggy', 'latest'),
-    'https://api.github.com/repos/piggy-app/piggy/releases/latest'
+    lib.buildReleaseApiUrl('amirdoramir/piggy', 'latest'),
+    'https://api.github.com/repos/amirdoramir/piggy/releases/latest'
   );
   assert.equal(
-    lib.buildReleaseApiUrl('piggy-app/piggy', undefined),
-    'https://api.github.com/repos/piggy-app/piggy/releases/latest'
+    lib.buildReleaseApiUrl('amirdoramir/piggy', undefined),
+    'https://api.github.com/repos/amirdoramir/piggy/releases/latest'
   );
 });
 
 test('buildReleaseApiUrl: a pinned version hits the /releases/tags/<version> endpoint', () => {
   assert.equal(
-    lib.buildReleaseApiUrl('piggy-app/piggy', 'v0.1.0'),
-    'https://api.github.com/repos/piggy-app/piggy/releases/tags/v0.1.0'
+    lib.buildReleaseApiUrl('amirdoramir/piggy', 'v0.1.0'),
+    'https://api.github.com/repos/amirdoramir/piggy/releases/tags/v0.1.0'
   );
 });
 
@@ -221,10 +221,10 @@ test('verifyChecksum: true for the correct hash, false for a tampered buffer', (
 // ---------------------------------------------------------------------------
 
 test('buildNoReleaseMessage: friendly message points at the releases page', () => {
-  const msg = lib.buildNoReleaseMessage('piggy-app/piggy');
+  const msg = lib.buildNoReleaseMessage('amirdoramir/piggy');
   assert.equal(
     msg,
-    "Piggy hasn't shipped its first release yet — watch https://github.com/piggy-app/piggy/releases"
+    "Piggy hasn't shipped its first release yet — watch https://github.com/amirdoramir/piggy/releases"
   );
 });
 

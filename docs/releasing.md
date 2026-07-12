@@ -13,7 +13,7 @@ Manual steps a maintainer runs; nothing here blocks local development.
    - Public key goes into `app/src-tauri/tauri.conf.json` → `plugins.updater.pubkey`;
      private key stays out of the repo (CI secret `TAURI_SIGNING_PRIVATE_KEY`).
 3. **GitHub repo** — create it, then update:
-   - `installer/package.json` → `piggy.repo` (currently the `piggy-app/piggy` placeholder)
+   - `installer/package.json` → `piggy.repo` (set: `amirdoramir/piggy`)
    - `registry` refresh URL in `crates/piggy-core/src/registry.rs` once the repo exists.
 
 ## Each release

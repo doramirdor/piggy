@@ -36,7 +36,7 @@ function mapNodeArchToAssetArch(nodeArch) {
 function resolveConfig(pkgJson) {
   const cfg = (pkgJson && pkgJson.piggy) || {};
   return {
-    repo: cfg.repo || 'piggy-app/piggy',
+    repo: cfg.repo || 'amirdoramir/piggy',
     version: cfg.version || 'latest',
   };
 }

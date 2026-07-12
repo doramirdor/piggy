@@ -19,7 +19,7 @@
     "test": "node --test test/*.test.js"
   },
   "piggy": {
-    "repo": "piggy-app/piggy",
+    "repo": "amirdoramir/piggy",
     "version": "latest"
   },
   "keywords": [

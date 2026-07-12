@@ -61,14 +61,14 @@ The installer reads its target repo and version from **this package's own
 ```json
 {
   "piggy": {
-    "repo": "piggy-app/piggy",
+    "repo": "amirdoramir/piggy",
     "version": "latest"
   }
 }
 ```
 
 - `piggy.repo` — the GitHub `<owner>/<name>` to fetch releases from.
-  `piggy-app/piggy` is a **placeholder** until the real Piggy repo exists.
+  `amirdoramir/piggy` is a **placeholder** until the real Piggy repo exists.
 - `piggy.version` — a release tag (e.g. `"v1.2.0"`) or `"latest"`.
 
 ### Updating this at release time
