@@ -67,6 +67,12 @@ pub async fn discovered_list() -> Result<DiscoverDto, ApiError> {
     run(|| Ok(backend::discovered_list())).await
 }
 
+/// Manual "check now": force a live GitHub search past the once-a-day cache.
+#[tauri::command]
+pub async fn refresh_discovered() -> Result<DiscoverDto, ApiError> {
+    run(|| Ok(backend::refresh_discovered())).await
+}
+
 #[tauri::command]
 pub async fn share_card_data(period: String) -> Result<ShareCardData, ApiError> {
     run(move || backend::share_card_data(period)).await

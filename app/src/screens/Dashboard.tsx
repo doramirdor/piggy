@@ -21,6 +21,7 @@ export function Dashboard() {
 
   const h = stats?.headline;
   const measured = h && h.label === "measured" && h.value != null;
+  const estimated = h && h.label === "estimated" && h.value != null;
 
   return (
     <div className="scroll page">
@@ -39,17 +40,23 @@ export function Dashboard() {
       </div>
 
       <div className="dash">
+        <div className="headline">Your Claude plan lasts</div>
         {measured ? (
           <>
-            <div className="headline">Your Claude plan lasts</div>
             <div className="big">
               <em>{h!.value!.toFixed(1)}×</em> longer
             </div>
             <div className="sub">measured against {h!.nHoldout} holdout sessions</div>
           </>
+        ) : estimated ? (
+          <>
+            <div className="big">
+              <em>~{h!.value!.toFixed(1)}×</em> longer
+            </div>
+            <div className="sub">estimated vs your history · holdout measurement in progress</div>
+          </>
         ) : (
           <>
-            <div className="headline">Your Claude plan lasts</div>
             <div className="big" style={{ fontSize: 20, color: "var(--text-2)" }}>
               measuring…
             </div>
@@ -75,11 +82,14 @@ export function Dashboard() {
       <div className="attr">
         {savers?.savers.map((s) => {
           const v = badgeView(s.badge);
+          const hasDelta = v.tone === "measured" || v.tone === "estimated";
           return (
             <div className="arow" key={s.id}>
               <div className="aname">{s.plainLabel ?? s.name}</div>
-              {v.tone === "measured" ? (
-                <span className="adelta">{v.text.replace(" measured", "")}</span>
+              {hasDelta ? (
+                <span className={`adelta${v.tone === "estimated" ? " est" : ""}`}>
+                  {v.text.replace(/ (measured|estimated)$/, "")}
+                </span>
               ) : (
                 <span className="an">{v.text}</span>
               )}

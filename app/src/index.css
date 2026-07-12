@@ -311,6 +311,12 @@ body.mock .app-shell {
   color: var(--text-2);
   background: rgba(127, 127, 127, 0.16);
 }
+/* estimated: gray-blue — a real number, but from observational history, not a
+   live holdout. Distinct from measured (green) and claimed (amber). */
+.badge.estimated {
+  color: #7c93c9;
+  background: rgba(124, 147, 201, 0.16);
+}
 .badge.claimed {
   color: var(--amber);
   background: var(--amber-dim);
@@ -318,6 +324,9 @@ body.mock .app-shell {
 @media (prefers-color-scheme: light) {
   .badge.claimed {
     color: #9a6a00;
+  }
+  .badge.estimated {
+    color: #47598c;
   }
 }
 .warn-dot {
@@ -506,6 +515,14 @@ body.mock .app-shell {
   font-variant-numeric: tabular-nums;
   color: var(--green);
   font-weight: 600;
+}
+.attr .adelta.est {
+  color: #7c93c9;
+}
+@media (prefers-color-scheme: light) {
+  .attr .adelta.est {
+    color: #47598c;
+  }
 }
 .attr .an {
   color: var(--text-3);

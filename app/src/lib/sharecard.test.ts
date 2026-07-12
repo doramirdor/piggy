@@ -37,7 +37,7 @@ describe("shareCardText", () => {
     });
     expect(t.kicker).toContain("estimated");
     expect(t.big).toBe("~800k tokens");
-    expect(t.proof).toContain("estimated");
+    expect(t.proof).toBe("estimated from my usage history — holdout measurement in progress");
   });
 
   it("never fabricates numbers when there is not enough data", () => {

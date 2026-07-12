@@ -59,7 +59,7 @@ export function shareCardText(d: ShareCardData): ShareCardText {
       kicker: "My savers banked (estimated)",
       big: `~${formatTokens(d.tokensSaved)} tokens`,
       sub: `this ${periodWord(d.period)} — plan lasts about ${mult}`,
-      proof: "estimated — Piggy is still gathering holdout data",
+      proof: "estimated from my usage history — holdout measurement in progress",
       url: URL,
     };
   }

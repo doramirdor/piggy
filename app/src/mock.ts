@@ -88,7 +88,9 @@ function populatedSavers(): SaverRow[] {
       license: "MIT",
       licenseNote: null,
       ordering: 50,
-      badge: { kind: "measuring", delta: null, n: 6 },
+      // Estimated: enough observational history to show a number, but no live
+      // holdout yet — the gray-blue "≈ −X% estimated" badge.
+      badge: { kind: "estimated", delta: -0.085, n: 15 },
     },
     {
       id: "ponytail",
@@ -433,6 +435,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return sweepReport();
       }
       case "discovered_list":
+      case "refresh_discovered":
         return discover();
       case "share_card_data":
         return shareCardData((a.period as Period) ?? "week");

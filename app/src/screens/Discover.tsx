@@ -5,6 +5,7 @@ import type { DiscoverDto } from "../types";
 
 export function Discover() {
   const [data, setData] = useState<DiscoverDto | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const showError = useStore((s) => s.showError);
 
   useEffect(() => {
@@ -18,12 +19,28 @@ export function Discover() {
     if (url) void api.openExternal(url);
   };
 
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      setData(await api.refreshDiscovered());
+    } catch (e) {
+      showError(e);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   return (
     <div className="scroll page">
       <div className="page-title">Discover</div>
       <div className="foot-note" style={{ textAlign: "left", padding: "2px 18px 4px" }}>
         Savers Piggy has found in the wild. Nothing here is installable yet — claims are the
         author's own, never Piggy's measurements.
+      </div>
+      <div style={{ margin: "0 12px 4px" }}>
+        <button className="btn" disabled={refreshing} onClick={refresh}>
+          {refreshing ? "Checking GitHub…" : "Check now"}
+        </button>
       </div>
 
       {data?.feed.map((f) => (

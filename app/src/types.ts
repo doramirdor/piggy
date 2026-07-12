@@ -4,7 +4,7 @@
 export type Period = "today" | "week" | "month" | "all";
 
 export type HeadlineLabel = "measured" | "estimated" | "not_enough_data";
-export type BadgeKind = "measured" | "measuring" | "claimed";
+export type BadgeKind = "measured" | "estimated" | "measuring" | "claimed";
 
 export interface Streams {
   input: number;

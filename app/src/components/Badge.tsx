@@ -1,12 +1,18 @@
 import { badgeView } from "../lib/badge";
 import type { Badge } from "../types";
 
-/** Per-saver measured/measuring/claimed badge — never blends the three. */
+const TONE_CLASS = {
+  measured: "measured",
+  estimated: "estimated",
+  claimed: "claimed",
+  nodata: "nodata",
+} as const;
+
+/** Per-saver measured/estimated/measuring/claimed badge — never blends them. */
 export function BadgeChip({ badge }: { badge: Badge }) {
   const v = badgeView(badge);
-  const cls = v.tone === "measured" ? "measured" : v.tone === "claimed" ? "claimed" : "nodata";
   return (
-    <span className={`badge ${cls}`} title={v.title}>
+    <span className={`badge ${TONE_CLASS[v.tone]}`} title={v.title}>
       {v.text}
     </span>
   );

@@ -54,6 +54,7 @@ function HeadlineStrip() {
   if (!stats) return null;
   const h = stats.headline;
   const measured = h.label === "measured" && h.value != null;
+  const estimated = h.label === "estimated" && h.value != null;
   return (
     <div className="dash">
       <div className="headline">Your Claude plan lasts</div>
@@ -65,6 +66,13 @@ function HeadlineStrip() {
           <div className="sub">
             measured against {h.nHoldout} holdout sessions · {stats.periodLabel.toLowerCase()}
           </div>
+        </>
+      ) : estimated ? (
+        <>
+          <div className="big">
+            <em>~{h.value!.toFixed(1)}×</em> longer
+          </div>
+          <div className="sub">estimated vs your history · holdout measurement in progress</div>
         </>
       ) : (
         <>

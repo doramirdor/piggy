@@ -41,6 +41,7 @@ export const api = {
   sweepApply: (itemIds: string[]) => call<SweepReport>("sweep_apply", { itemIds }),
   sweepRestore: (itemIds: string[]) => call<SweepReport>("sweep_restore", { itemIds }),
   discoveredList: () => call<DiscoverDto>("discovered_list"),
+  refreshDiscovered: () => call<DiscoverDto>("refresh_discovered"),
   shareCardData: (period: Period) => call<ShareCardData>("share_card_data", { period }),
   saveShareCard: (pngBase64: string) => call<{ path: string }>("save_share_card", { pngBase64 }),
   settingsGet: () => call<Settings>("settings_get"),

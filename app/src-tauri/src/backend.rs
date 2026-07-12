@@ -3,24 +3,45 @@
 //! struct (never a raw `serde_json::Value`) so IPC serialization is unaffected by
 //! `piggy-core`'s `arbitrary_precision` serde_json feature.
 //!
-//! ## M3 fallbacks
+//! ## M3 wiring
 //!
 //! The measurement milestone (M3) — holdout deltas, the headline multiplier, the
-//! discovered feed — does not exist in this worktree's `piggy-core`. Every place
-//! that would consume an M3 value degrades to an honest, typed fallback and is
-//! tagged with a `// M3-WIRE:` comment so wiring it up later is one grep away:
+//! discovered feed, rotation, the session watcher — is live in `piggy-core`.
+//! Every seam that used to degrade to an honest fallback now consumes the real
+//! API:
 //!
-//! * per-saver badge  → `{ kind: "measuring", n: <sessions counted> }`
-//! * headline         → `{ label: "not_enough_data" }`
-//! * discovered feed  → catalog `listed_only`/deferred entries only, empty feed.
+//! * per-saver badge  → [`attribution::attribute`] (measured / estimated / measuring),
+//! * headline         → [`attribution::headline`] (holdout-backed multiplier),
+//! * discovered feed  → [`discovery::discover`] (cached GitHub search, ≤1/day),
+//! * preferences      → the `piggy-core` [`PiggyState`] `settings` ledger,
+//! * background loop  → [`piggy_core::SessionWatcher`] + [`rotation::tick_now`].
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use piggy_core::attribution::{
+    self, Badge as CoreBadge, Headline as CoreHeadline, HeadlineBaseline, SaverAttribution,
+    MIN_GROUP,
+};
 use piggy_core::registry::Entry;
-use piggy_core::{config, engine, stats::Period, sweep, Catalog, PiggyState, Pricing, Store};
+use piggy_core::rotation::{self, RotationOutcome};
+use piggy_core::{
+    config, discovery, engine, stats::Period, sweep, tagging, Catalog, PiggyState, Pricing, Store,
+};
+
+/// A time-derived bootstrap seed for the attribution CIs (production runs use a
+/// live seed; the math is otherwise deterministic given it). Mirrors the CLI's
+/// `time_seed` so the GUI and `piggy report` agree.
+fn time_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1
+}
 
 // ---------------------------------------------------------------------------
 // Error payload (plain-language; never raw JSON in the UI)
@@ -183,9 +204,20 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
     (|| -> anyhow::Result<StatsOverview> {
         let home = config::piggy_home();
         let store = Store::open(&home)?;
+        let pricing = Pricing::load(&home);
         let period = period_from(&period_s);
         let t = store.totals(period)?;
         let today = store.totals(Period::Today)?;
+        // Real holdout-backed headline. Attribution is best-effort: an unreadable
+        // or dataless store yields an honest "not_enough_data" rather than an error
+        // (the token totals above are the load-bearing part of this call).
+        let headline = attribution::headline(&store, &pricing, time_seed())
+            .map(|hl| map_headline(&hl))
+            .unwrap_or_else(|_| Headline {
+                value: None,
+                label: "not_enough_data".to_string(),
+                n_holdout: 0,
+            });
         Ok(StatsOverview {
             period: period_key(period).to_string(),
             period_label: period.label().to_string(),
@@ -201,17 +233,56 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
             cost_estimated: true,
             fully_priced: t.fully_priced(),
             today_tokens: today.total_tokens(),
-            // M3-WIRE: the "lasts N× longer" headline needs the M3 holdout engine,
-            // which is absent here. Degrade to an honest "not_enough_data" so the
-            // UI never fabricates a savings multiplier.
-            headline: Headline {
-                value: None,
-                label: "not_enough_data".to_string(),
-                n_holdout: 0,
-            },
+            headline,
         })
     })()
     .map_err(generic("Couldn't read your token history"))
+}
+
+/// Map the core [`CoreHeadline`] onto the UI payload, following the honesty rules
+/// in `docs/measurement.md`:
+///
+/// * **measured** — a live holdout baseline that meets the sample bar
+///   ([`MIN_GROUP`] per side) with a computable multiplier. The Dashboard/Home
+///   sub-line reads "measured against N holdout sessions".
+/// * **estimated** — no live holdout, but an observational pre-install baseline
+///   with a multiplier. Sub-line: "estimated vs your history · holdout
+///   measurement in progress".
+/// * **not_enough_data** — a partial holdout (1..MIN_GROUP), no baseline, or no
+///   computable multiplier: never a faked number. `n_holdout` still carries the
+///   holdout sessions gathered so far so the UI can show "N of 10".
+///
+/// A live holdout always wins the baseline in `piggy-core`, so `baseline ==
+/// Holdout` ⇔ at least one holdout session exists; hence `n_holdout` is the true
+/// holdout count when holding out, and 0 for the pre-install / none cases.
+fn map_headline(hl: &CoreHeadline) -> Headline {
+    let n_holdout = if hl.baseline == HeadlineBaseline::Holdout {
+        hl.n_baseline as u64
+    } else {
+        0
+    };
+    let has_mult = hl.multiplier.is_some();
+    let measured = has_mult
+        && hl.baseline == HeadlineBaseline::Holdout
+        && hl.n_full_on >= MIN_GROUP
+        && hl.n_baseline >= MIN_GROUP;
+    let estimated = has_mult && !measured && hl.baseline == HeadlineBaseline::PreInstall;
+    let label = if measured {
+        "measured"
+    } else if estimated {
+        "estimated"
+    } else {
+        "not_enough_data"
+    };
+    Headline {
+        value: if label == "not_enough_data" {
+            None
+        } else {
+            hl.multiplier
+        },
+        label: label.to_string(),
+        n_holdout,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,11 +292,19 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Badge {
-    /// `"measured" | "measuring" | "claimed"`.
+    /// `"measured" | "estimated" | "measuring" | "claimed"`.
+    ///
+    /// * `measured`  — a randomized holdout/single-off A/B delta that cleared the
+    ///   confidence bar (the only green claim).
+    /// * `estimated` — the same delta math against the observational pre-install
+    ///   baseline; shown with a number but never conflated with measured.
+    /// * `measuring` — below the bar: honest session progress, no point estimate.
+    /// * `claimed`   — the author's own number (install card only, never here).
     pub kind: String,
-    /// Measured delta fraction (negative = saving), or `null`.
+    /// Delta fraction (negative = saving), or `null` while still measuring.
     pub delta: Option<f64>,
-    /// Sessions counted so far.
+    /// Sessions backing the figure (measured/estimated) or counted so far
+    /// (measuring).
     pub n: u64,
 }
 
@@ -280,7 +359,7 @@ fn default_on_ids(catalog: &Catalog) -> Vec<String> {
         .collect()
 }
 
-fn saver_row(e: &Entry, state: &PiggyState, sessions: u64) -> SaverRow {
+fn saver_row(e: &Entry, state: &PiggyState, attr: Option<&SaverAttribution>) -> SaverRow {
     let st = state.savers.get(&e.id);
     SaverRow {
         id: e.id.clone(),
@@ -300,12 +379,44 @@ fn saver_row(e: &Entry, state: &PiggyState, sessions: u64) -> SaverRow {
         license: e.license.clone(),
         license_note: e.license_note.clone(),
         ordering: e.ordering,
-        // M3-WIRE: no measured per-saver delta exists yet. Report an honest
-        // "measuring" badge carrying how many sessions Piggy has counted so far.
-        badge: Badge {
+        badge: attr.map(saver_badge).unwrap_or(Badge {
             kind: "measuring".to_string(),
             delta: None,
-            n: sessions,
+            n: 0,
+        }),
+    }
+}
+
+/// The per-saver row badge, taken from the **output** stream (the headline
+/// per-saver figure, per `SaverAttribution::output`). Never blends measured and
+/// estimated. The delta is emitted in the UI's sign convention (negative =
+/// saving), the inverse of `piggy-core`'s `1 - on/off` (positive = saving).
+fn saver_badge(a: &SaverAttribution) -> Badge {
+    match a.output() {
+        Some(s) => {
+            let n = (s.n_on + s.n_off) as u64;
+            // `shown_pct` is `Some` only for measured/estimated; it is signed with
+            // positive = saving, so negate for the UI's negative-is-saving axis.
+            let delta = s.shown_pct().map(|p| -p / 100.0);
+            let kind = match s.badge {
+                CoreBadge::Measured => "measured",
+                CoreBadge::Estimated => "estimated",
+                CoreBadge::Measuring => "measuring",
+            };
+            Badge {
+                kind: kind.to_string(),
+                delta: if matches!(s.badge, CoreBadge::Measuring) {
+                    None
+                } else {
+                    delta
+                },
+                n,
+            }
+        }
+        None => Badge {
+            kind: "measuring".to_string(),
+            delta: None,
+            n: 0,
         },
     }
 }
@@ -321,10 +432,20 @@ fn master_is_on(catalog: &Catalog, state: &PiggyState) -> bool {
 fn build_savers_state() -> anyhow::Result<SaversState> {
     let catalog = Catalog::embedded();
     let state = PiggyState::load()?;
-    let sessions = session_count();
+    // Per-saver attribution shares one store/pricing/seed so every row agrees with
+    // `piggy report`. A store failure degrades each row to an honest "measuring".
+    let home = config::piggy_home();
+    let store = Store::open(&home).ok();
+    let pricing = Pricing::load(&home);
+    let seed = time_seed();
     let savers = curated_installable(&catalog)
         .iter()
-        .map(|e| saver_row(e, &state, sessions))
+        .map(|e| {
+            let attr = store
+                .as_ref()
+                .and_then(|st| attribution::attribute(st, &pricing, &e.id, seed).ok());
+            saver_row(e, &state, attr.as_ref())
+        })
         .collect();
     Ok(SaversState {
         master_on: master_is_on(&catalog, &state),
@@ -592,7 +713,8 @@ pub struct DiscoverFeedItem {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverDto {
-    /// M3-WIRE: live discovery results. Empty until the M3 discovery module lands.
+    /// Live GitHub-discovery results (from `discovery::discover`, cached ≤1/day).
+    /// Empty when offline/rate-limited with no cache yet — never an error.
     pub feed: Vec<DiscoverFeedItem>,
     pub listed_only: Vec<DiscoverEntry>,
 }
@@ -609,9 +731,12 @@ fn plain_status(e: &Entry) -> String {
     }
 }
 
-pub fn discovered_list() -> DiscoverDto {
-    let catalog = Catalog::embedded();
-    let listed_only = catalog
+/// The catalog-derived "listed for transparency" rows: everything not curated +
+/// installable, with the plain-language reason it isn't available. Richer than the
+/// discovery module's own `listed_only` (license notes, exclusion reasons), so we
+/// build these from the catalog directly.
+fn listed_only_entries(catalog: &Catalog) -> Vec<DiscoverEntry> {
+    catalog
         .ordered()
         .into_iter()
         .filter(|e| {
@@ -633,13 +758,50 @@ pub fn discovered_list() -> DiscoverDto {
                 .map(|r| format!("https://github.com/{r}")),
             risk: e.risk.clone(),
         })
-        .collect();
-    // M3-WIRE: no live discovery feed in this worktree — return only the catalog's
-    // listed/deferred entries so the tab is honest and nothing here is installable.
-    DiscoverDto {
-        feed: Vec::new(),
-        listed_only,
+        .collect()
+}
+
+/// The live discovery feed (GitHub search), mapped to the UI item. Best-effort:
+/// `discovery::discover` serves a cached result, degrades to a stale cache on
+/// rate-limit/offline, and never errors — so an `Err` here just means an empty
+/// feed while the catalog's listed-only rows keep the tab useful. We carry no
+/// `authorClaims` for wild repos: a GitHub result has no vetted savings claim, and
+/// Piggy never invents one.
+fn discovery_feed(force: bool) -> Vec<DiscoverFeedItem> {
+    match discovery::discover(force) {
+        Ok(cache) => cache
+            .repos
+            .into_iter()
+            .filter(|r| !r.listed_only)
+            .map(|r| DiscoverFeedItem {
+                name: r.full_name,
+                description: r.description.unwrap_or_default(),
+                stars: Some(r.stars),
+                author_claims: None,
+                repo_url: if r.url.is_empty() { None } else { Some(r.url) },
+            })
+            .collect(),
+        Err(_) => Vec::new(),
     }
+}
+
+fn discovered(force: bool) -> DiscoverDto {
+    let catalog = Catalog::embedded();
+    DiscoverDto {
+        feed: discovery_feed(force),
+        listed_only: listed_only_entries(&catalog),
+    }
+}
+
+/// The Discover tab feed. Refreshes from GitHub at most once a day (handled inside
+/// `piggy-core`); reads the cache otherwise.
+pub fn discovered_list() -> DiscoverDto {
+    discovered(false)
+}
+
+/// Manual "check now" refresh — forces a live GitHub search past the daily cache.
+pub fn refresh_discovered() -> DiscoverDto {
+    discovered(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -665,13 +827,31 @@ pub struct ShareCardData {
 pub fn share_card_data(period_s: String) -> Result<ShareCardData, ApiError> {
     let ov = stats_overview(period_s.clone())?;
     let period = period_from(&period_s);
-    // M3-WIRE: without the holdout engine the savings/multiplier are unknown, so
-    // the card is honestly "still measuring" and Share stays disabled.
-    let shareable = ov.headline.label == "measured";
+    // Shareable once there is a holdout-measured OR history-estimated headline;
+    // never while still "measuring" (nothing to prove yet).
+    let shareable = ov.headline.label == "measured" || ov.headline.label == "estimated";
+    // "Tokens banked" is derived from the headline multiplier applied to the
+    // period's plan-metered spend (input + output + cache-write; cache reads are
+    // excluded from spend weighting, per measurement.md). If your plan lasts M×
+    // longer you ran at 1/M the rate, so the counterfactual is M× your actual and
+    // the banked amount is actual × (M − 1). This is an estimate even when the
+    // headline is "measured" (holdout-backed) — the card's proof line says so.
+    let tokens_saved = match ov.headline.value {
+        Some(m) if shareable && m > 1.0 => {
+            let plan_metered = ov.streams.input + ov.streams.output + ov.streams.cache_write;
+            let banked = (plan_metered as f64 * (m - 1.0)).round();
+            if banked >= 1.0 {
+                Some(banked as u64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     Ok(ShareCardData {
         period: ov.period,
         week_label: date_range_label(period),
-        tokens_saved: None,
+        tokens_saved,
         multiplier: ov.headline.value,
         headline_label: ov.headline.label,
         n_holdout: ov.headline.n_holdout,
@@ -744,8 +924,13 @@ pub fn save_share_card(png_base64: String) -> Result<PathBuf, ApiError> {
 // settings (app preferences)
 // ---------------------------------------------------------------------------
 
-/// The persisted slice of settings (holdout fraction + rotation). Launch-at-login
-/// is owned by the autostart plugin and merged in at the command layer.
+/// The settings slice the GUI edits. These now live in the `piggy-core`
+/// [`PiggyState`] `settings` ledger (the same knobs rotation and attribution
+/// read), not a separate file. `rotation_enabled` maps to the core
+/// `holdout_enabled` — the master switch for Piggy's A/B rotation: off means no
+/// holdout sessions are scheduled (badges fall back to `estimated`), and the
+/// background loop skips its rotation step entirely. Launch-at-login is owned by
+/// the autostart plugin and merged in at the command layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPrefs {
@@ -762,32 +947,54 @@ impl Default for AppPrefs {
     }
 }
 
-fn prefs_path() -> PathBuf {
+/// The pre-M3 preferences file. If present, its values are folded into the core
+/// state once and the file is removed (silent one-shot migration).
+fn legacy_prefs_path() -> PathBuf {
     config::piggy_home().join("app-settings.json")
 }
 
-// M3-WIRE: holdoutFraction and rotationEnabled are persisted preferences only.
-// They do not yet feed a measurement/rotation engine (that arrives with M3); the
-// values are stored faithfully so the M3 glue can read them straight out.
-pub fn load_prefs() -> AppPrefs {
-    std::fs::read(prefs_path())
+/// Fold a legacy `app-settings.json` into the core state's `settings`, then delete
+/// it. No-op when the file is absent. Best-effort: a parse/read failure just drops
+/// the stale file so it can't shadow the real state.
+fn migrate_legacy_prefs() {
+    let path = legacy_prefs_path();
+    if !path.exists() {
+        return;
+    }
+    if let Some(old) = std::fs::read(&path)
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .and_then(|b| serde_json::from_slice::<AppPrefs>(&b).ok())
+    {
+        if let Ok(mut state) = PiggyState::load() {
+            state.settings.holdout_fraction = old.holdout_fraction.clamp(0.0, 0.5);
+            state.settings.holdout_enabled = old.rotation_enabled;
+            let _ = state.save();
+        }
+    }
+    let _ = std::fs::remove_file(&path);
 }
 
+/// Read the GUI-editable settings straight out of the core state ledger.
+pub fn load_prefs() -> AppPrefs {
+    migrate_legacy_prefs();
+    let state = PiggyState::load().unwrap_or_default();
+    AppPrefs {
+        holdout_fraction: state.settings.holdout_fraction,
+        rotation_enabled: state.settings.holdout_enabled,
+    }
+}
+
+/// Persist the GUI settings into the core state ledger (clamping the holdout
+/// fraction) and anchor the pre-install baseline so rotation/attribution have a
+/// cutoff to reason from.
 pub fn save_prefs(prefs: &AppPrefs) -> Result<(), ApiError> {
-    let clamped = AppPrefs {
-        holdout_fraction: prefs.holdout_fraction.clamp(0.0, 0.5),
-        rotation_enabled: prefs.rotation_enabled,
-    };
-    let path = prefs_path();
+    migrate_legacy_prefs();
     (|| -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(&clamped)?;
-        std::fs::write(&path, json)?;
+        let mut state = PiggyState::load()?;
+        state.settings.holdout_fraction = prefs.holdout_fraction.clamp(0.0, 0.5);
+        state.settings.holdout_enabled = prefs.rotation_enabled;
+        state.ensure_created_at();
+        state.save()?;
         Ok(())
     })()
     .map_err(generic("Couldn't save your settings"))
@@ -953,4 +1160,51 @@ pub fn reindex() -> Result<ReindexDto, ApiError> {
         })
     })()
     .map_err(generic("Couldn't read your latest sessions"))
+}
+
+// ---------------------------------------------------------------------------
+// background: baseline anchor + rotation (driven by the watcher loop in lib.rs)
+// ---------------------------------------------------------------------------
+
+/// Anchor the measurement baseline once at startup: stamp Piggy's install time (so
+/// every session already on disk becomes the observational pre-install baseline)
+/// and backfill the `pre_install` tags. Best-effort — a failure here just means
+/// attribution has less to compare against, never a crash.
+pub fn anchor_baseline() {
+    let Ok(mut state) = PiggyState::load() else {
+        return;
+    };
+    if state.ensure_created_at() {
+        let _ = state.save();
+    }
+    if let Ok(mut store) = Store::open(&config::piggy_home()) {
+        let catalog = Catalog::embedded();
+        let _ = tagging::tag_pre_install_baseline(&mut store, &state, &catalog);
+    }
+}
+
+/// Run one rotation scheduler step, gated on the rotation/holdout master switch.
+///
+/// Returns `true` only when an assignment was actually **applied** (the projects
+/// dir was idle) — the watcher loop uses that to emit a stats refresh and to
+/// avoid re-ticking until the next session runs. When rotation is disabled, or a
+/// session is live, or nothing is installed, this is a no-op returning `false`.
+/// `rotation::tick_now` self-gates on the 10-minute idle window, so calling it is
+/// always safe; it never perturbs a running session.
+pub fn rotation_tick_if_enabled() -> bool {
+    let Ok(state) = PiggyState::load() else {
+        return false;
+    };
+    if !state.settings.holdout_enabled {
+        return false;
+    }
+    let catalog = Catalog::embedded();
+    let projects = config::claude_projects_dir();
+    let Ok(mut store) = Store::open(&config::piggy_home()) else {
+        return false;
+    };
+    matches!(
+        rotation::tick_now(&catalog, &mut store, &projects),
+        Ok(RotationOutcome::Applied { .. })
+    )
 }
