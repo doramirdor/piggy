@@ -7,6 +7,7 @@
    ========================================================================== */
 
 :root {
+  color-scheme: light dark;
   --bg: rgba(30, 30, 32, 0.92);
   --card: rgba(255, 255, 255, 0.055);
   --card-hover: rgba(255, 255, 255, 0.09);
@@ -23,6 +24,9 @@
   --accent: #0a84ff;
   --pink: #ff8fa3;
   --switch-off: rgba(255, 255, 255, 0.18);
+  /* Switch fill is the bright system green in both themes (Apple's control
+     color); --green doubles as text and must darken in light mode instead. */
+  --switch-on: #30d158;
   --knob: #ffffff;
 }
 
@@ -37,10 +41,30 @@
     --text-3: rgba(0, 0, 0, 0.32);
     --green: #248a3d;
     --green-dim: rgba(48, 209, 88, 0.2);
+    --amber: #9a6b00;
     --amber-dim: rgba(210, 150, 0, 0.16);
     --red: #d70015;
     --red-dim: rgba(215, 0, 21, 0.12);
+    --accent: #007aff;
     --switch-off: rgba(0, 0, 0, 0.18);
+    --switch-on: #34c759;
+  }
+}
+
+/* Keyboard navigation: native-style focus ring, only for :focus-visible so
+   mouse clicks stay chromeless like real macOS controls. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }
 
@@ -185,7 +209,7 @@ body.mock .app-shell {
   padding: 0;
 }
 .switch.on {
-  background: var(--green);
+  background: var(--switch-on);
 }
 .switch .knob {
   position: absolute;

@@ -1,6 +1,6 @@
 //! Piggy — the Tauri v2 menu bar application.
 //!
-//! Tray-only (no dock icon): a 360×600 undecorated, transparent, HUD-vibrancy
+//! Tray-only (no dock icon): a 360×600 undecorated, transparent, popover-vibrancy
 //! popover anchored under the menu-bar pig glyph. The Rust side links
 //! `piggy-core` directly and exposes the [`commands`] surface to the React UI.
 //! A background [`piggy_core::SessionWatcher`] snapshot-tags new sessions,
@@ -79,13 +79,14 @@ pub fn run() {
                 app.set_activation_policy(ActivationPolicy::Accessory);
             }
 
-            // HUD vibrancy + rounded corners on the panel window.
+            // Popover vibrancy + rounded corners on the panel window. Popover
+            // (unlike HudWindow, which is always dark) follows the system
+            // light/dark appearance, matching the CSS prefers-color-scheme split.
             #[cfg(target_os = "macos")]
             {
                 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
                 if let Some(win) = app.get_webview_window("panel") {
-                    let _ =
-                        apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, Some(14.0));
+                    let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Popover, None, Some(14.0));
                 }
             }
 
