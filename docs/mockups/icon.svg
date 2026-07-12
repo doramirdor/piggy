@@ -1,0 +1,57 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d22"/>
+      <stop offset="1" stop-color="#0e0e11"/>
+    </linearGradient>
+    <radialGradient id="glowg" cx="0.85" cy="0.05" r="0.9">
+      <stop offset="0" stop-color="#30d158" stop-opacity="0.32"/>
+      <stop offset="0.55" stop-color="#30d158" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowb" cx="0.05" cy="1" r="0.9">
+      <stop offset="0" stop-color="#0a84ff" stop-opacity="0.28"/>
+      <stop offset="0.55" stop-color="#0a84ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pig" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffa9ba"/>
+      <stop offset="1" stop-color="#f0708c"/>
+    </linearGradient>
+    <linearGradient id="coin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe27a"/>
+      <stop offset="1" stop-color="#ffc93c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#glowg)"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#glowb)"/>
+
+  <!-- coin dropping in -->
+  <g transform="rotate(-14 512 268)">
+    <circle cx="512" cy="268" r="92" fill="url(#coin)"/>
+    <circle cx="512" cy="268" r="92" fill="none" stroke="#b8860b" stroke-opacity="0.35" stroke-width="10"/>
+    <path d="M512 220 L524 250 L556 252 L531 272 L540 304 L512 286 L484 304 L493 272 L468 252 L500 250 Z"
+          fill="#b8860b" opacity="0.55"/>
+  </g>
+
+  <!-- piggy bank -->
+  <g>
+    <!-- tail -->
+    <path d="M232 560 q-52 -8 -44 -52 q8 -40 52 -30" fill="none" stroke="url(#pig)" stroke-width="30" stroke-linecap="round"/>
+    <!-- body -->
+    <ellipse cx="512" cy="592" rx="296" ry="230" fill="url(#pig)"/>
+    <!-- ear -->
+    <path d="M594 380 q30 -52 88 -50 q6 56 -34 92 Z" fill="#e2607e"/>
+    <!-- coin slot -->
+    <rect x="440" y="398" width="150" height="26" rx="13" fill="#8f3a52"/>
+    <!-- snout -->
+    <ellipse cx="762" cy="600" rx="78" ry="62" fill="#e2607e"/>
+    <ellipse cx="740" cy="600" rx="12" ry="20" fill="#8f3a52"/>
+    <ellipse cx="786" cy="600" rx="12" ry="20" fill="#8f3a52"/>
+    <!-- eye -->
+    <circle cx="650" cy="512" r="17" fill="#301820"/>
+    <!-- legs -->
+    <rect x="382" y="770" width="72" height="72" rx="30" fill="#e2607e"/>
+    <rect x="576" y="770" width="72" height="72" rx="30" fill="#e2607e"/>
+  </g>
+</svg>
