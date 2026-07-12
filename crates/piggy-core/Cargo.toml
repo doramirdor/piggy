@@ -1,0 +1,18 @@
+[package]
+name = "piggy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ground-truth Claude Code token accounting: JSONL parser, SQLite store, pricing."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+walkdir = "2"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"

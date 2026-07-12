@@ -1,0 +1,16 @@
+[package]
+name = "piggy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "piggy CLI: measure Claude Code token usage from session logs."
+
+[[bin]]
+name = "piggy"
+path = "src/main.rs"
+
+[dependencies]
+piggy-core = { path = "../piggy-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+serde_json = "1"
