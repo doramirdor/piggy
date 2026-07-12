@@ -1,0 +1,3 @@
+# Piggy 0.1.0 checksums
+2ff2fe0948d4a7a2dc4ff8969886df58d37cd5df2375aec52a76bf13f3682288  Piggy-0.1.0-arm64.dmg
+5682d4959af4fe707b6f019e62ec56b19d45e963ad8999f8b54ed81f34c78bca  Piggy-0.1.0-x64.dmg

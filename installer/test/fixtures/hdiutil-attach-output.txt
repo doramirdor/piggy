@@ -1,0 +1,2 @@
+/dev/disk4          	GUID_partition_scheme
+/dev/disk4s1        	Apple_HFS                      	/Volumes/Piggy

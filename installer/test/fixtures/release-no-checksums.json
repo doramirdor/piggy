@@ -1,0 +1,11 @@
+{
+  "tag_name": "v0.2.0",
+  "name": "Piggy 0.2.0",
+  "assets": [
+    {
+      "name": "Piggy-0.2.0-arm64.dmg",
+      "size": 1000,
+      "browser_download_url": "https://github.com/piggy-app/piggy/releases/download/v0.2.0/Piggy-0.2.0-arm64.dmg"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "tag_name": "v0.0.1",
+  "name": "Piggy 0.0.1 (source only)",
+  "assets": [
+    {
+      "name": "source.zip",
+      "size": 1000,
+      "browser_download_url": "https://github.com/piggy-app/piggy/releases/download/v0.0.1/source.zip"
+    }
+  ]
+}
