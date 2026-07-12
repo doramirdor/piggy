@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { useStore } from "./store";
-import { onStatsUpdated, hidePanel } from "./ipc";
-import { Header } from "./components/Header";
+import { onStatsUpdated } from "./ipc";
+import { Sidebar } from "./components/Sidebar";
 import { Banner } from "./components/Banner";
-import { Tabs } from "./components/Tabs";
-import { Home } from "./screens/Home";
-import { Dashboard } from "./screens/Dashboard";
+import { Overview } from "./screens/Overview";
+import { Savers } from "./screens/Savers";
 import { Discover } from "./screens/Discover";
+import { Proof } from "./screens/Proof";
+import { Reports } from "./screens/Reports";
 import { Settings } from "./screens/Settings";
 import { NoClaude, FirstRun } from "./screens/EmptyStates";
 
@@ -23,8 +24,7 @@ export default function App() {
     void boot();
   }, [boot]);
 
-  // Re-query on the background index event and whenever the panel becomes visible
-  // (the popover is shown), matching the "refresh on window-show" spec.
+  // Re-query on the background index event and whenever the window regains focus.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     onStatsUpdated(() => void refresh()).then((u) => (unlisten = u));
@@ -32,50 +32,48 @@ export default function App() {
     const onVisible = () => {
       if (document.visibilityState === "visible") void refresh();
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") void hidePanel();
-    };
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("keydown", onKey);
     return () => {
       unlisten?.();
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("keydown", onKey);
     };
   }, [refresh]);
 
-  let body: JSX.Element;
+  // Full-bleed states (no sidebar): booting spinner, no-Claude, first-run.
   if (booting) {
-    body = (
+    return (
       <div className="empty">
         <div className="spinner" />
       </div>
     );
-  } else if (env && !env.claudeInstalled) {
-    body = <NoClaude />;
-  } else if (env && !env.hasData) {
-    body = <FirstRun />;
-  } else {
-    body =
-      tab === "home" ? (
-        <Home />
-      ) : tab === "dashboard" ? (
-        <Dashboard />
-      ) : tab === "discover" ? (
-        <Discover />
-      ) : (
-        <Settings />
-      );
   }
+  if (env && !env.claudeInstalled) return <NoClaude />;
+  if (env && !env.hasData) return <FirstRun />;
 
-  const showChrome = !booting && env != null && env.claudeInstalled;
+  const screen =
+    tab === "overview" ? (
+      <Overview />
+    ) : tab === "savers" ? (
+      <Savers />
+    ) : tab === "discover" ? (
+      <Discover />
+    ) : tab === "proof" ? (
+      <Proof />
+    ) : tab === "reports" ? (
+      <Reports />
+    ) : (
+      <Settings />
+    );
 
   return (
-    <div className="app-shell">
-      <Header />
-      <Banner />
-      {body}
-      {showChrome && <Tabs tab={tab} onTab={setTab} />}
+    <div className="win">
+      <Sidebar tab={tab} onTab={setTab} />
+      <main className="content">
+        <div className="inner">
+          <Banner />
+          {screen}
+        </div>
+      </main>
     </div>
   );
 }

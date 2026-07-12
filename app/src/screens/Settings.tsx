@@ -47,21 +47,26 @@ export function Settings() {
     }
   };
 
-  if (!settings) {
-    return (
-      <div className="scroll page">
-        <div className="page-title">Settings</div>
+  const settingsHead = (
+    <div className="head">
+      <div>
+        <h1>Settings</h1>
+        <div className="sub">Keep Piggy private, honest, and reversible.</div>
       </div>
-    );
+    </div>
+  );
+
+  if (!settings) {
+    return settingsHead;
   }
 
   const holdoutPct = Math.round(settings.holdoutFraction * 100);
 
   return (
-    <div className="scroll page">
-      <div className="page-title">Settings</div>
+    <>
+      {settingsHead}
 
-      <div className="rows" style={{ marginTop: 6 }}>
+      <div className="rows">
         <div className="setrow">
           <div className="smeta">
             <div className="sname">Holdout for measuring</div>
@@ -98,7 +103,7 @@ export function Settings() {
         <div className="setrow">
           <div className="smeta">
             <div className="sname">Open Piggy at login</div>
-            <div className="sdesc">Keeps your savings running in the menu bar.</div>
+            <div className="sdesc">Starts Piggy automatically so your savings keep running.</div>
           </div>
           <Switch
             on={settings.launchAtLogin}
@@ -123,11 +128,9 @@ export function Settings() {
       </div>
 
       <div className="sect">Reset</div>
-      <div style={{ margin: "0 12px" }}>
-        <button className="btn danger wide" onClick={() => setConfirmRestore(true)}>
-          Restore Defaults
-        </button>
-      </div>
+      <button className="btn danger wide" onClick={() => setConfirmRestore(true)}>
+        Restore Defaults
+      </button>
       {restoreMsg && <div className="foot-note">{restoreMsg}</div>}
 
       <div className="foot-note">
@@ -154,6 +157,6 @@ export function Settings() {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

@@ -72,3 +72,31 @@ function measuring(n: number): BadgeView {
     title: "Piggy is still gathering honest holdout data",
   };
 }
+
+export type StatusTone = "measured" | "estimated" | "measuring" | "nodata" | "claimed";
+
+export interface StatusView {
+  label: string;
+  tone: StatusTone;
+  title: string;
+}
+
+/** A saver's status as a short WORD + tone (for the status chip): "Measured"
+ *  (holdout delta in hand), "Estimating" (observational), "Measuring" (holdout
+ *  in progress, n>0), or "No data" (nothing observed yet). Savings numbers are
+ *  shown separately — this is only the state. */
+export function statusView(b: Badge): StatusView {
+  if (b.kind === "measured" && b.delta != null) {
+    return { label: "Measured", tone: "measured", title: `Measured across ${b.n} sessions vs. a holdout` };
+  }
+  if (b.kind === "estimated" && b.delta != null) {
+    return { label: "Estimating", tone: "estimated", title: `Estimated from ${b.n} sessions of your history` };
+  }
+  if (b.kind === "claimed") {
+    return { label: "Claimed", tone: "claimed", title: "The author's own number — not yet measured" };
+  }
+  if (b.n > 0) {
+    return { label: "Measuring", tone: "measuring", title: `Gathering holdout data — ${b.n} session${b.n === 1 ? "" : "s"} so far` };
+  }
+  return { label: "No data", tone: "nodata", title: "No sessions observed yet" };
+}

@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
+import { PiggyMark } from "../components/PiggyMark";
 
 /** Shown when Claude Code isn't installed — friendly setup card. */
 export function NoClaude() {
   return (
     <div className="empty">
-      <div className="emoji">🐷</div>
+      <PiggyMark size={56} className="mark" />
       <div className="etitle">Piggy needs Claude Code</div>
       <div className="ebody">
         Piggy makes your Claude Code plan last longer by measuring and turning on token savers.
@@ -51,7 +52,7 @@ export function FirstRun() {
 
   return (
     <div className="empty">
-      {checking ? <div className="spinner" /> : <div className="emoji">🐷</div>}
+      {checking ? <div className="spinner" /> : <PiggyMark size={56} className="mark" />}
       <div className="etitle">{checking ? "Piggy is reading your history…" : "No sessions yet"}</div>
       <div className="ebody">
         {checking

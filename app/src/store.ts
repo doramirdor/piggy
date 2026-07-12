@@ -3,7 +3,7 @@ import { api } from "./ipc";
 import { errorBanner, toApiError, type Banner } from "./lib/errors";
 import type { Environment, Period, SaversState, StatsOverview } from "./types";
 
-export type Tab = "home" | "dashboard" | "discover" | "settings";
+export type Tab = "overview" | "savers" | "discover" | "proof" | "reports" | "settings";
 
 interface AppState {
   tab: Tab;
@@ -29,7 +29,7 @@ interface AppState {
 }
 
 export const useStore = create<AppState>((set, get) => ({
-  tab: "home",
+  tab: "overview",
   period: "week",
   env: null,
   stats: null,

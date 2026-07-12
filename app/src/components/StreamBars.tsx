@@ -4,10 +4,10 @@ import { formatTokens } from "../lib/format";
 // Four-stream palette from the mockup. cacheRead uses a neutral gray (instead of
 // the mockup's translucent white) so the swatch stays visible in light mode too.
 const COLORS = {
-  input: "#0a84ff",
-  output: "#5e5ce6",
-  cacheWrite: "#30d158",
-  cacheRead: "#8e8e93",
+  input: "#3b82f6",
+  output: "#8b5cf6",
+  cacheWrite: "#22c55e",
+  cacheRead: "#6b7280",
 };
 
 export function StreamBars({ streams, tall }: { streams: Streams; tall?: boolean }) {

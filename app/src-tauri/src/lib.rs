@@ -1,8 +1,10 @@
-//! Piggy — the Tauri v2 menu bar application.
+//! Piggy — the Tauri v2 desktop application.
 //!
-//! Tray-only (no dock icon): a 360×600 undecorated, transparent, popover-vibrancy
-//! popover anchored under the menu-bar pig glyph. The Rust side links
-//! `piggy-core` directly and exposes the [`commands`] surface to the React UI.
+//! A regular windowed macOS app (940×660, resizable, overlay title bar) with a
+//! Dock icon and a companion menu-bar tray icon that re-opens the window.
+//! Closing the window hides it and keeps the background daemon running. The Rust
+//! side links `piggy-core` directly and exposes the [`commands`] surface to the
+//! React UI.
 //! A background [`piggy_core::SessionWatcher`] snapshot-tags new sessions,
 //! incrementally re-indexes on change, steps the rotation scheduler when a
 //! session goes idle, and emits `piggy://stats-updated` so the panel and
@@ -14,7 +16,7 @@ mod tray;
 
 use std::time::Duration;
 
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, WindowEvent};
 
 /// Event emitted whenever the token index changes (new/updated sessions) or a
 /// rotation step lands.
@@ -65,29 +67,20 @@ pub fn run() {
             commands::open_external,
         ])
         .on_window_event(|window, event| {
-            // Popover behaviour: hide when focus is lost (click-away), like a
-            // native NSPanel menu extra.
-            if let WindowEvent::Focused(false) = event {
+            // Desktop-window behaviour: closing the window keeps Piggy running
+            // (background measurement + tray) rather than quitting — the tray
+            // icon reopens it. Standard macOS menu-utility pattern.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
                 let _ = window.hide();
             }
         })
         .setup(|app| {
-            // Tray-only: no dock icon on macOS.
+            // Regular activation: Piggy is a normal windowed app with a Dock icon.
             #[cfg(target_os = "macos")]
             {
                 use tauri::ActivationPolicy;
-                app.set_activation_policy(ActivationPolicy::Accessory);
-            }
-
-            // Popover vibrancy + rounded corners on the panel window. Popover
-            // (unlike HudWindow, which is always dark) follows the system
-            // light/dark appearance, matching the CSS prefers-color-scheme split.
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                if let Some(win) = app.get_webview_window("panel") {
-                    let _ = apply_vibrancy(&win, NSVisualEffectMaterial::Popover, None, Some(14.0));
-                }
+                app.set_activation_policy(ActivationPolicy::Regular);
             }
 
             tray::setup(app)?;

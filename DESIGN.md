@@ -65,22 +65,25 @@ scripts/         # verify-against-jq.sh etc.
   `~/.claude/settings.json` (hooks/plugins), `~/.claude.json` → `projects.<path>.mcpServers`,
   `~/.claude/plugins/installed_plugins.json`.
 
-### GUI (M4) — Apple-native direction
-- Tauri v2 tray app, no dock icon, NSPanel-style popover feel. React + Tailwind.
-- **Design language:** macOS native, not web-app. SF Pro system font stack
-  (`-apple-system`), translucent vibrancy background (Tauri window effects: `hudWindow` /
-  `popover` material), 13px base type, native-feeling toggle switches (44×26 green pills),
-  hairline separators (0.5px), SF Symbols-style icons, dark mode default + light support,
-  spring animations ≤200ms, no scrollbars visible until scroll.
-- Menu bar item: piggy glyph + today's savings % (template image, adapts to menu bar theme).
-- Panel layout (360×~560): header (Piggy + today's tokens) → master switch card ("Save
-  everything") → saver rows (toggle · plain label · measured badge `measured 22% · 41
-  sessions` or `not enough data yet` · behavior-change warning dot) → footer tabs:
-  Dashboard / Discovered / Settings.
-- Dashboard: headline "Your plan lasts **N.N× longer**" (measured), stream breakdown bars,
-  attribution table, sweep recommendations.
-- Share card: 1200×630 PNG, dark, big number, "measured with holdout · Piggy" footer,
-  Copy/Save buttons. Growth loop — must look great.
+### GUI (M4) — Apple-native desktop window
+- Tauri v2 **desktop window** (940×660, resizable, macOS Overlay title bar, Dock icon) with a
+  companion menu-bar tray glyph that shows/hides it. Closing the window hides it and keeps the
+  background daemon running. React + Tailwind. *(Superseded the original 360×600 tray popover —
+  see the app icon + product mockups; the sidebar layout carries the brand.)*
+- **Design language:** macOS native, not web-app. SF Pro system font stack (`-apple-system`),
+  solid dark surface (`--bg #0f151b`) with the blueprint/brand personality in the piggy mark and
+  hero cards, native-feeling toggle switches, hairline separators (0.5px), SF-Symbols-style line
+  icons, dark mode default + light support, spring animations ≤200ms, no scrollbars until scroll.
+- Layout: left **sidebar** (Piggy mark + wordmark → nav: Overview / Savers / Discover / Proof /
+  Settings → Claude-connection status) and a scrolling **content** column (max-width ~720).
+- **Overview:** greeting + "Your plan lasts **N.N× longer**" hero (measured, radial-green glow +
+  stream bars) → Tokens-saved / Money-avoided metric grid → sweep hint → recent-proof feed.
+- **Savers:** master "Save everything" card → saver rows (icon · plain label · measured/estimated
+  badge · behavior-change warn dot · toggle).
+- **Proof:** period picker → hero → totals/cost metric grid → per-saver attribution → Share.
+- **Discover:** two-column card grid; author claims labelled, never Piggy's measurements.
+- Share card: 2400×1260 PNG, dark, vector piggy mark + big number, "measured with holdout · Piggy"
+  footer, Copy/Save buttons. Growth loop — must look great.
 
 ## Dependency policy (head-approved)
 
