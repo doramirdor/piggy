@@ -43,6 +43,12 @@ pub fn state_path() -> PathBuf {
     piggy_home().join("state.json")
 }
 
+/// Path to the cached saver-discovery results (`discovered.json`), refreshed at
+/// most once a day from GitHub search. `<piggy_home>/discovered.json`.
+pub fn discovered_path() -> PathBuf {
+    piggy_home().join("discovered.json")
+}
+
 /// Directory where Sweep parks disabled skills for reversible restore.
 /// `<piggy_home>/disabled`.
 pub fn disabled_dir() -> PathBuf {

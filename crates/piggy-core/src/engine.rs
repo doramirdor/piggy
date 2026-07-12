@@ -255,10 +255,26 @@ pub fn uninstall(catalog: &Catalog, id: &str) -> Result<ActionReport> {
     })
 }
 
-/// Toggle a saver on or off without uninstalling it (the fast A/B path).
+/// Toggle a saver on or off without uninstalling it (the fast A/B path),
+/// recording the toggle as `manual` — i.e. an explicit user choice, which pauses
+/// rotation for this saver. Rotation uses [`set_enabled_src`] with a non-manual
+/// source instead.
+///
 /// Hook savers remove/re-add their owned hooks; plugin savers disable/enable via
 /// the `claude` CLI; the binary/plugin stays installed either way.
 pub fn set_enabled(catalog: &Catalog, id: &str, on: bool) -> Result<ActionReport> {
+    set_enabled_src(catalog, id, on, crate::store::source::MANUAL)
+}
+
+/// As [`set_enabled`], but records `source` (`manual` / `rotation` / `holdout`)
+/// so the attribution layer knows who last flipped this saver. A `manual` source
+/// pauses rotation for the saver; `rotation`/`holdout` are the scheduler.
+pub fn set_enabled_src(
+    catalog: &Catalog,
+    id: &str,
+    on: bool,
+    source: &str,
+) -> Result<ActionReport> {
     let entry = catalog
         .get(id)
         .ok_or_else(|| anyhow!("no saver named '{id}' in the registry"))?;
@@ -271,6 +287,14 @@ pub fn set_enabled(catalog: &Catalog, id: &str, on: bool) -> Result<ActionReport
     let mut messages = Vec::new();
 
     if saver.enabled == on {
+        // Already in the requested state — but still record who asked, so a
+        // manual "confirm on/off" pins the saver against rotation.
+        if let Some(s) = state.savers.get_mut(id) {
+            if s.last_toggle_source.as_deref() != Some(source) {
+                s.last_toggle_source = Some(source.to_string());
+                state.save()?;
+            }
+        }
         messages.push(format!(
             "'{id}' is already {}",
             if on { "on" } else { "off" }
@@ -345,6 +369,7 @@ pub fn set_enabled(catalog: &Catalog, id: &str, on: bool) -> Result<ActionReport
 
     if let Some(s) = state.savers.get_mut(id) {
         s.enabled = on;
+        s.last_toggle_source = Some(source.to_string());
     }
     state.save()?;
     messages.push(format!(
@@ -533,6 +558,8 @@ impl From<SaverStateBuilder> for SaverState {
             injected_hooks: b.injected_hooks,
             installed_files: b.installed_files,
             pre_install_backup: b.pre_install_backup,
+            // Freshly installed: enabled as-installed, never explicitly toggled.
+            last_toggle_source: None,
         }
     }
 }

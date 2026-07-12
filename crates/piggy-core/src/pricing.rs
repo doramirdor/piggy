@@ -106,6 +106,23 @@ impl Pricing {
         Some(dollars / PER_MTOK)
     }
 
+    /// Plan-metered spend for the streams that count against a usage plan:
+    /// input + output + cache creation (5-minute and 1-hour writes at their
+    /// multipliers). Cache **reads** are deliberately excluded — the measurement
+    /// doc excludes the cheap read stream from the "spend" weighting used for the
+    /// headline multiplier. `None` if the model has no price (never guessed).
+    pub fn plan_metered_spend(&self, model: &str, t: &ModelTokens) -> Option<f64> {
+        let p = self.price_for(model)?;
+        let write_5m = t
+            .cache_creation_tokens
+            .saturating_sub(t.cache_creation_1h_tokens);
+        let dollars = t.input_tokens as f64 * p.input
+            + t.output_tokens as f64 * p.output
+            + write_5m as f64 * (CACHE_WRITE_5M_MULT * p.input)
+            + t.cache_creation_1h_tokens as f64 * (CACHE_WRITE_1H_MULT * p.input);
+        Some(dollars / PER_MTOK)
+    }
+
     /// Number of models in the table (used by diagnostics).
     pub fn model_count(&self) -> usize {
         self.models.len()

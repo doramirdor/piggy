@@ -13,13 +13,15 @@
 //!   * `backups` — list the settings.json backups Piggy has taken.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
-    config, engine, parse_file, run_index, stats::Totals, sweep, Catalog, Period, PiggyState,
-    Pricing, Store,
+    attribution::{self, Badge, HeadlineBaseline},
+    config, discovery, engine, parse_file, run_index,
+    stats::Totals,
+    sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
 
 #[derive(Parser)]
@@ -91,6 +93,36 @@ enum Cmd {
     RestoreDefaults,
     /// List the settings.json backups Piggy has taken.
     Backups,
+    /// Measured savings: per-saver attribution table + honest headline.
+    Report {
+        #[arg(long)]
+        json: bool,
+    },
+    /// View or change the holdout fraction (the share of sessions run all-off).
+    Holdout {
+        /// Set the holdout fraction (0.0–0.5), e.g. `--fraction 0.1`.
+        #[arg(long, value_name = "N")]
+        fraction: Option<f64>,
+        /// Turn the live holdout on (badges become measured once data arrives).
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        /// Turn the live holdout off (badges fall back to observational).
+        #[arg(long)]
+        off: bool,
+    },
+    /// Show token-savers discovered on GitHub (cached; `--refresh` forces a pull).
+    Discover {
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Watch the projects dir and index + tag new sessions live (foreground).
+    Watch {
+        /// Process a single batch of events and exit (default: loop forever).
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -143,12 +175,44 @@ fn main() -> Result<()> {
         } => cmd_sweep(apply, sessions, json),
         Cmd::RestoreDefaults => cmd_restore_defaults(),
         Cmd::Backups => cmd_backups(),
+        Cmd::Report { json } => cmd_report(json),
+        Cmd::Holdout { fraction, on, off } => cmd_holdout(fraction, on, off),
+        Cmd::Discover { refresh, json } => cmd_discover(refresh, json),
+        Cmd::Watch { once } => cmd_watch(once),
     }
 }
 
 // ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
+
+/// Per-saver "Measured" column labels for `piggy list`, computed from the same
+/// attribution engine `piggy report` uses so the two commands never disagree.
+/// Best-effort: a saver with no session data (or an unreadable store) simply
+/// keeps the honest "not enough data yet" default.
+fn measured_labels() -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let home = config::piggy_home();
+    let Ok(store) = Store::open(&home) else {
+        return out;
+    };
+    let pricing = Pricing::load(&home);
+    let seed = time_seed();
+    let Ok(ids) = store.tagged_saver_ids() else {
+        return out;
+    };
+    for id in ids {
+        if let Ok(a) = attribution::attribute(&store, &pricing, &id, seed) {
+            if let Some(o) = a.output() {
+                // Only surface a non-default label once there's a real figure or
+                // an explicit measuring count; the output stream is the headline
+                // per-saver number, matching `piggy report`.
+                out.insert(id.clone(), stream_result(o));
+            }
+        }
+    }
+    out
+}
 
 fn cmd_list(json: bool) -> Result<()> {
     let catalog = Catalog::embedded();
@@ -182,6 +246,8 @@ fn cmd_list(json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Real per-saver measurement, so this column agrees with `piggy report`.
+    let measured = measured_labels();
     let headers = ["", "Saver", "What it does", "State", "Measured", "Claimed"];
     let rows: Vec<Vec<String>> = catalog
         .ordered()
@@ -202,8 +268,10 @@ fn cmd_list(json: bool) -> Result<()> {
                     .clone()
                     .unwrap_or_else(|| e.description.clone()),
                 state_label.to_string(),
-                // Measured deltas arrive in M3; until then, be honest.
-                "not enough data yet".to_string(),
+                measured
+                    .get(&e.id)
+                    .cloned()
+                    .unwrap_or_else(|| "not enough data yet".to_string()),
                 e.claimed_savings.clone().unwrap_or_else(|| "-".into()),
             ]
         })
@@ -475,7 +543,22 @@ fn cmd_index(full: bool) -> Result<()> {
     let rep = run_index(&mut store, &pricing, &projects, full)?;
     let secs = start.elapsed().as_secs_f64();
 
+    // Anchor the pre-install baseline the first time we index, then backfill the
+    // `pre_install` tag onto every session that predates Piggy.
+    let mut state = PiggyState::load()?;
+    if state.ensure_created_at() {
+        state.save()?;
+    }
+    let catalog = Catalog::embedded();
+    let tagged = piggy_core::tagging::tag_pre_install_baseline(&mut store, &state, &catalog)?;
+
     println!("indexed {} in {:.2}s", projects.display(), secs);
+    if tagged > 0 {
+        println!(
+            "  tagged {} pre-Piggy session(s) as the measurement baseline",
+            commafy(tagged as u64)
+        );
+    }
     println!(
         "  files: {} scanned, {} updated, {} skipped{}",
         commafy(rep.scanned),
@@ -846,6 +929,364 @@ fn cmd_parse(file: &Path, json: bool) -> Result<()> {
                 commafy(t.cache_creation_1h_tokens),
                 commafy(t.cache_read_tokens),
             );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// report (measured attribution)
+// ---------------------------------------------------------------------------
+
+/// A time-derived bootstrap seed for production runs (tests pass a fixed one).
+fn time_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1
+}
+
+fn cmd_report(json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let pricing = Pricing::load(&home);
+    let store = Store::open(&home)?;
+    let seed = time_seed();
+
+    let hl = attribution::headline(&store, &pricing, seed)?;
+    let saver_ids = store.tagged_saver_ids()?;
+    let mut attribs = Vec::new();
+    for id in &saver_ids {
+        attribs.push(attribution::attribute(&store, &pricing, id, seed)?);
+    }
+
+    if json {
+        let out = serde_json::json!({
+            "headline": headline_json(&hl),
+            "savers": attribs.iter().map(saver_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    // ---- Headline block --------------------------------------------------
+    // The banner must not claim "holdout-based" when there is no live holdout.
+    match hl.baseline {
+        HeadlineBaseline::Holdout => println!("Piggy report — measured savings (holdout-based)"),
+        HeadlineBaseline::PreInstall => println!(
+            "Piggy report — estimated savings (observational pre-install baseline, no live holdout yet)"
+        ),
+        HeadlineBaseline::None => println!("Piggy report — not enough data yet"),
+    }
+    println!();
+    let baseline_label = match hl.baseline {
+        HeadlineBaseline::Holdout => "holdout",
+        HeadlineBaseline::PreInstall => "pre-install history",
+        HeadlineBaseline::None => "—",
+    };
+    if hl.baseline == HeadlineBaseline::None {
+        println!("Headline: not enough data yet — need holdout or pre-install sessions.");
+    } else {
+        println!(
+            "Headline (full-on {} vs {} {} sessions):",
+            hl.n_full_on, baseline_label, hl.n_baseline
+        );
+        let per_turn_label = match hl.baseline {
+            HeadlineBaseline::Holdout => "  measured per-turn savings:",
+            _ => "  estimated per-turn savings (observational baseline):",
+        };
+        println!("{per_turn_label}");
+        for s in &hl.streams {
+            // Cache read is the cheap stream; keep it but de-emphasise below output.
+            // Per docs UI copy: show the backing session count on the number line.
+            println!("    {:<12}{}", s.stream.label(), stream_result_with_n(s));
+        }
+        match hl.multiplier {
+            Some(m) if hl.n_full_on > 0 => {
+                println!();
+                println!("  Your plan lasts {m:.1}× longer  (estimated — price-weighted, cache reads excluded)");
+            }
+            _ => {}
+        }
+        if hl.baseline == HeadlineBaseline::PreInstall {
+            println!(
+                "  note: baseline is pre-install history (observational — no live holdout yet)."
+            );
+        }
+    }
+
+    // ---- Per-saver attribution table -------------------------------------
+    println!();
+    if attribs.is_empty() {
+        println!("No per-saver data yet. Run sessions with savers rotating on and off.");
+        return Ok(());
+    }
+    println!("Per-saver attribution (measured, per-turn rates)");
+    let headers = ["Saver", "Stream", "Result", "90% CI", "On", "Off"];
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for a in &attribs {
+        for (i, s) in a.streams.iter().enumerate() {
+            rows.push(vec![
+                if i == 0 {
+                    a.saver_id.clone()
+                } else {
+                    String::new()
+                },
+                s.stream.label().to_string(),
+                stream_result(s),
+                ci_cell(s),
+                s.n_on.to_string(),
+                s.n_off.to_string(),
+            ]);
+        }
+    }
+    render_table(&headers, &rows);
+    println!();
+    println!(
+        "measured = bootstrap CI excludes zero (positive width, family-corrected across the 4 \
+         streams), ≥{} randomized sessions per side; interval shown is 90%.",
+        attribution::MIN_GROUP
+    );
+    println!(
+        "estimated = same math against the observational pre-install baseline (no live holdout yet)."
+    );
+    println!("the × multiplier is estimated (uses price weights).");
+    // Flag any pre-install (observational) OFF sessions. These never count
+    // toward a measured badge — they are only a fallback for an `estimated`
+    // figure when randomized OFF data is short.
+    for a in &attribs {
+        if let Some(n) = a.off_by_source.get("pre_install") {
+            if *n > 0 {
+                println!(
+                    "  {}: {} pre-install (observational) OFF sessions — never used for a measured badge.",
+                    a.saver_id, n
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A measured/estimated/measuring result cell for one stream.
+fn stream_result(s: &piggy_core::StreamStat) -> String {
+    let word = match s.badge {
+        Badge::Measured => "measured",
+        Badge::Estimated => "estimated",
+        Badge::Measuring => return format!("not enough data yet (+{})", s.n_on.min(s.n_off)),
+    };
+    let pct = s.delta.unwrap_or(0.0) * 100.0;
+    if pct >= 0.0 {
+        format!("{word} {:.0}% less", pct)
+    } else {
+        format!("{word} {:.0}% more", -pct)
+    }
+}
+
+/// Like [`stream_result`] but appends the backing session count, per the docs'
+/// UI copy rule (`measured 22% · 41 sessions`). Used on the headline lines,
+/// where the per-side On/Off columns of the saver table aren't present.
+fn stream_result_with_n(s: &piggy_core::StreamStat) -> String {
+    let base = stream_result(s);
+    if s.badge.shows_number() {
+        format!("{base} · {} sessions", s.n_on + s.n_off)
+    } else {
+        base
+    }
+}
+
+/// The confidence-interval cell (only meaningful once a number is shown).
+fn ci_cell(s: &piggy_core::StreamStat) -> String {
+    match (s.badge.shows_number(), s.ci) {
+        (true, Some((lo, hi))) => format!("[{:.0}%, {:.0}%]", lo * 100.0, hi * 100.0),
+        _ => "-".to_string(),
+    }
+}
+
+fn headline_json(hl: &piggy_core::Headline) -> serde_json::Value {
+    serde_json::json!({
+        "baseline": match hl.baseline {
+            HeadlineBaseline::Holdout => "holdout",
+            HeadlineBaseline::PreInstall => "pre_install",
+            HeadlineBaseline::None => "none",
+        },
+        "observational": hl.baseline == HeadlineBaseline::PreInstall,
+        "nFullOn": hl.n_full_on,
+        "nBaseline": hl.n_baseline,
+        "multiplier": hl.multiplier,
+        "multiplierEstimated": true,
+        "streams": hl.streams.iter().map(stream_json).collect::<Vec<_>>(),
+    })
+}
+
+fn saver_json(a: &piggy_core::SaverAttribution) -> serde_json::Value {
+    serde_json::json!({
+        "saver": a.saver_id,
+        "nOn": a.n_on,
+        "nOff": a.n_off,
+        "offBySource": a.off_by_source,
+        "streams": a.streams.iter().map(stream_json).collect::<Vec<_>>(),
+    })
+}
+
+fn stream_json(s: &piggy_core::StreamStat) -> serde_json::Value {
+    serde_json::json!({
+        "stream": s.stream.label(),
+        "badge": match s.badge {
+            Badge::Measured => "measured",
+            Badge::Estimated => "estimated",
+            Badge::Measuring => "measuring",
+        },
+        "measured": s.badge == Badge::Measured,
+        "estimated": s.badge == Badge::Estimated,
+        // Point figure shown for both measured and estimated; null while measuring.
+        "deltaPct": s.shown_pct(),
+        "ci": s.ci.map(|(lo, hi)| [lo * 100.0, hi * 100.0]),
+        "nOn": s.n_on,
+        "nOff": s.n_off,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// holdout
+// ---------------------------------------------------------------------------
+
+fn cmd_holdout(fraction: Option<f64>, on: bool, off: bool) -> Result<()> {
+    let mut state = PiggyState::load()?;
+    let mut changed = false;
+    if let Some(f) = fraction {
+        if !(0.0..=0.5).contains(&f) {
+            bail!("holdout fraction must be between 0.0 and 0.5 (got {f})");
+        }
+        state.settings.holdout_fraction = f;
+        changed = true;
+    }
+    if on {
+        state.settings.holdout_enabled = true;
+        changed = true;
+    }
+    if off {
+        state.settings.holdout_enabled = false;
+        changed = true;
+    }
+    if changed {
+        state.ensure_created_at();
+        state.save()?;
+    }
+    println!(
+        "Holdout: {} · fraction {:.0}%",
+        if state.settings.holdout_enabled {
+            "on"
+        } else {
+            "off"
+        },
+        state.settings.holdout_fraction * 100.0
+    );
+    println!(
+        "Piggy occasionally runs a session with savers off to measure honestly. When off, badges say 'estimated'."
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// discover
+// ---------------------------------------------------------------------------
+
+fn cmd_discover(refresh: bool, json: bool) -> Result<()> {
+    let cache = discovery::discover(refresh)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cache)?);
+        return Ok(());
+    }
+    println!(
+        "Discovered token-savers (refreshed {}{})",
+        cache.refreshed_at,
+        if cache.stale {
+            " · stale, GitHub unavailable"
+        } else {
+            ""
+        }
+    );
+    if cache.repos.is_empty() {
+        println!("  (nothing found — try `piggy discover --refresh`)");
+        return Ok(());
+    }
+    let headers = ["Stars", "Repo", "What it is"];
+    let rows: Vec<Vec<String>> = cache
+        .repos
+        .iter()
+        .map(|r| {
+            let what = if r.listed_only {
+                "listed only — not installable".to_string()
+            } else {
+                r.description.clone().unwrap_or_default()
+            };
+            vec![
+                if r.listed_only {
+                    "—".to_string()
+                } else {
+                    commafy(r.stars)
+                },
+                r.full_name.clone(),
+                truncate(&what, 60),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+    // Exclusion reasons for listed-only tools.
+    let listed: Vec<_> = cache.repos.iter().filter(|r| r.listed_only).collect();
+    if !listed.is_empty() {
+        println!();
+        println!("Listed for transparency, never installed by Piggy:");
+        for r in listed {
+            println!(
+                "  {} — {}",
+                r.full_name,
+                r.exclusion_reason.as_deref().unwrap_or("(no reason given)")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// watch
+// ---------------------------------------------------------------------------
+
+fn cmd_watch(once: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let projects = config::claude_projects_dir();
+    let pricing = Pricing::load(&home);
+
+    // Anchor the pre-install baseline so live sessions are attributed correctly.
+    let mut state = PiggyState::load()?;
+    if state.ensure_created_at() {
+        state.save()?;
+    }
+
+    let mut watcher = SessionWatcher::new(projects.clone(), &home)?;
+    println!("watching {} (Ctrl-C to stop)…", projects.display());
+    loop {
+        let events = watcher.tick(Duration::from_secs(2), &pricing)?;
+        for e in &events {
+            println!(
+                "  {}  session {}{}",
+                e.path.display(),
+                e.session_id,
+                if e.newly_tagged { "  [tagged]" } else { "" }
+            );
+        }
+        if once {
+            break;
         }
     }
     Ok(())

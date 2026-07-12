@@ -1,0 +1,27 @@
+{
+  "total_count": 3,
+  "incomplete_results": false,
+  "items": [
+    {
+      "full_name": "rtk-ai/rtk",
+      "description": "Terminal output compression for coding agents",
+      "stargazers_count": 4200,
+      "html_url": "https://github.com/rtk-ai/rtk",
+      "topics": ["claude-code", "token-optimization"]
+    },
+    {
+      "full_name": "other/claude-tokens",
+      "description": "Cut Claude Code token usage with smart context pruning",
+      "stargazers_count": 1200,
+      "html_url": "https://github.com/other/claude-tokens",
+      "topics": ["claude-code", "token-optimization"]
+    },
+    {
+      "full_name": "someone/token-saver",
+      "description": "A little hook that trims tool output",
+      "stargazers_count": 500,
+      "html_url": "https://github.com/someone/token-saver",
+      "topics": ["claude-code"]
+    }
+  ]
+}

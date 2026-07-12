@@ -19,10 +19,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 walkdir = "2"
 dirs = "5"
 # Install-engine deps (head-approved for M2): download + verify + extract release assets.
+# Also used by M3 discovery (blocking GitHub search over rustls, JSON parsed via serde_json).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
+# M3 watcher: filesystem notifications on the Claude projects dir (head-approved).
+notify = "6"
 # Atomic temp-file+rename writes for settings.json / state.json (also used in tests).
 tempfile = "3"
 

@@ -1,0 +1,150 @@
+//! Filesystem watcher over the Claude projects directory (M3).
+//!
+//! When a new session `.jsonl` appears we must snapshot the enabled-saver set
+//! *at file-creation time* (the config cannot be changed once a session starts).
+//! On any create/modify we run an incremental index so the DB stays current.
+//!
+//! The watcher is exposed as a [`SessionWatcher`] the GUI can drive, plus the
+//! `piggy watch` CLI. It uses a **poll** watcher (deterministic across
+//! platforms, and reliable for tests) with a configurable interval; events are
+//! debounced so a streaming write burst collapses into one index pass.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+
+use crate::index::run_index;
+use crate::pricing::Pricing;
+use crate::state::PiggyState;
+use crate::store::Store;
+use crate::tagging::snapshot_new_session;
+
+/// Default poll interval for the production watcher.
+pub const DEFAULT_POLL: Duration = Duration::from_secs(2);
+/// After the first event, wait this long for the burst to settle before acting.
+const SETTLE: Duration = Duration::from_millis(120);
+
+/// What a [`SessionWatcher::tick`] did for one session file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchEvent {
+    pub path: PathBuf,
+    pub session_id: String,
+    /// True if this tick wrote the session's first saver-set snapshot (i.e. it
+    /// looked like a brand-new session).
+    pub newly_tagged: bool,
+}
+
+/// A live watcher over the projects directory. Owns its own [`Store`] handle.
+pub struct SessionWatcher {
+    // Field order matters for drop: the watcher must drop before the receiver.
+    _watcher: PollWatcher,
+    rx: Receiver<notify::Result<notify::Event>>,
+    projects_dir: PathBuf,
+    store: Store,
+}
+
+impl SessionWatcher {
+    /// Watch `projects_dir`, persisting into the DB under `home`. Uses
+    /// [`DEFAULT_POLL`].
+    pub fn new(projects_dir: PathBuf, home: &Path) -> Result<Self> {
+        Self::with_poll_interval(projects_dir, home, DEFAULT_POLL)
+    }
+
+    /// Watch with an explicit poll interval (tests use a short one).
+    pub fn with_poll_interval(
+        projects_dir: PathBuf,
+        home: &Path,
+        interval: Duration,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(&projects_dir)
+            .with_context(|| format!("creating {}", projects_dir.display()))?;
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = PollWatcher::new(
+            move |res| {
+                let _ = tx.send(res);
+            },
+            Config::default().with_poll_interval(interval),
+        )
+        .context("starting the filesystem poll watcher")?;
+        watcher
+            .watch(&projects_dir, RecursiveMode::Recursive)
+            .with_context(|| format!("watching {}", projects_dir.display()))?;
+        let store = Store::open(home)?;
+        Ok(SessionWatcher {
+            _watcher: watcher,
+            rx,
+            projects_dir,
+            store,
+        })
+    }
+
+    /// Block up to `max_wait` for filesystem activity, then snapshot-tag any new
+    /// sessions and run an incremental index. Returns one [`WatchEvent`] per
+    /// touched `.jsonl` (empty if nothing happened within `max_wait`).
+    pub fn tick(&mut self, max_wait: Duration, pricing: &Pricing) -> Result<Vec<WatchEvent>> {
+        let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+
+        // Wait for the first event (or give up after max_wait).
+        match self.rx.recv_timeout(max_wait) {
+            Ok(res) => collect(res, &mut paths),
+            Err(RecvTimeoutError::Timeout) => return Ok(Vec::new()),
+            Err(RecvTimeoutError::Disconnected) => return Ok(Vec::new()),
+        }
+        // Drain the rest of the burst.
+        while let Ok(res) = self.rx.recv_timeout(SETTLE) {
+            collect(res, &mut paths);
+        }
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Snapshot-tag new sessions from the *current* saver set, before indexing
+        // (the snapshot is a session-start fact, independent of parse results).
+        let state = PiggyState::load()?;
+        let mut events = Vec::new();
+        for path in &paths {
+            let session_id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                continue;
+            }
+            let newly_tagged = snapshot_new_session(&mut self.store, &state, &session_id)?;
+            events.push(WatchEvent {
+                path: path.clone(),
+                session_id,
+                newly_tagged,
+            });
+        }
+
+        // Incremental index so token aggregates reflect the new/changed files.
+        run_index(&mut self.store, pricing, &self.projects_dir, false)?;
+        Ok(events)
+    }
+
+    /// Read-only access to the underlying store (e.g. to query after a tick).
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+}
+
+/// Fold a notify result into the set of touched `.jsonl` paths.
+fn collect(res: notify::Result<notify::Event>, paths: &mut BTreeSet<PathBuf>) {
+    let Ok(event) = res else { return };
+    if !matches!(
+        event.kind,
+        notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Any
+    ) {
+        return;
+    }
+    for p in event.paths {
+        if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            paths.insert(p);
+        }
+    }
+}

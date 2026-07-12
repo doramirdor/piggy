@@ -46,6 +46,14 @@ pub struct PiggyState {
     /// `None` until Piggy has written once.
     #[serde(default)]
     pub settings_hash: Option<String>,
+    /// User-tunable measurement settings (M3), e.g. the holdout fraction.
+    #[serde(default)]
+    pub settings: Settings,
+    /// When Piggy first took ownership of this machine (RFC3339). Sessions that
+    /// started before this are the `pre_install` observational baseline. Set once,
+    /// the first time an M3 command runs against a state file that lacks it.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -60,6 +68,38 @@ impl Default for PiggyState {
             sweep_disabled: Vec::new(),
             backups: Vec::new(),
             settings_hash: None,
+            settings: Settings::default(),
+            created_at: None,
+        }
+    }
+}
+
+/// User-tunable measurement settings, persisted in `state.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    /// Fraction of rotation sessions that run with **all** savers off, so savings
+    /// are measured against a live holdout rather than only pre-install history.
+    #[serde(default = "default_holdout_fraction")]
+    pub holdout_fraction: f64,
+    /// When false, rotation never assigns a holdout session (badges fall back to
+    /// the observational pre-install baseline and are labelled `estimated`).
+    #[serde(default = "default_true")]
+    pub holdout_enabled: bool,
+}
+
+fn default_holdout_fraction() -> f64 {
+    0.1
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            holdout_fraction: default_holdout_fraction(),
+            holdout_enabled: true,
         }
     }
 }
@@ -85,6 +125,11 @@ pub struct SaverState {
     /// saver's first settings mutation — the byte-identical uninstall target.
     #[serde(default)]
     pub pre_install_backup: Option<String>,
+    /// Who last flipped this saver's on/off state: `manual` (the user, via the
+    /// GUI/CLI), `rotation`, or `holdout`. `manual` pauses rotation for this saver
+    /// (Piggy respects an explicit choice). `None` == as-installed, never toggled.
+    #[serde(default)]
+    pub last_toggle_source: Option<String>,
 }
 
 /// One Sweep-disabled item (MCP server / plugin / skill) plus what to restore.
@@ -161,5 +206,23 @@ impl PiggyState {
     /// Convenience: is a saver present in the ledger (installed, enabled or not)?
     pub fn is_installed(&self, id: &str) -> bool {
         self.savers.contains_key(id)
+    }
+
+    /// Stamp `created_at` with the current time if it is unset, returning `true`
+    /// if a change was made (so the caller can persist it). This anchors the
+    /// `pre_install` baseline: the first time any M3 command runs, every session
+    /// already on disk is treated as predating Piggy.
+    pub fn ensure_created_at(&mut self) -> bool {
+        if self.created_at.is_none() {
+            self.created_at = Some(chrono::Utc::now().to_rfc3339());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The install-anchor timestamp (RFC3339), if known.
+    pub fn install_time(&self) -> Option<&str> {
+        self.created_at.as_deref()
     }
 }

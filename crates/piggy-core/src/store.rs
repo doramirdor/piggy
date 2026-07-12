@@ -12,7 +12,35 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::parser::SessionParse;
 use crate::pricing::Pricing;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
+
+/// How a session's saver assignment came to be, stored in `session_savers.source`.
+/// `rotation`/`holdout` are Piggy's A/B scheduler; `manual` is a user toggle;
+/// `pre_install` marks sessions that predate Piggy (observational baseline).
+pub mod source {
+    pub const ROTATION: &str = "rotation";
+    pub const MANUAL: &str = "manual";
+    pub const HOLDOUT: &str = "holdout";
+    pub const PRE_INSTALL: &str = "pre_install";
+}
+
+/// One `(saver_id, enabled, source)` fact snapshotted for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaverTag {
+    pub saver_id: String,
+    pub enabled: bool,
+    pub source: String,
+}
+
+impl SaverTag {
+    pub fn new(saver_id: impl Into<String>, enabled: bool, source: impl Into<String>) -> Self {
+        SaverTag {
+            saver_id: saver_id.into(),
+            enabled,
+            source: source.into(),
+        }
+    }
+}
 
 /// Handle to the Piggy SQLite database.
 pub struct Store {
@@ -76,9 +104,23 @@ impl Store {
                 n          INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, tool_name)
             );
+            CREATE TABLE IF NOT EXISTS session_savers (
+                session_id TEXT NOT NULL,
+                saver_id   TEXT NOT NULL,
+                enabled    INTEGER NOT NULL DEFAULT 0,
+                source     TEXT NOT NULL,
+                PRIMARY KEY (session_id, saver_id)
+            );
+            CREATE TABLE IF NOT EXISTS rotation_state (
+                id           INTEGER PRIMARY KEY CHECK (id = 0),
+                block_pos    INTEGER NOT NULL DEFAULT 0,
+                planned_next TEXT,
+                updated_at   TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
             CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
-            CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);",
+            CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);
+            CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);",
         )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
@@ -219,6 +261,135 @@ impl Store {
             .conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, u64>(0))?;
         Ok(n)
+    }
+
+    // -----------------------------------------------------------------------
+    // Session tagging (session_savers) — M3 ground truth for A/B attribution
+    // -----------------------------------------------------------------------
+
+    /// Replace the saver-set snapshot for `session_id` with `tags`, atomically.
+    /// Passing an empty slice clears the session's tags.
+    pub fn set_session_savers(&mut self, session_id: &str, tags: &[SaverTag]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM session_savers WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        for t in tags {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_savers (session_id, saver_id, enabled, source)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![session_id, t.saver_id, t.enabled as i64, t.source],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The saver-set snapshot recorded for `session_id` (empty if untagged).
+    pub fn session_savers(&self, session_id: &str) -> Result<Vec<SaverTag>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT saver_id, enabled, source FROM session_savers
+             WHERE session_id = ?1 ORDER BY saver_id",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok(SaverTag {
+                saver_id: r.get::<_, String>(0)?,
+                enabled: r.get::<_, i64>(1)? != 0,
+                source: r.get::<_, String>(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Distinct saver ids that appear in any session snapshot (i.e. have
+    /// attribution data), sorted. Backs `piggy report` when nothing is currently
+    /// installed but historical A/B data exists.
+    pub fn tagged_saver_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT saver_id FROM session_savers ORDER BY saver_id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Whether `session_id` already has a saver-set snapshot.
+    pub fn has_session_savers(&self, session_id: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_savers WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Tag every **untagged** session that started before `cutoff` (an RFC3339
+    /// install-anchor timestamp) as the `pre_install` baseline: one `enabled=0`
+    /// row per id in `saver_ids`. Returns the number of sessions newly tagged.
+    ///
+    /// A session with a NULL `started_at` is left alone (we cannot prove it
+    /// predates Piggy). Idempotent: re-running skips sessions that already have
+    /// any tag (e.g. ones the watcher snapshotted live).
+    pub fn tag_pre_install(&mut self, cutoff: &str, saver_ids: &[String]) -> Result<usize> {
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT s.session_id FROM sessions s
+                 WHERE s.started_at IS NOT NULL AND s.started_at < ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM session_savers ss WHERE ss.session_id = s.session_id
+                   )",
+            )?;
+            let rows = stmt.query_map(params![cutoff], |r| r.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for row in rows {
+                v.push(row?);
+            }
+            v
+        };
+        let tags: Vec<SaverTag> = saver_ids
+            .iter()
+            .map(|id| SaverTag::new(id.clone(), false, source::PRE_INSTALL))
+            .collect();
+        for id in &ids {
+            self.set_session_savers(id, &tags)?;
+        }
+        Ok(ids.len())
+    }
+
+    // -----------------------------------------------------------------------
+    // Rotation state
+    // -----------------------------------------------------------------------
+
+    /// Load `(block_pos, planned_next_json)`; defaults to `(0, None)` if unset.
+    pub fn rotation_state(&self) -> Result<(i64, Option<String>)> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT block_pos, planned_next FROM rotation_state WHERE id = 0",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.unwrap_or((0, None)))
+    }
+
+    /// Persist the rotation cursor and the JSON of the next planned set.
+    pub fn set_rotation_state(&mut self, block_pos: i64, planned_next: Option<&str>) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO rotation_state (id, block_pos, planned_next, updated_at)
+             VALUES (0, ?1, ?2, ?3)",
+            params![block_pos, planned_next, now],
+        )?;
+        Ok(())
     }
 
     /// Verify the database is writable (used by `piggy doctor`).

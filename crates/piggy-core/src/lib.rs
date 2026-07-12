@@ -8,24 +8,36 @@
 //! The crate is UI-agnostic: the `piggy` CLI and (later) the Tauri app both
 //! link against it.
 
+pub mod attribution;
 pub mod config;
+pub mod discovery;
 pub mod engine;
 pub mod index;
 pub mod parser;
 pub mod pricing;
 pub mod registry;
+pub mod rng;
+pub mod rotation;
 pub mod settings;
 pub mod state;
 pub mod stats;
 pub mod store;
 pub mod sweep;
+pub mod tagging;
+pub mod watcher;
 
+pub use attribution::{
+    attribute, headline, Badge, Headline, HeadlineBaseline, SaverAttribution, Stream, StreamStat,
+};
+pub use discovery::{DiscoveredRepo, DiscoveryCache};
 pub use engine::{ActionReport, HealthReport};
 pub use index::{run_index, IndexReport};
 pub use parser::{parse_file, ModelTokens, SessionParse};
 pub use pricing::{ModelPrice, Pricing};
 pub use registry::{Catalog, Entry};
+pub use rotation::{RotationOutcome, RotationPlan};
 pub use state::PiggyState;
 pub use stats::{GroupRow, Period, Totals};
-pub use store::Store;
+pub use store::{SaverTag, Store};
 pub use sweep::{SweepItem, SweepReport};
+pub use watcher::{SessionWatcher, WatchEvent};
