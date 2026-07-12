@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo first — café ☕ 日本語"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo first — café ☕ 日本語"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "deep",
+            "extra": {
+              "level1": {
+                "level2": {
+                  "level3": ["ünïcödé", "🐷", { "k": "v" }]
+                }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": ["Bash(git status)", "Read(*)"],
+    "deny": []
+  },
+  "emojiKey🔑": "value with \"quotes\" and \\backslashes\\"
+}

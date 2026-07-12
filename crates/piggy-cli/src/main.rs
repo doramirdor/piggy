@@ -1,17 +1,26 @@
-//! `piggy` — measure Claude Code token usage from session logs.
+//! `piggy` — measure Claude Code token usage and manage token-saving add-ons.
 //!
 //! Subcommands:
 //!   * `index`  — scan `~/.claude/projects/**/*.jsonl` into the local DB.
 //!   * `stats`  — human tables (or `--json`) of token usage and estimated cost.
 //!   * `doctor` — environment / data-health checks.
 //!   * `parse`  — dump one file's parsed aggregate as JSON (the jq cross-check).
+//!   * `list`   — the saver catalog with on/off state and claimed savings.
+//!   * `install` / `remove` — turn a saver on (install) or fully off (uninstall).
+//!   * `on` / `off` — fast toggle without uninstalling (the A/B path).
+//!   * `sweep`  — find unused add-ons that cost tokens; `--apply N` disables one.
+//!   * `restore-defaults` — undo everything Piggy changed.
+//!   * `backups` — list the settings.json backups Piggy has taken.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use piggy_core::{config, parse_file, run_index, stats::Totals, Period, Pricing, Store};
+use piggy_core::{
+    config, engine, parse_file, run_index, stats::Totals, sweep, Catalog, Period, PiggyState,
+    Pricing, Store,
+};
 
 #[derive(Parser)]
 #[command(
@@ -51,6 +60,37 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List every saver and its on/off state.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn a saver on (download/enable + health check).
+    Install {
+        /// Saver id (e.g. `rtk`, `caveman`, `ponytail`).
+        saver: String,
+    },
+    /// Turn a saver fully off and remove it (reversible; restores settings.json).
+    Remove { saver: String },
+    /// Fast-enable an already-installed saver (no re-download).
+    On { saver: String },
+    /// Fast-disable a saver without uninstalling it (the A/B path).
+    Off { saver: String },
+    /// Find unused add-ons that cost tokens; `--apply N` disables item N.
+    Sweep {
+        /// Disable the item with this index from the scan (reversible).
+        #[arg(long, value_name = "N")]
+        apply: Option<usize>,
+        /// Look back over this many recent sessions for usage (default 50).
+        #[arg(long, value_name = "N")]
+        sessions: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Undo everything Piggy changed and restore settings.json to pre-Piggy.
+    RestoreDefaults,
+    /// List the settings.json backups Piggy has taken.
+    Backups,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -91,7 +131,327 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Parse { file, json } => cmd_parse(&file, json),
+        Cmd::List { json } => cmd_list(json),
+        Cmd::Install { saver } => cmd_install(&saver),
+        Cmd::Remove { saver } => cmd_remove(&saver),
+        Cmd::On { saver } => cmd_toggle(&saver, true),
+        Cmd::Off { saver } => cmd_toggle(&saver, false),
+        Cmd::Sweep {
+            apply,
+            sessions,
+            json,
+        } => cmd_sweep(apply, sessions, json),
+        Cmd::RestoreDefaults => cmd_restore_defaults(),
+        Cmd::Backups => cmd_backups(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// list
+// ---------------------------------------------------------------------------
+
+fn cmd_list(json: bool) -> Result<()> {
+    let catalog = Catalog::embedded();
+    let state = PiggyState::load()?;
+
+    if json {
+        let arr: Vec<serde_json::Value> = catalog
+            .ordered()
+            .iter()
+            .map(|e| {
+                let st = state.savers.get(&e.id);
+                serde_json::json!({
+                    "id": e.id,
+                    "name": e.name,
+                    "plainLabel": e.plain_label,
+                    "status": e.status,
+                    "installType": e.install_type,
+                    "installed": st.is_some(),
+                    "enabled": st.map(|s| s.enabled).unwrap_or(false),
+                    "installable": e.installable().is_ok() && e.has_install_steps(),
+                    "behaviorChanging": e.behavior_changing,
+                    "risk": e.risk,
+                    "claimedSavings": e.claimed_savings,
+                    "warning": e.warning,
+                    "license": e.license,
+                    "licenseNote": e.license_note,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+
+    let headers = ["", "Saver", "What it does", "State", "Measured", "Claimed"];
+    let rows: Vec<Vec<String>> = catalog
+        .ordered()
+        .iter()
+        .map(|e| {
+            let st = state.savers.get(&e.id);
+            let state_label = match st {
+                Some(s) if s.enabled => "on",
+                Some(_) => "off (installed)",
+                None if !e.has_install_steps() || e.installable().is_err() => "unavailable",
+                None => "available",
+            };
+            let dot = if e.behavior_changing { "!" } else { " " };
+            vec![
+                dot.to_string(),
+                format!("{} ({})", e.name, e.id),
+                e.plain_label
+                    .clone()
+                    .unwrap_or_else(|| e.description.clone()),
+                state_label.to_string(),
+                // Measured deltas arrive in M3; until then, be honest.
+                "not enough data yet".to_string(),
+                e.claimed_savings.clone().unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    println!("Savers ( ! = changes how Claude behaves )");
+    render_table(&headers, &rows);
+    println!();
+    println!(
+        "measured = Piggy's own holdout measurement (arrives once you've run enough sessions)."
+    );
+    println!("claimed  = the author's number; treat as marketing until measured.");
+
+    // License labels (the catalog promises Piggy shows these before install).
+    let mut header_printed = false;
+    for e in catalog.ordered() {
+        if let Some(note) = &e.license_note {
+            if !header_printed {
+                println!();
+                println!("license notes (shown before you turn one on):");
+                header_printed = true;
+            }
+            println!("  {} ({}): {}", e.name, e.license, note);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// install / remove / on / off
+// ---------------------------------------------------------------------------
+
+fn cmd_install(saver: &str) -> Result<()> {
+    let catalog = Catalog::embedded();
+    // Show the license (and any source-available caveat) before turning it on.
+    if let Some(entry) = catalog.get(saver) {
+        let license = if entry.license.is_empty() {
+            "(unspecified)"
+        } else {
+            entry.license.as_str()
+        };
+        println!("License: {license}");
+        if let Some(note) = &entry.license_note {
+            println!("  {note}");
+        }
+    }
+    let report = engine::install(&catalog, saver)?;
+    print_action(&report);
+    if report.rolled_back {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_remove(saver: &str) -> Result<()> {
+    let catalog = Catalog::embedded();
+    let report = engine::uninstall(&catalog, saver)?;
+    print_action(&report);
+    Ok(())
+}
+
+fn cmd_toggle(saver: &str, on: bool) -> Result<()> {
+    let catalog = Catalog::embedded();
+    let report = engine::set_enabled(&catalog, saver, on)?;
+    print_action(&report);
+    Ok(())
+}
+
+fn print_action(report: &engine::ActionReport) {
+    for m in &report.messages {
+        println!("{m}");
+    }
+    if let Some(h) = &report.health {
+        for (desc, passed, detail) in &h.checks {
+            let mark = if *passed { "ok" } else { "FAIL" };
+            println!("  [{mark}] {desc} — {detail}");
+        }
+    }
+    for w in &report.warnings {
+        println!("  note: {w}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sweep
+// ---------------------------------------------------------------------------
+
+fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let store = Store::open(&home)?;
+    let n = sessions.unwrap_or(sweep::DEFAULT_N_SESSIONS);
+
+    if let Some(idx) = apply {
+        let mut state = PiggyState::load()?;
+        let id = sweep::apply(&store, &mut state, idx, n)?;
+        println!("disabled #{idx} ({id}). Reverse it any time with `piggy restore-defaults`.");
+        return Ok(());
+    }
+
+    let report = sweep::scan(&store, n)?;
+    if json {
+        let arr: Vec<serde_json::Value> = report
+            .items
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "idx": i.idx,
+                    "kind": i.kind,
+                    "id": i.id,
+                    "source": i.source,
+                    "used": i.used,
+                    // Whether `used` is a windowed session count (MCP) or a
+                    // lifetime total (plugin/skill) or not measurable (hook).
+                    "usedScope": match i.kind.as_str() {
+                        "mcp" => "window",
+                        "hook" => "n/a",
+                        _ => "lifetime",
+                    },
+                    "estTokens": i.est_tokens,
+                    "estimated": true,
+                    "recommendDisable": i.recommend_disable,
+                    "reason": i.reason,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "sessionsConsidered": report.sessions_considered,
+            "estRecoverableTokens": report.est_recoverable_tokens(),
+            "estimated": true,
+            "items": arr,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!(
+        "Sweep — usage over the last {} session(s)",
+        report.sessions_considered
+    );
+    if report.items.is_empty() {
+        println!("  found no plugins, MCP servers, or skills to check.");
+        return Ok(());
+    }
+    let headers = ["#", "Kind", "Add-on", "Used", "Est. tokens", "Suggestion"];
+    let rows: Vec<Vec<String>> = report
+        .items
+        .iter()
+        .map(|i| {
+            vec![
+                i.idx.to_string(),
+                i.kind.clone(),
+                i.id.clone(),
+                commafy(i.used),
+                format!("~{}", commafy(i.est_tokens)),
+                if i.recommend_disable {
+                    format!("turn off — {}", i.reason)
+                } else {
+                    "keep".to_string()
+                },
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+    println!();
+    let rec = report.recommended().count();
+    if rec > 0 {
+        println!(
+            "{rec} unused add-on(s), ~{} tokens/session (estimated). Turn one off: `piggy sweep --apply <#>`.",
+            commafy(report.est_recoverable_tokens())
+        );
+    } else {
+        println!("everything here is in use — nothing to sweep.");
+    }
+    println!("token costs are estimates (config-size heuristic), not measured.");
+    println!(
+        "MCP usage is over the last {} session(s); plugin/skill usage is a lifetime total (Claude Code keeps no per-session count for those); hooks are informational.",
+        report.sessions_considered
+    );
+    if report.recommended().any(|i| i.kind == "mcp") {
+        println!(
+            "note: a project you use only occasionally can fall outside a {}-session window — if an MCP server you rely on was flagged, re-run with a wider `--sessions <N>`.",
+            report.sessions_considered
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// restore-defaults / backups
+// ---------------------------------------------------------------------------
+
+fn cmd_restore_defaults() -> Result<()> {
+    let report = engine::restore_defaults()?;
+    for m in &report.messages {
+        println!("{m}");
+    }
+    if report.byte_restored {
+        println!("your Claude settings are back exactly as they were before Piggy.");
+    }
+    Ok(())
+}
+
+fn cmd_backups() -> Result<()> {
+    let dir = config::backups_dir();
+    let pre = dir.join("pre-piggy.json");
+    if pre.exists() {
+        let size = std::fs::metadata(&pre).map(|m| m.len()).unwrap_or(0);
+        println!(
+            "Restore Defaults target: {} ({} bytes)",
+            pre.display(),
+            commafy(size)
+        );
+    } else {
+        println!("no pre-Piggy backup yet (Piggy hasn't written settings.json).");
+    }
+    let mut entries: Vec<(PathBuf, u64)> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("settings-") && n.ends_with(".json"))
+                    .unwrap_or(false)
+            })
+            .map(|p| {
+                let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (p, sz)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    entries.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    println!();
+    println!("Timestamped backups ({} kept):", entries.len());
+    if entries.is_empty() {
+        println!("  (none yet)");
+    }
+    for (p, sz) in entries.iter().take(20) {
+        println!(
+            "  {}  ({} bytes)",
+            p.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            commafy(*sz)
+        );
+    }
+    if entries.len() > 20 {
+        println!("  … and {} more", entries.len() - 20);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +766,42 @@ fn cmd_doctor() -> Result<bool> {
             println!("⚠️  database not writable at {}: {e}", home.display());
             ok = false;
         }
+    }
+
+    // 6. Health of active savers (spec: health checks also run on `piggy doctor`).
+    let catalog = Catalog::embedded();
+    match PiggyState::load() {
+        Ok(state) => {
+            let enabled: Vec<&String> = state
+                .savers
+                .iter()
+                .filter(|(_, s)| s.enabled)
+                .map(|(id, _)| id)
+                .collect();
+            if enabled.is_empty() {
+                println!("✅ no active savers to health-check");
+            }
+            for id in enabled {
+                match engine::health_check(&catalog, id) {
+                    Ok(h) if h.ok() => println!("✅ saver '{id}' healthy"),
+                    Ok(h) => {
+                        ok = false;
+                        let failed: Vec<String> = h
+                            .checks
+                            .iter()
+                            .filter(|(_, passed, _)| !passed)
+                            .map(|(desc, _, detail)| format!("{desc} ({detail})"))
+                            .collect();
+                        println!("⚠️  saver '{id}' unhealthy: {}", failed.join("; "));
+                    }
+                    Err(e) => {
+                        ok = false;
+                        println!("⚠️  saver '{id}' health check errored: {e}");
+                    }
+                }
+            }
+        }
+        Err(e) => println!("⚠️  could not read Piggy state for saver health checks: {e}"),
     }
 
     println!();

@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/dor/.local/share/fnm/node-versions/v24.16.0/installation/bin/node\" \"/Users/dor/Documents/code/tab/bin/openbar.js\" hook --tool claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "runway-api@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {},
+  "skipDangerousModePermissionPrompt": true,
+  "skipWorkflowUsageWarning": true,
+  "theme": "dark",
+  "agentPushNotifEnabled": true
+}

@@ -19,38 +19,38 @@
         "repo": "rtk-ai/rtk",
         "pinnedVersion": "v0.43.0",
         "assets": {
-          "darwin-aarch64": "rtk-v0.43.0-aarch64-apple-darwin.tar.gz",
-          "darwin-x86_64": "rtk-v0.43.0-x86_64-apple-darwin.tar.gz"
+          "darwin-aarch64": "rtk-aarch64-apple-darwin.tar.gz",
+          "darwin-x86_64": "rtk-x86_64-apple-darwin.tar.gz"
         },
         "checksumFile": "checksums.txt"
       },
       "install": {
         "steps": [
           { "step": "download_release_asset", "verify": "sha256_from_checksum_file" },
-          { "step": "extract_binary", "binary": "rtk", "dest": "~/.piggy/bin/rtk" },
+          { "step": "extract_binary", "binary": "rtk", "dest": "${PIGGY_BIN}/rtk" },
           { "step": "merge_hooks", "hooks": {
               "PreToolUse": [
                 {
                   "matcher": "Bash",
                   "hooks": [
-                    { "type": "command", "command": "~/.piggy/bin/rtk claude-hook", "timeout": 10 }
+                    { "type": "command", "command": "${PIGGY_BIN}/rtk hook claude" }
                   ]
                 }
               ]
             },
-            "note": "VERIFY-BEFORE-SHIP: M2 must confirm exact hook JSON by running `rtk init -g` against a sandboxed HOME and capturing the settings.json diff; update this pinned shape to match v0.43.0 exactly."
+            "note": "VERIFIED 2026-07-12 against rtk v0.43.0: `rtk init -g --auto-patch` writes exactly this shape (matcher Bash, command `rtk hook claude`, no timeout field). Piggy injects the same object with ${PIGGY_BIN}/rtk expanded to the absolute pinned-binary path, via its own merge engine (Piggy does not run `rtk init`). rtk init additionally writes ~/.claude/RTK.md, an @RTK.md line in CLAUDE.md, and ~/Library/Application Support/rtk/filters.toml; Piggy deliberately creates none of those (the hook alone delivers the compression, and not touching user-authored CLAUDE.md keeps uninstall byte-identical), so Piggy's footprint is exactly this hook plus the binary."
           }
         ]
       },
       "uninstall": {
         "steps": [
           { "step": "remove_hooks", "ownedOnly": true },
-          { "step": "delete_file", "path": "~/.piggy/bin/rtk" }
+          { "step": "delete_file", "path": "${PIGGY_BIN}/rtk" }
         ]
       },
       "healthCheck": {
         "checks": [
-          { "check": "binary_runs", "cmd": ["~/.piggy/bin/rtk", "--version"] },
+          { "check": "binary_runs", "cmd": ["${PIGGY_BIN}/rtk", "--version"] },
           { "check": "hook_present", "event": "PreToolUse", "commandContains": "rtk" }
         ]
       },
@@ -59,7 +59,7 @@
       "behaviorChanging": false,
       "claimedSavings": "~80% on shell output (author estimate, TypeScript/Rust projects)",
       "risk": "low",
-      "notes": "Hook only intercepts the Bash tool; Read/Grep/Glob untouched. Telemetry opt-in only (RTK_TELEMETRY_DISABLED=1 set by Piggy at install)."
+      "notes": "Hook only intercepts the Bash tool; Read/Grep/Glob untouched. rtk telemetry is opt-in only (off by default unless the user turns it on), so Piggy's hook runs it with no telemetry and sets nothing extra."
     },
     {
       "id": "caveman",

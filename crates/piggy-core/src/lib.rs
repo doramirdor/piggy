@@ -9,14 +9,23 @@
 //! link against it.
 
 pub mod config;
+pub mod engine;
 pub mod index;
 pub mod parser;
 pub mod pricing;
+pub mod registry;
+pub mod settings;
+pub mod state;
 pub mod stats;
 pub mod store;
+pub mod sweep;
 
+pub use engine::{ActionReport, HealthReport};
 pub use index::{run_index, IndexReport};
 pub use parser::{parse_file, ModelTokens, SessionParse};
 pub use pricing::{ModelPrice, Pricing};
+pub use registry::{Catalog, Entry};
+pub use state::PiggyState;
 pub use stats::{GroupRow, Period, Totals};
 pub use store::Store;
+pub use sweep::{SweepItem, SweepReport};

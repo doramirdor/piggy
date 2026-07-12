@@ -7,12 +7,24 @@ description = "Ground-truth Claude Code token accounting: JSONL parser, SQLite s
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps unknown/user keys in their original order so our writes to
+# settings.json produce minimal diffs (matches Claude Code's own 2-space writer).
+# arbitrary_precision stores every JSON number as its exact source text, so unknown
+# numeric config (huge integers, high-precision decimals, telemetry floats) round-trips
+# byte-for-byte instead of being reformatted through f64 — see settings.rs / sweep.rs.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 walkdir = "2"
 dirs = "5"
+# Install-engine deps (head-approved for M2): download + verify + extract release assets.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+# Atomic temp-file+rename writes for settings.json / state.json (also used in tests).
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

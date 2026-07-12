@@ -145,6 +145,10 @@ pub struct SessionParse {
     pub n_tool_results: u64,
     /// Token subtotal across assistant messages flagged `isSidechain`.
     pub sidechain: ModelTokens,
+    /// Deduplicated counts of tool_use invocations, filtered to the names Sweep
+    /// cares about: MCP tools (`mcp__<server>__<tool>`) and `Skill`. Counted from
+    /// the last-wins assistant records so a streamed message is not double-counted.
+    pub tool_use_counts: BTreeMap<String, u64>,
     pub parse_errors: u64,
 }
 
@@ -152,6 +156,8 @@ struct AssistantRec {
     model: String,
     usage: Usage,
     is_sidechain: bool,
+    /// Sweep-relevant tool_use names in this (deduplicated) assistant message.
+    tool_uses: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +246,11 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                     .as_ref()
                     .and_then(|m| m.usage.clone())
                     .unwrap_or_default();
+                let tool_uses = raw
+                    .message
+                    .as_ref()
+                    .map(|m| sweep_tool_use_names(&m.content))
+                    .unwrap_or_default();
                 let model_key = model.unwrap_or_else(|| UNKNOWN_MODEL.to_string());
                 // Last-wins: a later streaming rewrite of the same requestId
                 // replaces the earlier record.
@@ -249,6 +260,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                         model: model_key,
                         usage,
                         is_sidechain: raw.is_sidechain,
+                        tool_uses,
                     },
                 );
             }
@@ -269,6 +281,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
 
     let mut models: BTreeMap<String, ModelTokens> = BTreeMap::new();
     let mut sidechain = ModelTokens::default();
+    let mut tool_use_counts: BTreeMap<String, u64> = BTreeMap::new();
     for rec in dedup.values() {
         models
             .entry(rec.model.clone())
@@ -276,6 +289,9 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
             .add_usage(&rec.usage);
         if rec.is_sidechain {
             sidechain.add_usage(&rec.usage);
+        }
+        for name in &rec.tool_uses {
+            *tool_use_counts.entry(name.clone()).or_insert(0) += 1;
         }
     }
 
@@ -290,8 +306,30 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         n_user_msgs,
         n_tool_results,
         sidechain,
+        tool_use_counts,
         parse_errors,
     })
+}
+
+/// Extract Sweep-relevant `tool_use` names from an assistant message's content:
+/// MCP tool invocations (`mcp__<server>__<tool>`) and `Skill`. Other tool names
+/// are ignored so the per-session table stays tiny.
+fn sweep_tool_use_names(content: &Option<serde_json::Value>) -> Vec<String> {
+    let Some(serde_json::Value::Array(blocks)) = content else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for b in blocks {
+        if b.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+            continue;
+        }
+        if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
+            if name.starts_with("mcp__") || name == "Skill" {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// True if `content` is an array containing at least one `tool_result` block.

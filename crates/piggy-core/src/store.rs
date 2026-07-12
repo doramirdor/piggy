@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::parser::SessionParse;
 use crate::pricing::Pricing;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Handle to the Piggy SQLite database.
 pub struct Store {
@@ -70,8 +70,15 @@ impl Store {
                 offset_bytes INTEGER NOT NULL DEFAULT 0,
                 session_id   TEXT
             );
+            CREATE TABLE IF NOT EXISTS session_tools (
+                session_id TEXT NOT NULL,
+                tool_name  TEXT NOT NULL,
+                n          INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, tool_name)
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
-            CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);",
+            CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
+            CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);",
         )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
@@ -149,12 +156,61 @@ impl Store {
             )?;
         }
         tx.execute(
+            "DELETE FROM session_tools WHERE session_id = ?1",
+            params![parse.session_id],
+        )?;
+        for (tool, n) in &parse.tool_use_counts {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_tools (session_id, tool_name, n)
+                 VALUES (?1, ?2, ?3)",
+                params![parse.session_id, tool, n],
+            )?;
+        }
+        tx.execute(
             "INSERT OR REPLACE INTO files (path, size, mtime_ns, offset_bytes, session_id)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![path, size, mtime_ns, size, parse.session_id],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Summed `tool_use` counts across the most recent `n_sessions` sessions
+    /// (by last-activity time). Keys are full tool names (`mcp__<server>__<tool>`
+    /// / `Skill`). Backs Sweep's usage cross-reference.
+    pub fn recent_tool_usage(
+        &self,
+        n_sessions: usize,
+    ) -> Result<std::collections::BTreeMap<String, u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tool_name, SUM(n)
+             FROM session_tools
+             WHERE session_id IN (
+                 SELECT session_id FROM sessions
+                 ORDER BY ended_at DESC LIMIT ?1
+             )
+             GROUP BY tool_name",
+        )?;
+        let rows = stmt.query_map(params![n_sessions as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+        })?;
+        let mut out = std::collections::BTreeMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
+    /// Number of sessions considered by [`Self::recent_tool_usage`] (capped at
+    /// `n_sessions`).
+    pub fn recent_session_count(&self, n_sessions: usize) -> Result<u64> {
+        let n = self.conn.query_row(
+            "SELECT COUNT(*) FROM (SELECT session_id FROM sessions ORDER BY ended_at DESC LIMIT ?1)",
+            params![n_sessions as i64],
+            |r| r.get::<_, u64>(0),
+        )?;
+        Ok(n)
     }
 
     /// Total number of session rows.
