@@ -55,8 +55,9 @@ known-good versions, and verifies checksums. Want your tool listed? Open a PR ag
 
 ## Status
 
-Under active development. Milestones: ✅ measurement core → install engine → holdout
-measurement → menu bar app. See [DESIGN.md](DESIGN.md).
+All four milestones built and tested: ✅ measurement core · ✅ install engine · ✅ holdout
+measurement · ✅ menu bar app (89 Rust + 21 UI tests). Not yet released — first .dmg needs
+the signing/notarization steps in [docs/releasing.md](docs/releasing.md). See [DESIGN.md](DESIGN.md).
 
 ## License
 
