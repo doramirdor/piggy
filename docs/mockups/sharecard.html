@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Piggy — share card mockup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #26262a; display: flex; justify-content: center; padding: 40px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased; }
+  .card {
+    width: 600px; height: 315px; border-radius: 20px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(120% 140% at 85% -10%, rgba(48,209,88,.28), transparent 55%),
+      radial-gradient(100% 120% at -5% 110%, rgba(10,132,255,.22), transparent 55%),
+      #101013;
+    box-shadow: 0 24px 60px rgba(0,0,0,.5);
+    color: rgba(255,255,255,.94); padding: 34px 38px; display: flex; flex-direction: column;
+  }
+  .grain { position: absolute; inset: 0; opacity: .5;
+    background-image: radial-gradient(rgba(255,255,255,.045) 0.5px, transparent 0.5px);
+    background-size: 22px 22px; }
+  .top { display: flex; align-items: center; gap: 9px; position: relative; }
+  .top .pig { font-size: 22px; }
+  .top .name { font-size: 16px; font-weight: 700; letter-spacing: -.2px; }
+  .top .week { margin-left: auto; font-size: 12px; color: rgba(255,255,255,.45);
+    font-variant-numeric: tabular-nums; }
+  .mid { flex: 1; display: flex; flex-direction: column; justify-content: center; position: relative; }
+  .kicker { font-size: 14px; font-weight: 500; color: rgba(255,255,255,.55); }
+  .big { font-size: 64px; font-weight: 800; letter-spacing: -2.5px; line-height: 1.05;
+    font-variant-numeric: tabular-nums; }
+  .big .hl { background: linear-gradient(90deg, #30d158, #66e08d);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { margin-top: 8px; font-size: 15px; color: rgba(255,255,255,.6); }
+  .sub b { color: rgba(255,255,255,.85); font-weight: 600; }
+  .bottom { display: flex; align-items: center; position: relative; }
+  .proof { display: flex; align-items: center; gap: 6px; font-size: 11.5px;
+    color: rgba(255,255,255,.45); }
+  .proof .dot { width: 5px; height: 5px; border-radius: 3px; background: #30d158; }
+  .url { margin-left: auto; font-size: 12px; font-weight: 600; color: rgba(255,255,255,.55); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="grain"></div>
+    <div class="top">
+      <span class="pig">🐷</span><span class="name">Piggy</span>
+      <span class="week">Jul 6 – Jul 12</span>
+    </div>
+    <div class="mid">
+      <div class="kicker">My savers banked</div>
+      <div class="big"><span class="hl">1.2M tokens</span></div>
+      <div class="sub">this week — my Claude plan lasts <b>1.7× longer</b></div>
+    </div>
+    <div class="bottom">
+      <span class="proof"><span class="dot"></span>measured with holdout sessions, not vibes</span>
+      <span class="url">piggy.app</span>
+    </div>
+  </div>
+</body>
+</html>

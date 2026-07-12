@@ -1,0 +1,194 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Piggy — panel mockup</title>
+<style>
+  :root {
+    --bg: rgba(30, 30, 32, 0.92);
+    --card: rgba(255, 255, 255, 0.055);
+    --card-hover: rgba(255, 255, 255, 0.09);
+    --hairline: rgba(255, 255, 255, 0.09);
+    --text: rgba(255, 255, 255, 0.92);
+    --text-2: rgba(255, 255, 255, 0.55);
+    --text-3: rgba(255, 255, 255, 0.32);
+    --green: #30d158;
+    --green-dim: rgba(48, 209, 88, 0.16);
+    --amber: #ffd60a;
+    --amber-dim: rgba(255, 214, 10, 0.14);
+    --accent: #0a84ff;
+    --pink: #ff8fa3;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { background: #3a3a3f; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    display: flex; justify-content: center; padding: 40px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .panel {
+    width: 360px; border-radius: 14px; background: var(--bg);
+    backdrop-filter: blur(40px) saturate(1.6);
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 0.5px rgba(255,255,255,.12) inset;
+    overflow: hidden; color: var(--text);
+  }
+  /* ---------- header ---------- */
+  .header { padding: 14px 16px 10px; display: flex; align-items: baseline; gap: 8px; }
+  .header .logo { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; }
+  .header .logo span { margin-right: 5px; }
+  .header .today { margin-left: auto; font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .header .today b { color: var(--text); font-weight: 600; }
+
+  /* ---------- hero / master ---------- */
+  .master {
+    margin: 2px 12px 10px; padding: 14px; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(48,209,88,.14), rgba(10,132,255,.10));
+    border: 0.5px solid rgba(255,255,255,.10);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .master .txt { flex: 1; }
+  .master .t1 { font-size: 13px; font-weight: 600; }
+  .master .t2 { font-size: 11px; color: var(--text-2); margin-top: 2px; }
+
+  /* macOS-style switch */
+  .switch { width: 40px; height: 24px; border-radius: 12px; background: rgba(255,255,255,.18);
+    position: relative; transition: background .18s ease; flex-shrink: 0; cursor: pointer; }
+  .switch.on { background: var(--green); }
+  .switch .knob { position: absolute; top: 1.5px; left: 1.5px; width: 21px; height: 21px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+    transition: transform .18s cubic-bezier(.3,.8,.4,1.1); }
+  .switch.on .knob { transform: translateX(16px); }
+  .switch.sm { width: 34px; height: 20px; border-radius: 10px; }
+  .switch.sm .knob { width: 17px; height: 17px; }
+  .switch.sm.on .knob { transform: translateX(14px); }
+
+  /* ---------- section label ---------- */
+  .sect { padding: 8px 18px 6px; font-size: 11px; font-weight: 600; color: var(--text-3);
+    text-transform: uppercase; letter-spacing: .4px; }
+
+  /* ---------- saver rows ---------- */
+  .rows { margin: 0 12px; border-radius: 12px; background: var(--card); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 11px; padding: 11px 12px; }
+  .row + .row { border-top: 0.5px solid var(--hairline); }
+  .row .ic { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center;
+    justify-content: center; font-size: 14px; flex-shrink: 0; }
+  .row .meta { flex: 1; min-width: 0; }
+  .row .name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .row .desc { font-size: 11px; color: var(--text-2); margin-top: 1px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .badge { font-size: 10px; font-weight: 600; padding: 2.5px 7px; border-radius: 20px;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .badge.measured { color: var(--green); background: var(--green-dim); }
+  .badge.nodata { color: var(--text-2); background: rgba(255,255,255,.08); }
+  .warn-dot { width: 6px; height: 6px; border-radius: 3px; background: var(--amber); flex-shrink: 0; }
+
+  /* ---------- dashboard strip ---------- */
+  .dash {
+    margin: 10px 12px; padding: 14px; border-radius: 12px; background: var(--card);
+  }
+  .dash .headline { font-size: 12px; color: var(--text-2); }
+  .dash .big { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; margin-top: 2px;
+    font-variant-numeric: tabular-nums; }
+  .dash .big em { font-style: normal; color: var(--green); }
+  .dash .sub { font-size: 10.5px; color: var(--text-3); margin-top: 3px; }
+  .bars { display: flex; gap: 4px; margin-top: 12px; height: 6px; border-radius: 3px; overflow: hidden; }
+  .bars div { height: 100%; }
+  .legend { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+  .legend span { font-size: 10px; color: var(--text-2); display: flex; align-items: center; gap: 4px; }
+  .legend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+
+  /* ---------- sweep hint ---------- */
+  .hint { margin: 0 12px 10px; padding: 11px 12px; border-radius: 12px;
+    background: var(--amber-dim); display: flex; align-items: center; gap: 10px; }
+  .hint .t { flex: 1; font-size: 11.5px; color: var(--text); line-height: 1.35; }
+  .hint .t b { font-weight: 600; }
+  .hint .t small { color: var(--text-2); }
+  .hint button { border: 0; border-radius: 7px; padding: 5px 10px; font-size: 11px; font-weight: 600;
+    background: rgba(255,255,255,.14); color: var(--text); cursor: pointer; font-family: inherit; }
+
+  /* ---------- footer tabs ---------- */
+  .tabs { display: flex; border-top: 0.5px solid var(--hairline); margin-top: 4px; }
+  .tab { flex: 1; text-align: center; padding: 9px 0 10px; font-size: 10px; color: var(--text-3);
+    cursor: pointer; }
+  .tab .gl { width: 17px; height: 17px; display: block; margin: 0 auto 3px; }
+  .tab.active { color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <div class="header">
+      <div class="logo"><span>🐷</span>Piggy</div>
+      <div class="today">today <b>184k</b> tokens · saved <b style="color:var(--green)">31%</b></div>
+    </div>
+
+    <div class="master">
+      <div class="txt">
+        <div class="t1">Save everything</div>
+        <div class="t2">Piggy's curated set, safely ordered · reversible anytime</div>
+      </div>
+      <div class="switch on"><div class="knob"></div></div>
+    </div>
+
+    <div class="sect">Savers</div>
+    <div class="rows">
+      <div class="row">
+        <div class="ic" style="background:rgba(10,132,255,.16)">🤫</div>
+        <div class="meta">
+          <div class="name">Shrink terminal noise</div>
+          <div class="desc">Compresses command output before Claude reads it</div>
+        </div>
+        <span class="badge measured" title="Measured across 41 sessions vs. holdout">−22% measured</span>
+        <div class="switch sm on"><div class="knob"></div></div>
+      </div>
+      <div class="row">
+        <div class="ic" style="background:rgba(255,159,10,.16)">✂️</div>
+        <div class="meta">
+          <div class="name">Terse replies <span class="warn-dot" title="changes how Claude writes"></span></div>
+          <div class="desc">Claude explains less, codes the same</div>
+        </div>
+        <span class="badge nodata" title="Piggy is still gathering honest data">measuring · 6 sessions</span>
+        <div class="switch sm on"><div class="knob"></div></div>
+      </div>
+      <div class="row">
+        <div class="ic" style="background:rgba(48,209,88,.16)">🧹</div>
+        <div class="meta">
+          <div class="name">Clean unused extras</div>
+          <div class="desc">3 unused add‑ons cost ~4,100 tokens every request</div>
+        </div>
+        <span class="badge measured" title="Measured across 18 sessions vs. holdout">−9% measured</span>
+        <div class="switch sm on"><div class="knob"></div></div>
+      </div>
+    </div>
+
+    <div class="dash">
+      <div class="headline">Your Claude plan lasts</div>
+      <div class="big"><em>1.7×</em> longer</div>
+      <div class="sub">measured against 12 holdout sessions · this month</div>
+      <div class="bars">
+        <div style="width:34%;background:#0a84ff"></div>
+        <div style="width:14%;background:#5e5ce6"></div>
+        <div style="width:22%;background:#30d158"></div>
+        <div style="width:30%;background:rgba(255,255,255,.22)"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:#0a84ff"></i>input</span>
+        <span><i style="background:#5e5ce6"></i>output</span>
+        <span><i style="background:#30d158"></i>cache write</span>
+        <span><i style="background:rgba(255,255,255,.35)"></i>cache read</span>
+      </div>
+    </div>
+
+    <div class="hint">
+      <div class="t"><b>2 add‑ons you never use</b> are costing ~3,400 tokens per request. <small>estimated</small></div>
+      <button>Review</button>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active"><svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>Home</div>
+      <div class="tab"><svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-8M21 20H3"/></svg>Dashboard</div>
+      <div class="tab"><svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.2"/></svg>Discover</div>
+      <div class="tab"><svg class="gl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2.1 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1c.6.5 1.4.9 2.1 1.2L10 21h4l.5-2.7a7 7 0 0 0 2.1-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z"/></svg>Settings</div>
+    </div>
+  </div>
+</body>
+</html>
