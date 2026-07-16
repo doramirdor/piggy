@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/status-pre--release-e8a33d" alt="Status: pre-release">
   <img src="https://img.shields.io/badge/license-MIT-3d7fd8" alt="License: MIT">
   <img src="https://img.shields.io/badge/platform-macOS-6b7280" alt="Platform: macOS">
-  <img src="https://img.shields.io/badge/tests-195%20local-6b7280" alt="195 tests, run locally">
+  <img src="https://img.shields.io/badge/tests-198%20local-6b7280" alt="198 tests, run locally">
 </p>
 
 Piggy is a free, open-source macOS menu bar app for Claude Code users who keep hitting usage
@@ -182,7 +182,7 @@ holdup is Piggy's own unfinished work it says that instead.</sub>
 ## Status
 
 All four milestones built and tested: ✅ measurement core · ✅ install engine · ✅ holdout
-measurement · ✅ menu bar app (139 Rust + 26 UI + 30 installer tests, run locally - this repo has
+measurement · ✅ menu bar app (142 Rust + 26 UI + 30 installer tests, run locally - this repo has
 no CI). Not yet released: the first .dmg needs the signing/notarization steps in
 [docs/releasing.md](docs/releasing.md), which require an Apple Developer ID certificate. See
 [DESIGN.md](DESIGN.md).
