@@ -578,6 +578,7 @@ let settings: Settings = {
   holdoutFraction: 0.1,
   rotationEnabled: true,
   launchAtLogin: false,
+  cliTool: false,
 };
 
 function doctor(): Doctor {
@@ -713,6 +714,12 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         } satisfies ReindexResult;
       case "open_external":
         if (typeof window !== "undefined") window.open(String(a.url), "_blank");
+        return undefined;
+      // The mock build is always "up to date": there is no update endpoint to
+      // ask, and pretending otherwise would put a fake Install button in the UI.
+      case "check_for_update":
+        return null;
+      case "install_update":
         return undefined;
       default:
         throw { title: "Unknown command", detail: cmd, rolledBack: false };

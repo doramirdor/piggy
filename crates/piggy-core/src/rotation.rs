@@ -219,8 +219,17 @@ pub fn tick(
     let block_pos = block_pos.max(0) as usize;
     let assignment = plan.assignment_at(block_pos);
 
-    // Apply: flip only savers whose current state differs. Manual savers were
-    // already excluded from `controlled`, so this never overrides a user choice.
+    // Apply: flip savers whose state differs, and re-stamp the source on savers
+    // already in the wanted state. The re-stamp matters: a saver the holdout slot
+    // turned off stays off in the next single-off slot, so skipping it would
+    // leave `last_toggle_source = "holdout"` on a saver that is no longer part of
+    // a holdout. `tagging::source_for` would then label the session's row
+    // "holdout", and `attribution` files any session carrying a holdout row into
+    // the holdout baseline - putting sessions that ran with other savers ON into
+    // the all-off baseline. `set_enabled_src` handles the no-flip case by
+    // recording the source and returning early, so this is cheap.
+    // Manual savers were already excluded from `controlled`, so this never
+    // overrides a user choice.
     let mut changed = Vec::new();
     for (id, &want) in &assignment.set {
         let cur = PiggyState::load()?
@@ -228,8 +237,8 @@ pub fn tick(
             .get(id)
             .map(|s| s.enabled)
             .unwrap_or(false);
+        engine::set_enabled_src(catalog, id, want, assignment.source)?;
         if cur != want {
-            engine::set_enabled_src(catalog, id, want, assignment.source)?;
             changed.push(id.clone());
         }
     }

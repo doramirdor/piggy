@@ -65,10 +65,21 @@ export function Overview() {
   const estimated = live && h && h.label === "estimated" && h.value != null;
   const mult = measured || estimated ? h!.value! : null;
 
-  // Savings derived from the multiplier: to do the work you did (totalTokens,
-  // measured) without savers you'd have spent mult× as much, so saved =
-  // total×(mult−1). Tokens are measured; cost is always an estimate.
-  const savedTokens = mult && stats ? stats.totalTokens * (mult - 1) : null;
+  // Savings derived from the multiplier: to do the work you did without savers
+  // you'd have spent mult× as much, so saved = spend×(mult−1).
+  //
+  // The base is plan-metered spend (input + output + cache-write), NOT
+  // totalTokens: the multiplier is price-weighted and excludes cache reads per
+  // measurement.md, so applying it to a cache-read-inclusive total would inflate
+  // the figure and disagree with the share card, which derives the same number
+  // from the same streams (see backend.rs `share_card`).
+  //
+  // These are always ESTIMATES, even when the headline is holdout-measured: the
+  // headline multiplier is price-weighted, so anything derived from it inherits
+  // the pricing table. Labeling this "measured" would blend the two, which is
+  // the one thing Piggy promises never to do.
+  const planMetered = stats ? stats.streams.input + stats.streams.output + stats.streams.cacheWrite : null;
+  const savedTokens = mult && planMetered != null ? planMetered * (mult - 1) : null;
   const savedPct = mult ? Math.round((1 - 1 / mult) * 100) : null;
   const moneyAvoided = mult && stats ? stats.costUsdEst * (mult - 1) : null;
 
@@ -166,11 +177,13 @@ export function Overview() {
               {savedPct != null ? (
                 <>
                   {savedPct}% of what you'd have spent ·{" "}
-                  {measured ? (
-                    <span className="meas">measured</span>
-                  ) : (
-                    <span className="est">estimated</span>
-                  )}
+                  {/* Always "estimated": this figure is the price-weighted
+                      multiplier applied to your spend, so it leans on the
+                      pricing table even when the multiplier itself is
+                      holdout-measured. The headline above is where "measured"
+                      belongs. */}
+                  <span className="est">estimated</span>
+                  {measured ? " from a holdout-measured multiplier" : ""}
                 </>
               ) : (
                 "measuring your first holdout"

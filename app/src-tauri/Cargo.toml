@@ -30,9 +30,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.5"
 
-# Autostart is desktop-only.
+# Autostart and the updater are desktop-only.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
 
 [features]
 # This feature is used to produce the Tauri app bundle metadata.

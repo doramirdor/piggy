@@ -9,6 +9,10 @@
 //!   * `install` / `remove` — turn a saver on (install) or fully off (uninstall).
 //!   * `on` / `off` — fast toggle without uninstalling (the A/B path).
 //!   * `sweep`  — find unused add-ons that cost tokens; `--apply N` disables one.
+//!   * `report` - measured savings: per-saver attribution table + honest headline.
+//!   * `holdout` - view or change the share of sessions that run with savers off.
+//!   * `discover` - token-savers found on GitHub (cached; `--refresh` pulls).
+//!   * `watch`  - index and tag new sessions live, in the foreground.
 //!   * `restore-defaults` — undo everything Piggy changed.
 //!   * `backups` — list the settings.json backups Piggy has taken.
 
@@ -1009,10 +1013,15 @@ fn cmd_report(json: bool) -> Result<()> {
             // Per docs UI copy: show the backing session count on the number line.
             println!("    {:<12}{}", s.stream.label(), stream_result_with_n(s));
         }
+        // Same sample bar as the GUI headline (see backend.rs `map_headline`):
+        // both sides must clear MIN_GROUP. Printing a multiplier off one session
+        // per side would be a number we cannot back, whatever it is labelled.
         match hl.multiplier {
-            Some(m) if hl.n_full_on > 0 => {
+            Some(m) if hl.n_full_on >= attribution::MIN_GROUP
+                && hl.n_baseline >= attribution::MIN_GROUP =>
+            {
                 println!();
-                println!("  Your plan lasts {m:.1}× longer  (estimated — price-weighted, cache reads excluded)");
+                println!("  Your plan lasts {m:.1}× longer  (estimated: price-weighted, cache reads excluded)");
             }
             _ => {}
         }

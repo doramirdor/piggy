@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use piggy_core::attribution::{
@@ -31,7 +32,8 @@ use piggy_core::attribution::{
 use piggy_core::registry::Entry;
 use piggy_core::rotation::{self, RotationOutcome};
 use piggy_core::{
-    config, discovery, engine, stats::Period, sweep, tagging, Catalog, PiggyState, Pricing, Store,
+    cli_link, config, discovery, engine, stats::Period, sweep, tagging, Catalog, PiggyState,
+    Pricing, Store,
 };
 
 /// A time-derived bootstrap seed for the attribution CIs (production runs use a
@@ -316,11 +318,16 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
 ///   ([`MIN_GROUP`] per side) with a computable multiplier. The Dashboard/Home
 ///   sub-line reads "measured against N holdout sessions".
 /// * **estimated** — no live holdout, but an observational pre-install baseline
-///   with a multiplier. Sub-line: "estimated vs your history · holdout
-///   measurement in progress".
-/// * **not_enough_data** — a partial holdout (1..MIN_GROUP), no baseline, or no
-///   computable multiplier: never a faked number. `n_holdout` still carries the
-///   holdout sessions gathered so far so the UI can show "N of 10".
+///   with a multiplier, meeting the same [`MIN_GROUP`] sample bar as `measured`.
+///   Sub-line: "estimated vs your history · holdout measurement in progress".
+///   The bar matters as much here as it does for a holdout: "estimated" labels
+///   where the *baseline* came from, not how much data backs it, so without it a
+///   single pre-install session against a single full-on one would render a
+///   confident-looking multiplier the data cannot support.
+/// * **not_enough_data** — a partial baseline (1..MIN_GROUP) of either kind, no
+///   baseline, or no computable multiplier: never a faked number. `n_holdout`
+///   still carries the holdout sessions gathered so far so the UI can show
+///   "N of 10".
 ///
 /// A live holdout always wins the baseline in `piggy-core`, so `baseline ==
 /// Holdout` ⇔ at least one holdout session exists; hence `n_holdout` is the true
@@ -336,7 +343,11 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         && hl.baseline == HeadlineBaseline::Holdout
         && hl.n_full_on >= MIN_GROUP
         && hl.n_baseline >= MIN_GROUP;
-    let estimated = has_mult && !measured && hl.baseline == HeadlineBaseline::PreInstall;
+    let estimated = has_mult
+        && !measured
+        && hl.baseline == HeadlineBaseline::PreInstall
+        && hl.n_full_on >= MIN_GROUP
+        && hl.n_baseline >= MIN_GROUP;
     let label = if measured {
         "measured"
     } else if estimated {
@@ -1391,6 +1402,72 @@ impl Default for AppPrefs {
             rotation_enabled: true,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The `piggy` command-line tool
+// ---------------------------------------------------------------------------
+
+/// Where the bundled `piggy` CLI lives: next to this executable.
+///
+/// Tauri copies the `binaries/piggy-<triple>` sidecar into
+/// `Piggy.app/Contents/MacOS/piggy`, alongside `piggy-app` itself, and does the
+/// same next to the dev binary under `target/`. Resolving from
+/// [`std::env::current_exe`] therefore works in both, and keeps following the
+/// app if the user moves it.
+pub fn cli_sidecar_path() -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe().context("locating the Piggy executable")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Piggy executable has no parent directory"))?;
+    Ok(dir.join("piggy"))
+}
+
+/// Whether the user has the `piggy` CLI linked onto their `PATH`.
+///
+/// The link's presence *is* the setting: there is no separate stored flag to
+/// drift out of sync with the filesystem.
+pub fn cli_tool_enabled() -> bool {
+    cli_link::exists()
+}
+
+/// Turn the `piggy` command-line tool on or off.
+///
+/// On: symlink `<piggy_home>/bin/piggy` at the bundled sidecar and put that
+/// directory on `PATH`. Off: remove the link, and the managed `PATH` line too
+/// unless a saver still needs it.
+pub fn set_cli_tool(enabled: bool) -> Result<(), ApiError> {
+    (|| -> anyhow::Result<()> {
+        if enabled {
+            let sidecar = cli_sidecar_path()?;
+            cli_link::install(&sidecar)?;
+        } else {
+            cli_link::uninstall()?;
+        }
+        Ok(())
+    })()
+    .map_err(generic(if enabled {
+        "Couldn't install the piggy command"
+    } else {
+        "Couldn't remove the piggy command"
+    }))
+}
+
+/// Re-point an already-installed CLI link at this build's sidecar.
+///
+/// Called on every launch so the link self-heals after the user moves or
+/// replaces Piggy.app. Deliberately does nothing when the user has not opted in,
+/// so launching Piggy never touches their shell profile uninvited.
+pub fn refresh_cli_link() {
+    if !cli_link::exists() {
+        return;
+    }
+    let Ok(sidecar) = cli_sidecar_path() else {
+        return;
+    };
+    // Best-effort: a broken link is surfaced by the Settings toggle and doctor,
+    // and must never block startup.
+    let _ = cli_link::install(&sidecar);
 }
 
 /// The pre-M3 preferences file. If present, its values are folded into the core

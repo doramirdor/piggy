@@ -8,8 +8,9 @@
 
 - Why: the ICP (vibe coders on Claude Code / Codex, mostly non-developers) doesn't think in
   "optimizers" or "hooks". They think *"my plan ran out again."* Piggy = savings, instantly.
-  Warm, tweetable ("Piggy saved me 1.2M tokens this week 🐷"), provider-neutral so Codex
-  support can come later without a rename.
+  Warm, tweetable ("Piggy saved me 1.2M tokens this week 🐷"), provider-neutral with no rename
+  needed: the indexer already reads Codex rollout logs from `~/.codex` (read-only) alongside
+  Claude Code's, and pricing covers `gpt-*`. The savers themselves are still Claude Code only.
 - CLI binary: `piggy` · data dir: `~/.piggy/` · db: `~/.piggy/piggy.db`
 - npm installer: `npx piggybank` (verified available) · repo working dir: this one.
 - Tagline: **"Your Claude plan, but longer."** Sub: *The App Store - and the referee - for
@@ -17,11 +18,19 @@
 
 ## Positioning rules (non-negotiable, from build prompt)
 
-1. Never vendor/fork optimizer code. Download official release artifacts, pin versions, verify checksums.
+1. Never vendor/fork optimizer code: install from the author's official source (GitHub release
+   artifacts, PyPI, the Claude plugin marketplace) and pin versions. Verify checksums where the
+   source offers them - today that is the GitHub release path only (`rtk`), since pip installs
+   pass no hashes.
 2. Never blend measured and claimed numbers. Dashboard = measured only; README claims appear
    only on install cards labeled "claimed".
 3. Everything reversible; Restore Defaults always works.
-4. No telemetry, no accounts. Network = GitHub only (registry refresh, releases, discovery).
+4. No telemetry, no accounts; usage data never leaves the Mac. *Piggy's own* network calls are
+   GitHub only (releases, discovery; registry refresh is designed but not built - the catalog is
+   embedded at build time). Turning a saver on runs that saver's official installer, which
+   fetches from its own home: PyPI for headroom, the plugin marketplace (via the user's `claude`
+   binary) for the plugin savers. Say this plainly in docs and UI rather than claiming
+   GitHub-only end to end - the claim has to survive a packet capture.
 5. Fail safe: failed health check ⇒ auto-rollback + plain-English error.
 6. The user never sees a terminal, a JSON file, or the word "hook". UI vocabulary:
    optimizer = **"saver"**, install = **"turn on"**, hook chain = invisible, settings.json = **"Claude's settings (backed up)"**.
@@ -31,7 +40,9 @@
 ```
 crates/
   piggy-core     # parser, sqlite store, pricing, stats, registry, merge engine, holdout
-  piggy-cli      # `piggy` binary: index | stats | doctor | (later: install|remove|sweep)
+  piggy-cli      # `piggy` binary: index | stats | doctor | parse | list | install | remove
+                 #   | on | off | sweep | report | holdout | discover | watch | backups
+                 #   | restore-defaults
 app/             # Tauri v2 menu bar app (React + Tailwind), links piggy-core
 registry/        # versioned JSON catalog (data, not code)
 docs/research/   # live-verified research on optimizer repos
@@ -41,6 +52,8 @@ scripts/         # verify-against-jq.sh etc.
 ### Measurement (M1 + M3)
 - Parse `~/.claude/projects/**/*.jsonl`; assistant lines only; **dedupe by requestId last-wins**
   (verified: streaming rewrites duplicate lines); skip `<synthetic>`.
+- Codex is a second source, same store: `~/.codex/{sessions,archived_sessions}` rollout logs
+  (`sources.rs` + `codex.rs`), read-only, skipped when the dir is absent.
 - Four streams tracked separately: input / output / cache_create (5m vs 1h split) / cache_read.
 - Cost is always **estimated** (pricing table data file); tokens are **measured**. Label every
   number in UI as one or the other. Never blend.
@@ -74,8 +87,10 @@ scripts/         # verify-against-jq.sh etc.
   solid dark surface (`--bg #0f151b`) with the blueprint/brand personality in the piggy mark and
   hero cards, native-feeling toggle switches, hairline separators (0.5px), SF-Symbols-style line
   icons, dark mode default + light support, spring animations ≤200ms, no scrollbars until scroll.
-- Layout: left **sidebar** (Piggy mark + wordmark → nav: Overview / Savers / Discover / Proof /
-  Settings → Claude-connection status) and a scrolling **content** column (max-width ~720).
+- Layout: left **sidebar** (Piggy mark + wordmark → six nav tabs → master switch + version) and
+  a scrolling **content** column (max-width ~720). Tab ids `overview | savers | discover | proof
+  | reports | settings`; two render under a different label, `overview` as "Dashboard" and
+  `discover` as "Discovery".
 - **Overview:** greeting + "Your plan lasts **N.N× longer**" hero (measured, radial-green glow +
   stream bars) → Tokens-saved / Money-avoided metric grid → sweep hint → recent-proof feed.
 - **Savers:** master "Save everything" card → saver rows (icon · plain label · measured/estimated

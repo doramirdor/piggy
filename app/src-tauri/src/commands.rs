@@ -2,7 +2,7 @@
 //! wrapper that runs the `piggy-core`-touching work on a blocking task — the
 //! engine mutates `settings.json` and must never run on the UI/main thread.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::backend::{
@@ -126,6 +126,8 @@ pub struct Settings {
     pub holdout_fraction: f64,
     pub rotation_enabled: bool,
     pub launch_at_login: bool,
+    /// Whether the `piggy` CLI is linked onto the user's `PATH`.
+    pub cli_tool: bool,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +136,7 @@ pub struct SettingsInput {
     pub holdout_fraction: f64,
     pub rotation_enabled: bool,
     pub launch_at_login: bool,
+    pub cli_tool: bool,
 }
 
 fn launch_at_login_enabled(app: &AppHandle) -> bool {
@@ -148,6 +151,7 @@ pub async fn settings_get(app: AppHandle) -> Result<Settings, ApiError> {
         holdout_fraction: prefs.holdout_fraction,
         rotation_enabled: prefs.rotation_enabled,
         launch_at_login: launch_at_login_enabled(&app),
+        cli_tool: run(|| Ok(backend::cli_tool_enabled())).await?,
     })
 }
 
@@ -167,11 +171,20 @@ pub async fn settings_set(app: AppHandle, settings: SettingsInput) -> Result<Set
         al.disable()
     };
 
+    // Only act on an actual change: this command also fires for every holdout
+    // slider nudge, and linking/unlinking touches the user's shell profile.
+    let want_cli = settings.cli_tool;
+    let cli_changed = run(move || Ok(backend::cli_tool_enabled() != want_cli)).await?;
+    if cli_changed {
+        run(move || backend::set_cli_tool(want_cli)).await?;
+    }
+
     let saved = run(|| Ok(backend::load_prefs())).await?;
     Ok(Settings {
         holdout_fraction: saved.holdout_fraction,
         rotation_enabled: saved.rotation_enabled,
         launch_at_login: launch_at_login_enabled(&app),
+        cli_tool: run(|| Ok(backend::cli_tool_enabled())).await?,
     })
 }
 
@@ -197,4 +210,65 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<(), ApiError> 
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| ApiError::new("Couldn't open the link", e.to_string(), false))
+}
+
+// ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+/// A release newer than the running build, as the Settings screen shows it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDto {
+    pub version: String,
+    pub current_version: String,
+    /// The release notes, when the update manifest carries them.
+    pub notes: Option<String>,
+}
+
+fn update_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::new("Couldn't check for updates", e.to_string(), false)
+}
+
+/// Ask the update endpoint whether a newer signed release exists.
+///
+/// `Ok(None)` means "you're up to date". The signature check against the pubkey
+/// in `tauri.conf.json` happens inside the plugin, so an unsigned or
+/// wrongly-signed manifest surfaces here as an error rather than an update.
+#[tauri::command]
+pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateDto>, ApiError> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(update_error)?
+        .check()
+        .await
+        .map_err(update_error)?;
+    Ok(update.map(|u| UpdateDto {
+        version: u.version.clone(),
+        current_version: u.current_version.clone(),
+        notes: u.body.clone(),
+    }))
+}
+
+/// Download, verify, and install the pending update, then relaunch into it.
+///
+/// Only returns on failure: on success the process is replaced by the new build.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> Result<(), ApiError> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(update_error)?
+        .check()
+        .await
+        .map_err(update_error)?
+        .ok_or_else(|| ApiError::new("Nothing to install", "Piggy is already up to date.", false))?;
+
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(|e| ApiError::new("Couldn't install the update", e.to_string(), false))?;
+
+    app.restart();
 }

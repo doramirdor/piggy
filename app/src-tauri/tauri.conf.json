@@ -41,7 +41,9 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
+    "externalBin": ["binaries/piggy"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,5 +55,12 @@
       "minimumSystemVersion": "11.0"
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/doramirdor/piggy/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNBREY3RjRDN0E5RTdENEUKUldST2ZaNTZUSC9mT2lKZ2dPQ1JuMnovVER0aHdFd0VDbDVzNzlvdHpuR2NRbmNRc3N6Nzd1azQK"
+    }
+  }
 }

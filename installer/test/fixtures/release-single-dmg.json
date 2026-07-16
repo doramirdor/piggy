@@ -5,12 +5,12 @@
     {
       "name": "Piggy.dmg",
       "size": 52000000,
-      "browser_download_url": "https://github.com/amirdoramir/piggy/releases/download/v0.0.9/Piggy.dmg"
+      "browser_download_url": "https://github.com/doramirdor/piggy/releases/download/v0.0.9/Piggy.dmg"
     },
     {
       "name": "checksums.txt",
       "size": 96,
-      "browser_download_url": "https://github.com/amirdoramir/piggy/releases/download/v0.0.9/checksums.txt"
+      "browser_download_url": "https://github.com/doramirdor/piggy/releases/download/v0.0.9/checksums.txt"
     }
   ]
 }

@@ -9,6 +9,7 @@
 //! link against it.
 
 pub mod attribution;
+pub mod cli_link;
 pub mod codex;
 pub mod config;
 pub mod discovery;
@@ -32,6 +33,7 @@ pub mod watcher;
 pub use attribution::{
     attribute, headline, Badge, Headline, HeadlineBaseline, SaverAttribution, Stream, StreamStat,
 };
+pub use cli_link::LinkReport;
 pub use codex::parse_codex_file;
 pub use discovery::{DiscoveredRepo, DiscoveryCache};
 pub use engine::{ActionReport, HealthReport};

@@ -1,10 +1,28 @@
 # M4 spec - Tauri menu bar app (head decisions)
 
-Design reference (binding): `docs/mockups/panel.html` (panel), `docs/mockups/sharecard.html`
-(share card), `docs/mockups/icon.svg` (icon). Match them visually. They were reviewed and
-approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks).
+> **Historical. Superseded in part; kept for the decisions it records.**
+>
+> This is the M4 spec as written, when Piggy was a tray-only popover. The shipped app is a
+> normal desktop window instead (940×660, resizable, decorated, Dock icon, six tabs). See
+> **DESIGN.md**, the "GUI (M4)" section on the Apple-native desktop window, for the current
+> design; where the two disagree, DESIGN.md and the code win.
+>
+> Still accurate and still binding: the command surface, background/daemon behavior, share
+> card, empty/degraded states, installer, and icons. The **Shell** and **Screens** sections
+> below are the ones the redesign overtook; each carries a correction inline.
+
+Design reference: `docs/mockups/panel.html` (panel), `docs/mockups/sharecard.html`
+(share card), `docs/mockups/icon.svg` (icon). The icon and share card still bind. The panel
+mockup is the superseded popover layout - the sidebar layout replaced it. Vocabulary rules
+from DESIGN.md apply everywhere (savers, never hooks).
 
 ## Shell
+
+> **Superseded.** Shipped: `ActivationPolicy::Regular` (`app/src-tauri/src/lib.rs`), a Dock
+> icon, and a 940×660 resizable window with decorations and a macOS Overlay title bar
+> (`tauri.conf.json`). No HudWindow vibrancy, no hide-on-blur: closing the window hides it and
+> the tray glyph shows it again, while the background indexer keeps running. The rest of this
+> section (frontend stack, piggy-core linkage) is unchanged.
 
 - Tauri v2, tray-only app (`ActivationPolicy::Accessory` - no dock icon).
 - Tray icon: monochrome template piggy glyph + optional short text (today's saved %) via
@@ -47,6 +65,13 @@ approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks)
 - `doctor()` → checks for Settings > Health section.
 
 ## Screens (tabs per mockup: Home, Dashboard, Discover, Settings)
+
+> **Superseded.** Shipped tabs are six, not four: `overview` ("Dashboard"), `savers`,
+> `discover` ("Discovery"), `proof`, `reports`, `settings`. The old "Home" split into the
+> Overview screen and the Savers screen; "Dashboard" here is roughly today's Proof screen;
+> Reports is new. The per-screen content below still describes what each surface owes the
+> user, and the Settings line about "never phones home" has since been corrected: Piggy's own
+> calls are GitHub-only, but a saver's installer fetches from its own home.
 
 - **Home** = mockup panel exactly: master card, saver rows (toggle, plain label, badge,
   amber warning dot with popover text for behaviorChanging), sweep hint card, headline strip.

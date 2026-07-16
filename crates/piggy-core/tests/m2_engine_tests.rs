@@ -615,6 +615,44 @@ fn headroom_auto_disables_rtk_and_shares_the_path_line() {
 }
 
 #[test]
+fn the_cli_link_keeps_the_path_line_when_the_last_saver_goes() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_fake_rtk_asset(0);
+    let catalog = Catalog::embedded();
+
+    engine::install(&catalog, "rtk").unwrap();
+
+    // The user also opted into the `piggy` command line tool, which lives in the
+    // same ${PIGGY_BIN} directory but belongs to no saver.
+    let sidecar = sb.root().join("Piggy.app/Contents/MacOS/piggy");
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::write(&sidecar, b"#!/bin/sh\necho piggy\n").unwrap();
+    piggy_core::cli_link::install(&sidecar).unwrap();
+
+    // Uninstalling the last saver must NOT take `piggy` off the user's PATH.
+    engine::uninstall(&catalog, "rtk").unwrap();
+
+    let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap();
+    assert!(
+        profile.contains("piggy (managed PATH)"),
+        "PATH line kept while the piggy CLI link is installed"
+    );
+    assert!(
+        piggy_core::cli_link::exists(),
+        "CLI link survives a saver uninstall"
+    );
+
+    // Turning the CLI tool off is what finally removes the line.
+    piggy_core::cli_link::uninstall().unwrap();
+    let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap_or_default();
+    assert!(
+        !profile.contains("piggy (managed PATH)"),
+        "PATH line removed once nothing needs ${{PIGGY_BIN}}"
+    );
+}
+
+#[test]
 fn failed_plugin_install_rolls_back() {
     let sb = Sandbox::new();
     sb.seed_settings_from_fixture("minimal.json");

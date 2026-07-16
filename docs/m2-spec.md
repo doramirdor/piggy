@@ -13,7 +13,7 @@ Locked decisions for the install engine. The catalog lives in `registry/catalog.
   records**, never by guessing. Removal deletes only exact matches; user hooks (e.g. this
   machine's openbar wildcard hooks) are untouchable.
 
-## Merge engine (crates/piggy-core::config)
+## Merge engine (`crates/piggy-core/src/settings.rs`)
 
 1. Every write: read current bytes → timestamped backup `~/.piggy/backups/settings-<RFC3339>.json`
    (plus first-ever backup preserved as `pre-piggy.json`, the Restore Defaults target; keep last 50 others).

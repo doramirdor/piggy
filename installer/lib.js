@@ -3,7 +3,7 @@
 /**
  * Pure, network-free logic for the piggybank installer.
  *
- * Everything in this file takes plain data in and returns plain data out —
+ * Everything in this file takes plain data in and returns plain data out -
  * no fs, no https, no child_process. That's what lets test/lib.test.js
  * exercise the release-resolution / asset-pick / checksum-verify logic
  * with fixture JSON and no network access.
@@ -36,7 +36,7 @@ function mapNodeArchToAssetArch(nodeArch) {
 function resolveConfig(pkgJson) {
   const cfg = (pkgJson && pkgJson.piggy) || {};
   return {
-    repo: cfg.repo || 'amirdoramir/piggy',
+    repo: cfg.repo || 'doramirdor/piggy',
     version: cfg.version || 'latest',
   };
 }
@@ -46,7 +46,7 @@ function resolveConfig(pkgJson) {
  */
 function buildReleaseApiUrl(repo, version) {
   if (!repo || typeof repo !== 'string' || !repo.includes('/')) {
-    throw new Error(`Invalid repo "${repo}" — expected "<owner>/<name>"`);
+    throw new Error(`Invalid repo "${repo}" - expected "<owner>/<name>"`);
   }
   if (!version || version === 'latest') {
     return `https://api.github.com/repos/${repo}/releases/latest`;
@@ -145,12 +145,12 @@ function verifyChecksum(buffer, expectedHex) {
  * The friendly message shown when the configured repo has no releases yet.
  */
 function buildNoReleaseMessage(repo) {
-  return `Piggy hasn't shipped its first release yet — watch https://github.com/${repo}/releases`;
+  return `Piggy hasn't shipped its first release yet - watch https://github.com/${repo}/releases`;
 }
 
 /**
  * GitHub's API returns 404 for /releases/latest when a repo has zero
- * published releases — that's how we detect the "no releases yet" case.
+ * published releases - that's how we detect the "no releases yet" case.
  */
 function isNotFoundStatus(statusCode) {
   return statusCode === 404;

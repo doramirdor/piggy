@@ -34,13 +34,15 @@ const WATCH_RETRY: Duration = Duration::from_secs(5);
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
-    // Autostart (launch-at-login) — desktop only.
+    // Autostart (launch-at-login) and the updater — desktop only.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        builder = builder.plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ));
+        builder = builder
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))
+            .plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
@@ -69,6 +71,8 @@ pub fn run() {
             commands::doctor,
             commands::reindex,
             commands::open_external,
+            commands::check_for_update,
+            commands::install_update,
         ])
         .on_window_event(|window, event| {
             // Desktop-window behaviour: closing the window keeps Piggy running
@@ -88,6 +92,12 @@ pub fn run() {
             }
 
             tray::setup(app)?;
+
+            // Re-point an opted-in `piggy` CLI link at this build's sidecar, so
+            // it survives the user moving or replacing Piggy.app. No-op unless
+            // they turned the CLI on, so launching never edits a shell profile
+            // uninvited.
+            backend::refresh_cli_link();
 
             // Background daemon: initial index + anchor, then a live filesystem
             // watcher that snapshot-tags new sessions, re-indexes on change, and

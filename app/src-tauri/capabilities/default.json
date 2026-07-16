@@ -17,6 +17,7 @@
     "core:app:default",
     "positioner:default",
     "opener:default",
-    "autostart:default"
+    "autostart:default",
+    "updater:default"
   ]
 }

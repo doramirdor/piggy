@@ -352,7 +352,7 @@
       "behaviorChanging": false,
       "claimedSavings": "60–90% (author; GPT-4 tokenizer approximation)",
       "risk": "high",
-      "exclusionReason": "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months. Shown in Discovered tab with this explanation - never installable until fixed upstream."
+      "exclusionReason": "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months. Shown in the Discovery tab with this explanation - never installable until fixed upstream."
     }
   ]
 }

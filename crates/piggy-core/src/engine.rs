@@ -1075,16 +1075,20 @@ fn run_uninstall_step(
             // ships something there (rtk's binary, another launcher shim) — only
             // the last such saver's uninstall removes it, or we'd break the
             // survivor. (The current saver is still in `state` at this point.)
-            let bin = config::piggy_bin_dir();
-            let others_need_bin = state.savers.iter().any(|(other_id, s)| {
-                other_id != id
-                    && s.installed_files
-                        .iter()
-                        .any(|f| Path::new(f).parent() == Some(bin.as_path()))
-            });
-            if others_need_bin {
+            if any_saver_uses_bin_dir(state, Some(id)) {
                 warnings.push(
                     "kept the ${PIGGY_BIN} PATH line — another saver still uses it".to_string(),
+                );
+                return Ok(None);
+            }
+            // The opt-in `piggy` CLI link lives in the same directory but is
+            // owned by the app, not by any saver, so it needs its own check:
+            // without it, turning off the last saver would silently take `piggy`
+            // off the user's PATH.
+            if crate::cli_link::exists() {
+                warnings.push(
+                    "kept the ${PIGGY_BIN} PATH line: the piggy command line tool uses it"
+                        .to_string(),
                 );
                 return Ok(None);
             }
@@ -1705,13 +1709,29 @@ const PIGGY_PATH_BEGIN: &str = "# >>> piggy (managed PATH) >>>";
 /// Closing marker of Piggy's managed `PATH` block.
 const PIGGY_PATH_END: &str = "# <<< piggy (managed PATH) <<<";
 
+/// Whether any installed saver other than `except` keeps a file directly in
+/// `<piggy_home>/bin`, i.e. whether something there still needs the managed
+/// `PATH` line.
+///
+/// Only direct children count: a saver's venv lives under `<piggy_home>/venvs`
+/// and is reached by absolute path, so it never justifies the `PATH` line.
+pub(crate) fn any_saver_uses_bin_dir(state: &PiggyState, except: Option<&str>) -> bool {
+    let bin = config::piggy_bin_dir();
+    state.savers.iter().any(|(id, s)| {
+        Some(id.as_str()) != except
+            && s.installed_files
+                .iter()
+                .any(|f| Path::new(f).parent() == Some(bin.as_path()))
+    })
+}
+
 /// Ensure `dir` is on `PATH` by appending a delimited block to `profile`.
 ///
 /// Idempotent: if the block is already present it makes no change and returns
 /// `false`. Returns `true` when it appended the block. The block is bounded by
 /// [`PIGGY_PATH_BEGIN`]/[`PIGGY_PATH_END`] so [`remove_path_block`] can strip it
 /// back out on uninstall without disturbing the user's own lines.
-fn ensure_path_block(profile: &Path, dir: &str) -> Result<bool> {
+pub(crate) fn ensure_path_block(profile: &Path, dir: &str) -> Result<bool> {
     let existing = std::fs::read_to_string(profile).unwrap_or_default();
     if existing.contains(PIGGY_PATH_BEGIN) {
         return Ok(false);
@@ -1732,7 +1752,7 @@ fn ensure_path_block(profile: &Path, dir: &str) -> Result<bool> {
 
 /// Remove Piggy's managed `PATH` block (and the blank-line separator it added)
 /// from `profile`. Returns `true` if a block was found and removed.
-fn remove_path_block(profile: &Path) -> Result<bool> {
+pub(crate) fn remove_path_block(profile: &Path) -> Result<bool> {
     let content = match std::fs::read_to_string(profile) {
         Ok(c) => c,
         Err(_) => return Ok(false),

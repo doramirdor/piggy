@@ -1,9 +1,8 @@
 import type { Tab } from "../store";
 import { useStore } from "../store";
+import { APP_VERSION } from "../screens/Settings";
 import { PiggyMark } from "./PiggyMark";
 import { Switch } from "./Switch";
-
-const APP_VERSION = "1.0.0";
 
 // Line-icon set for the sidebar nav (SF-Symbols-adjacent, 1.7px stroke).
 const ICONS: Record<Tab, JSX.Element> = {

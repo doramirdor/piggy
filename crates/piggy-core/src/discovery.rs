@@ -1,9 +1,9 @@
 //! Saver discovery (M3): surface candidate token-savers from GitHub search.
 //!
 //! Piggy searches GitHub (unauthenticated, best-effort) for the
-//! `token-optimization` / `claude-code` topics plus free text, merges and dedups
-//! the hits, drops anything already curated in the catalog, and caches the
-//! result at `~/.piggy/discovered.json`. The cache refreshes at most once a day
+//! `token-optimization` / `claude-code` topics, merges and dedups the hits,
+//! drops anything already curated in the catalog, and caches the result at
+//! `~/.piggy/discovered.json`. The cache refreshes at most once a day
 //! (a `--refresh` flag forces it). Catalog entries flagged `listed_only` — known
 //! tools Piggy deliberately will not install — are always shown here with their
 //! `exclusionReason`.
@@ -21,12 +21,16 @@ use crate::registry::Catalog;
 /// installable.
 const LISTED_ONLY: &str = "listed_only";
 
-/// The GitHub topics we search, plus free-text queries. Results are merged.
+/// The GitHub topic searches we run. Results are merged.
+///
+/// Every query is anchored to a topic. An unanchored free-text search (the old
+/// `claude code token saver in:name,description,readme`) matched any repo whose
+/// README merely mentioned those words, and since the merge sorts by stars the
+/// junk led the feed. Keep new queries topic-scoped.
 const QUERIES: &[&str] = &[
     "topic:claude-code topic:token-optimization",
     "topic:claude-code token optimizer",
     "topic:token-optimization",
-    "claude code token saver in:name,description,readme",
 ];
 
 /// One discovered repository (or a listed-only catalog entry surfaced here).
@@ -103,6 +107,24 @@ pub fn parse_search_response(json: &str) -> Result<Vec<DiscoveredRepo>> {
         .collect())
 }
 
+/// Whether a discovered repo is the home of a curated package.
+///
+/// Catalog entries sourced from pip/npm often carry no `repo`, only a package
+/// name (`headroom-ai`, `@ooples/token-optimizer-mcp`), so matching on `repo`
+/// alone lets the package's own repo come back as a "discovery". Compare the
+/// repo's name segment against the package name, ignoring case, any npm scope,
+/// and a trailing `-ai` / `-cli` (so `headroom-ai` matches
+/// `headroomlabs-ai/headroom`).
+fn repo_is_package(full_name: &str, package: &str) -> bool {
+    let repo_name = full_name.rsplit('/').next().unwrap_or(full_name);
+    let pkg = package.rsplit('/').next().unwrap_or(package);
+    let stem = pkg
+        .strip_suffix("-ai")
+        .or_else(|| pkg.strip_suffix("-cli"))
+        .unwrap_or(pkg);
+    repo_name.eq_ignore_ascii_case(pkg) || repo_name.eq_ignore_ascii_case(stem)
+}
+
 /// Merge several search result batches, dedup by `full_name` (keeping the
 /// highest star count), drop repos already curated in the catalog, sort by stars
 /// (desc, then name), and append the catalog's `listed_only` entries with their
@@ -113,18 +135,34 @@ pub fn merge_and_filter(
 ) -> Vec<DiscoveredRepo> {
     use std::collections::BTreeMap;
 
-    // Repos already curated (installable) — never re-suggest these.
-    let curated: std::collections::HashSet<String> = catalog
+    // Every repo the catalog already knows about, curated or not. Curated ones
+    // are installable, so re-suggesting them is just wrong. `listed_only` ones
+    // are deliberately never installable and get appended below with their
+    // exclusion reason, so letting the search surface them too would show the
+    // same tool twice: once as a neutral candidate, once as "Piggy won't install
+    // this, because…". Filter both here; the append is the only path that should
+    // put a listed_only entry in the results.
+    let known: std::collections::HashSet<String> = catalog
         .entries
         .iter()
-        .filter(|e| e.status != LISTED_ONLY)
         .filter_map(|e| e.source.repo.clone())
+        .collect();
+
+    // …and the packages they install, for the entries that name no repo.
+    let known_packages: Vec<String> = catalog
+        .entries
+        .iter()
+        .filter_map(|e| e.source.package.clone())
         .collect();
 
     let mut by_name: BTreeMap<String, DiscoveredRepo> = BTreeMap::new();
     for batch in batches {
         for repo in batch {
-            if curated.contains(&repo.full_name) {
+            if known.contains(&repo.full_name)
+                || known_packages
+                    .iter()
+                    .any(|p| repo_is_package(&repo.full_name, p))
+            {
                 continue;
             }
             by_name
@@ -278,5 +316,159 @@ pub fn discover(force: bool) -> Result<DiscoveryCache> {
                 })
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (fixture JSON only, never the network)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A catalog fixture mirroring the real shapes that bite: entries sourced
+    /// from pip/npm with no `repo` at all, one entry with a `repo`, and a
+    /// `listed_only` entry (which must still be surfaced, not filtered).
+    const CATALOG_JSON: &str = r#"{
+      "registryVersion": 1,
+      "entries": [
+        { "id": "rtk", "name": "rtk", "status": "curated_v1",
+          "source": { "type": "github_release", "repo": "rtk-ai/rtk" } },
+        { "id": "headroom", "name": "Headroom", "status": "curated_v1",
+          "source": { "type": "pip", "package": "headroom-ai" } },
+        { "id": "cto", "name": "Claude Token Optimizer", "status": "curated_v1_1",
+          "source": { "type": "npm", "package": "claude-token-optimizer" } },
+        { "id": "token-optimizer-mcp", "name": "token-optimizer-mcp",
+          "status": "listed_only", "description": "listed for transparency",
+          "source": { "type": "npm", "package": "@ooples/token-optimizer-mcp" },
+          "exclusionReason": "no clean uninstall" }
+      ]
+    }"#;
+
+    fn repo(full_name: &str, stars: u64) -> DiscoveredRepo {
+        DiscoveredRepo {
+            full_name: full_name.to_string(),
+            description: Some("a saver".into()),
+            stars,
+            url: format!("https://github.com/{full_name}"),
+            topics: vec!["claude-code".into()],
+            listed_only: false,
+            exclusion_reason: None,
+        }
+    }
+
+    fn feed_names(merged: &[DiscoveredRepo]) -> Vec<&str> {
+        merged
+            .iter()
+            .filter(|r| !r.listed_only)
+            .map(|r| r.full_name.as_str())
+            .collect()
+    }
+
+    /// Every search query must stay anchored to a topic. A bare free-text query
+    /// floods the feed with any high-star repo whose README says "token".
+    #[test]
+    fn every_query_is_topic_anchored() {
+        for q in QUERIES {
+            assert!(
+                q.contains("topic:"),
+                "query {q:?} is not topic-anchored; it will poison the feed"
+            );
+        }
+    }
+
+    /// A `listed_only` tool must appear exactly once, in the appended
+    /// transparency section with its exclusion reason. The live search finds
+    /// `ooples/token-optimizer-mcp` (★438) on its own, so without filtering it
+    /// out of the feed the same tool showed up twice: once as a neutral
+    /// candidate, and once as "Piggy won't install this, because…".
+    #[test]
+    fn a_listed_only_tool_is_surfaced_once_not_also_in_the_feed() {
+        let catalog = Catalog::from_json(CATALOG_JSON).unwrap();
+        let batch = vec![
+            repo("ooples/token-optimizer-mcp", 438),
+            repo("stranger/lean-ctx", 120),
+        ];
+        let merged = merge_and_filter(vec![batch], &catalog);
+
+        assert_eq!(
+            feed_names(&merged),
+            vec!["stranger/lean-ctx"],
+            "the listed_only tool must not ride in on the search feed"
+        );
+        let listed: Vec<_> = merged.iter().filter(|r| r.listed_only).collect();
+        assert_eq!(listed.len(), 1, "surfaced exactly once");
+        assert_eq!(
+            listed[0].exclusion_reason.as_deref(),
+            Some("no clean uninstall"),
+            "and it keeps the reason that is the whole point of listing it"
+        );
+    }
+
+    /// The bug: `headroom` is curated (`defaultOn`) but sourced from pip with no
+    /// `repo`, so its own repo came back as a fresh "discovery" at ★59,496.
+    #[test]
+    fn package_sourced_catalog_entries_filter_their_repo() {
+        let catalog = Catalog::from_json(CATALOG_JSON).unwrap();
+        let batch = vec![
+            repo("headroomlabs-ai/headroom", 59_496),
+            repo("ooples/claude-token-optimizer", 800),
+            repo("rtk-ai/rtk", 4_200),
+            repo("stranger/lean-ctx", 120),
+        ];
+
+        let merged = merge_and_filter(vec![batch], &catalog);
+
+        assert_eq!(
+            feed_names(&merged),
+            vec!["stranger/lean-ctx"],
+            "curated savers must never come back as discoveries, whether they \
+             are sourced by repo (rtk) or by package (headroom, cto)"
+        );
+        // The listed_only entry is still surfaced, with its reason.
+        let listed = merged
+            .iter()
+            .find(|r| r.listed_only)
+            .expect("listed_only entry surfaced");
+        assert_eq!(listed.full_name, "token-optimizer-mcp");
+        assert_eq!(listed.exclusion_reason.as_deref(), Some("no clean uninstall"));
+    }
+
+    /// The name-segment match is case-insensitive and ignores an npm scope, but
+    /// must not swallow unrelated repos that merely share a word.
+    #[test]
+    fn package_match_is_narrow() {
+        assert!(repo_is_package("headroomlabs-ai/headroom", "headroom-ai"));
+        assert!(repo_is_package("Someone/HeadRoom", "headroom-ai"));
+        assert!(repo_is_package(
+            "ooples/token-optimizer-mcp",
+            "@ooples/token-optimizer-mcp"
+        ));
+        assert!(repo_is_package("x/nadirclaw", "nadirclaw"));
+
+        // Different tools, not the curated package.
+        assert!(!repo_is_package("other/headroom-monitor", "headroom-ai"));
+        assert!(!repo_is_package("other/claude-tokens", "claude-token-optimizer"));
+        // The owner segment never counts on its own.
+        assert!(!repo_is_package("headroom/something-else", "headroom-ai"));
+    }
+
+    #[test]
+    fn parse_and_dedup_keeps_the_highest_star_count() {
+        let json = r#"{"items":[
+          {"full_name":"a/one","description":"d","stargazers_count":10,
+           "html_url":"https://github.com/a/one","topics":["claude-code"]},
+          {"full_name":"a/two","stargazers_count":5,"html_url":"https://github.com/a/two"}
+        ]}"#;
+        let parsed = parse_search_response(json).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].stars, 10);
+        assert_eq!(parsed[1].description, None);
+
+        let catalog = Catalog::from_json(CATALOG_JSON).unwrap();
+        let merged = merge_and_filter(vec![parsed, vec![repo("a/two", 999)]], &catalog);
+        // Sorted by stars desc: a/two (999, deduped up) before a/one (10).
+        assert_eq!(feed_names(&merged), vec!["a/two", "a/one"]);
     }
 }

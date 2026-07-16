@@ -186,6 +186,15 @@ export interface Settings {
   holdoutFraction: number;
   rotationEnabled: boolean;
   launchAtLogin: boolean;
+  /** Whether the `piggy` CLI is linked onto the user's PATH. */
+  cliTool: boolean;
+}
+
+/** A release newer than the running build. */
+export interface UpdateInfo {
+  version: string;
+  currentVersion: string;
+  notes: string | null;
 }
 
 export interface DoctorCheck {

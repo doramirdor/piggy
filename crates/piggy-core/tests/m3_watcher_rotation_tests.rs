@@ -278,6 +278,70 @@ fn rotation_applies_when_idle_then_manual_pauses_it() {
     assert_eq!(store.rotation_state().unwrap().0, 1);
 }
 
+#[test]
+fn a_saver_left_off_after_the_holdout_is_restamped_not_left_tagged_holdout() {
+    // Regression: `tick` used to call `set_enabled_src` only when a saver's
+    // enabled state actually flipped. The holdout slot (pos 0) turns every saver
+    // off; the first single-off slot (pos 1) wants savers[0] off too, so it did
+    // not flip and kept `last_toggle_source = "holdout"` from the slot before.
+    // `tagging::source_for` then labels that saver's row "holdout", and
+    // `attribution` files ANY session carrying a holdout row into the holdout
+    // baseline - so pos-1 sessions, which ran with the other savers ON, polluted
+    // the all-off baseline and biased the headline toward understating savings.
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("openbar.json");
+    let catalog = Catalog::embedded();
+
+    // Three rotation-controlled savers, none a claude_plugin (so toggling stays
+    // local to settings.json) and none conflicting. Ordering: sweep, rtk, cto.
+    let mut state = PiggyState::default();
+    for id in ["sweep", "rtk", "cto"] {
+        state.savers.insert(id.into(), saver(id, true, None));
+    }
+    state.save().unwrap();
+    assert_eq!(
+        rotation::controlled_savers(&catalog, &PiggyState::load().unwrap()),
+        vec!["sweep".to_string(), "rtk".to_string(), "cto".to_string()]
+    );
+
+    let mut store = Store::open(&sb.home()).unwrap();
+    let far_future = 4_000_000_000u64; // idle: no jsonl in projects
+
+    // pos 0 = holdout: every saver off, every source "holdout".
+    rotation::tick(&catalog, &mut store, &sb.projects(), far_future, 600).unwrap();
+    let st = PiggyState::load().unwrap();
+    for id in ["sweep", "rtk", "cto"] {
+        assert!(!st.savers[id].enabled, "{id} is off during the holdout");
+        assert_eq!(
+            st.savers[id].last_toggle_source.as_deref(),
+            Some(source::HOLDOUT),
+            "{id} is sourced to the holdout"
+        );
+    }
+    assert_eq!(store.rotation_state().unwrap().0, 1);
+
+    // pos 1 = single-off(sweep): sweep stays off, rtk and cto come back on.
+    rotation::tick(&catalog, &mut store, &sb.projects(), far_future, 600).unwrap();
+    let st = PiggyState::load().unwrap();
+    assert!(!st.savers["sweep"].enabled, "sweep is the single-off saver");
+    assert!(st.savers["rtk"].enabled && st.savers["cto"].enabled);
+
+    // The bug: sweep did not flip, so its source was never re-stamped.
+    assert_eq!(
+        st.savers["sweep"].last_toggle_source.as_deref(),
+        Some(source::ROTATION),
+        "sweep stayed off across the slot boundary, but this is a rotation slot, \
+         not a holdout - leaving it tagged 'holdout' files sessions that ran with \
+         rtk and cto ON into the all-off baseline"
+    );
+    for id in ["rtk", "cto"] {
+        assert_eq!(
+            st.savers[id].last_toggle_source.as_deref(),
+            Some(source::ROTATION)
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Watcher smoke test: a new jsonl is indexed and snapshot-tagged.
 // ---------------------------------------------------------------------------

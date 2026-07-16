@@ -36,8 +36,8 @@ export function Discover() {
         <div>
           <h1>Discover</h1>
           <div className="sub">
-            Savers Piggy found in the wild. Nothing here installs yet - claims are the author's own,
-            never Piggy's measurements.
+            Candidates Piggy spotted on GitHub. Piggy has not vetted or measured any of them, and
+            nothing here installs. Read them on GitHub and judge for yourself.
           </div>
         </div>
         <button className="btn" disabled={refreshing} onClick={refresh}>
@@ -55,6 +55,9 @@ export function Discover() {
               )}
             </div>
             <div className="ddesc">{f.description}</div>
+            {/* The backend always sends authorClaims: null today, so this never
+                renders. Kept because the field is still in the DTO and any claim
+                shown here would be the author's own, never Piggy's measurement. */}
             {f.authorClaims && <span className="claim">{f.authorClaims}</span>}
             <div className="dfoot">
               {f.repoUrl && (

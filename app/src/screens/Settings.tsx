@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import { Switch } from "../components/Switch";
-import type { Doctor, Settings as SettingsData } from "../types";
+import type { Doctor, Settings as SettingsData, UpdateInfo } from "../types";
 
-const APP_VERSION = "0.1.0";
+// Single source of truth for the version shown in the UI (the sidebar imports it
+// too). Bump this in step with tauri.conf.json / Cargo.toml / package.json.
+export const APP_VERSION = "0.1.0";
 
 export function Settings() {
   const showError = useStore((s) => s.showError);
@@ -14,6 +16,9 @@ export function Settings() {
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [restoreMsg, setRestoreMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [updateNote, setUpdateNote] = useState<string | null>(null);
 
   useEffect(() => {
     api.settingsGet().then(setSettings).catch((e) => showError(e));
@@ -26,6 +31,34 @@ export function Settings() {
       setSettings(await api.settingsSet(next));
     } catch (e) {
       showError(e);
+    }
+  };
+
+  // Checking is manual and reports inline: an update endpoint that is briefly
+  // unreachable is not worth a modal error banner over the whole app.
+  const checkUpdate = async () => {
+    setChecking(true);
+    setUpdateNote(null);
+    try {
+      const found = await api.checkForUpdate();
+      setUpdate(found);
+      if (!found) setUpdateNote(`Piggy ${APP_VERSION} is the latest version.`);
+    } catch (e) {
+      const detail = (e as { detail?: string })?.detail;
+      setUpdateNote(detail ? `Couldn't check for updates: ${detail}` : "Couldn't check for updates.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setBusy(true);
+    try {
+      // On success the app relaunches into the new build and never returns here.
+      await api.installUpdate();
+    } catch (e) {
+      showError(e);
+      setBusy(false);
     }
   };
 
@@ -111,6 +144,47 @@ export function Settings() {
             label="Open at login"
           />
         </div>
+
+        <div className="setrow">
+          <div className="smeta">
+            <div className="sname">Command line tool</div>
+            <div className="sdesc">
+              Adds the <code>piggy</code> command to your terminal for stats and reports. Piggy
+              links it into ~/.piggy/bin and adds that folder to your PATH in ~/.zshrc. Turning
+              it off removes the link; the PATH line stays only while a saver still needs it.
+            </div>
+          </div>
+          <Switch
+            on={settings.cliTool}
+            onChange={(v) => commit({ ...settings, cliTool: v })}
+            label="Command line tool"
+          />
+        </div>
+      </div>
+
+      <div className="sect">Updates</div>
+      <div className="rows">
+        <div className="setrow">
+          <div className="smeta">
+            <div className="sname">
+              {update ? `Version ${update.version} is available` : `Piggy ${APP_VERSION}`}
+            </div>
+            <div className="sdesc">
+              {update
+                ? "Piggy will download it, check its signature, and restart."
+                : updateNote ?? "Piggy checks only when you ask it to."}
+            </div>
+          </div>
+          {update ? (
+            <button className="btn" disabled={busy} onClick={installUpdate}>
+              {busy ? "Installing…" : "Install and restart"}
+            </button>
+          ) : (
+            <button className="btn" disabled={checking} onClick={checkUpdate}>
+              {checking ? "Checking…" : "Check for updates"}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="sect">Health</div>
@@ -134,8 +208,9 @@ export function Settings() {
       {restoreMsg && <div className="foot-note">{restoreMsg}</div>}
 
       <div className="foot-note">
-        Piggy {APP_VERSION} · Piggy never phones home. Network is used only to fetch savers from
-        GitHub.
+        Piggy {APP_VERSION} · No telemetry, no accounts, and your usage data never leaves your
+        Mac. Piggy itself only talks to GitHub. Turning a saver on runs that saver's own
+        installer, which downloads from the saver's own home.
       </div>
 
       {confirmRestore && (

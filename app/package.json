@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run build:sidecar && vite",
     "dev:mock": "VITE_MOCK=1 vite --port 5173 --strictPort",
-    "build": "tsc --noEmit && vite build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build": "npm run build:sidecar && tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri"

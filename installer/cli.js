@@ -184,7 +184,7 @@ async function detachDmg(mountPoint) {
   try {
     await execFileP('hdiutil', ['detach', mountPoint]);
   } catch (err) {
-    // Volume may still be "in use" briefly after Finder/copy activity — retry with force.
+    // Volume may still be "in use" briefly after Finder/copy activity - retry with force.
     await execFileP('hdiutil', ['detach', mountPoint, '-force']);
   }
 }
@@ -209,7 +209,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-${c.pink}🐷 piggybank${c.reset} — installer for Piggy, the macOS menu bar app
+${c.pink}🐷 piggybank${c.reset} - installer for Piggy, the macOS menu bar app
 
 ${c.bold}Usage${c.reset}
   npx piggybank              Install the latest Piggy release
@@ -281,7 +281,7 @@ async function runInstall(flags) {
   if (!checksumsAsset) {
     throw new Error(
       'This release has no checksums.txt asset, so the download cannot be verified. ' +
-        'Refusing to continue — please report this to the Piggy maintainers.'
+        'Refusing to continue - please report this to the Piggy maintainers.'
     );
   }
 
@@ -313,7 +313,7 @@ async function runInstall(flags) {
       `Checksum mismatch for ${dmgAsset.name}.\n` +
         `  expected: ${expectedHash}\n` +
         `  actual:   ${actualHash}\n` +
-        'The download may be corrupted or tampered with. Aborting — nothing was installed.'
+        'The download may be corrupted or tampered with. Aborting - nothing was installed.'
     );
   }
   success('Checksum verified.');
@@ -349,7 +349,7 @@ async function runInstall(flags) {
       console.log('');
       piggy(`${c.bold}All set!${c.reset} Open Piggy from /Applications or Spotlight.`);
     } else {
-      info(`Opening ${mountPoint} in Finder — drag ${appName} onto Applications to finish.`);
+      info(`Opening ${mountPoint} in Finder - drag ${appName} onto Applications to finish.`);
       await execFileP('open', [mountPoint]);
       await ask(`${c.dim}Press Enter when you're done (this ejects the disk image)… ${c.reset}`);
 
@@ -357,13 +357,13 @@ async function runInstall(flags) {
       await detachDmg(mountPoint);
 
       console.log('');
-      piggy('Done — thanks for trying Piggy!');
+      piggy('Done - thanks for trying Piggy!');
     }
   } catch (err) {
     try {
       await detachDmg(mountPoint);
     } catch (_detachErr) {
-      // Original error is more useful than a cleanup failure — swallow this one.
+      // Original error is more useful than a cleanup failure - swallow this one.
     }
     throw err;
   } finally {
@@ -380,7 +380,7 @@ async function runUninstall(flags) {
 
   const appPath = '/Applications/Piggy.app';
   if (!fs.existsSync(appPath)) {
-    info(`${appPath} isn't installed — nothing to do.`);
+    info(`${appPath} isn't installed - nothing to do.`);
     return;
   }
 
@@ -389,7 +389,7 @@ async function runUninstall(flags) {
     shouldRemove = await confirm(`${c.yellow}Remove ${appPath}? [y/N] ${c.reset}`);
   }
   if (!shouldRemove) {
-    info('Cancelled — Piggy was not removed.');
+    info('Cancelled - Piggy was not removed.');
     return;
   }
 
@@ -415,7 +415,7 @@ async function main() {
 
   if (process.platform !== 'darwin') {
     piggy('Piggy is a macOS menu bar app, so this installer only runs on macOS.');
-    info("On another OS there's nothing to install here — grab a Mac, or watch the repo for updates.");
+    info("On another OS there's nothing to install here - grab a Mac, or watch the repo for updates.");
     process.exitCode = 1;
     return;
   }

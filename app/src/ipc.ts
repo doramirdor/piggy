@@ -19,6 +19,7 @@ import type {
   SourcesOverview,
   StatsOverview,
   SweepReport,
+  UpdateInfo,
   UsageSeries,
 } from "./types";
 
@@ -58,6 +59,8 @@ export const api = {
   doctor: () => call<Doctor>("doctor"),
   reindex: () => call<ReindexResult>("reindex"),
   openExternal: (url: string) => call<void>("open_external", { url }),
+  checkForUpdate: () => call<UpdateInfo | null>("check_for_update"),
+  installUpdate: () => call<void>("install_update"),
 };
 
 /** Subscribe to the background `piggy://stats-updated` event (no-op in mock). */
