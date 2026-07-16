@@ -251,4 +251,16 @@ impl Entry {
     pub fn has_install_steps(&self) -> bool {
         !self.install.steps.is_empty()
     }
+
+    /// The launch command a wrapper-model saver installs (the `name` of its
+    /// `write_launcher` install step, e.g. Headroom's `piggy-claude`). `None`
+    /// for savers that apply to every session without a special launcher.
+    pub fn launch_command(&self) -> Option<String> {
+        self.install
+            .steps
+            .iter()
+            .filter(|s| step_kind(s) == "write_launcher")
+            .find_map(|s| s.get("name").and_then(Value::as_str))
+            .map(String::from)
+    }
 }

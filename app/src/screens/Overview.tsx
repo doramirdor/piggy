@@ -4,6 +4,7 @@ import { api } from "../ipc";
 import { StreamBars } from "../components/StreamBars";
 import { SourceGrid } from "../components/SourceGrid";
 import { SaverIcon } from "../components/SaverIcon";
+import { CopyCmd } from "../components/CopyCmd";
 import { badgeView } from "../lib/badge";
 import { formatTokens, commafy } from "../lib/format";
 import { SweepSheet } from "./SweepSheet";
@@ -76,6 +77,13 @@ export function Overview() {
     return t === "measured" || t === "estimated";
   });
 
+  // Wrapper-model savers that are on but have produced no delta yet: the user
+  // may still be launching plain claude, which those savers never touch - keep
+  // the launch instruction in view until real numbers arrive.
+  const launchSavers = (savers?.savers ?? []).filter(
+    (s) => s.enabled && s.launchCommand && s.badge.delta == null,
+  );
+
   const recommended = sweep?.items.filter((i) => i.recommendDisable) ?? [];
 
   return (
@@ -138,6 +146,16 @@ export function Overview() {
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>
+
+      {launchSavers.map((s) => (
+        <div className="hint launch" key={s.id}>
+          <div className="t">
+            <b>{s.name}</b> is on, but it only saves in sessions you start with{" "}
+            <CopyCmd cmd={s.launchCommand!} />.{" "}
+            <small>Start Claude with it to see measured savings here.</small>
+          </div>
+        </div>
+      ))}
 
       {live && (
         <div className="metric-grid">

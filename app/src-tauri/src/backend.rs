@@ -554,6 +554,11 @@ pub struct SaverRow {
     pub badge: Badge,
     /// True when the saver exposes user-tunable options (a Configure control).
     pub configurable: bool,
+    /// Wrapper-model savers only: the command that starts a Claude session
+    /// through this saver (e.g. Headroom's `piggy-claude`). `None` when the
+    /// saver applies to every session. The UI renders a copyable launch
+    /// instruction when set.
+    pub launch_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -616,6 +621,7 @@ fn saver_row(e: &Entry, state: &PiggyState, attr: Option<&SaverAttribution>) -> 
             n: 0,
         }),
         configurable: !e.config_options.is_empty(),
+        launch_command: e.launch_command(),
     }
 }
 
@@ -746,6 +752,18 @@ fn conflict_notice(
     Some(parts.join(" "))
 }
 
+/// The "how do I actually use it" heads-up for wrapper-model savers: they only
+/// apply to sessions started with their launch command, so every turn-on
+/// repeats the instruction. `None` for savers without a launch command.
+fn launch_notice(catalog: &Catalog, id: &str) -> Option<String> {
+    let e = catalog.get(id)?;
+    let cmd = e.launch_command()?;
+    Some(format!(
+        "{} is on. It saves only in sessions you start with {cmd}. Plain claude sessions are untouched.",
+        e.name
+    ))
+}
+
 pub fn savers_list() -> Result<SaversState, ApiError> {
     build_savers_state().map_err(generic("Couldn't read your savers"))
 }
@@ -786,10 +804,17 @@ pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
         )),
         Ok(_) => {
             let mut result = build_savers_state().map_err(generic("Couldn't read your savers"))?;
-            // Turning a saver on can auto-disable one it conflicts with; tell the user.
+            // Turning a saver on can auto-disable a conflicting one, and a
+            // wrapper-model saver only works in sessions started through its
+            // launch command - the user must hear about both right away.
             if on {
+                let mut parts: Vec<String> = Vec::new();
                 if let Ok(after) = PiggyState::load() {
-                    result.notice = conflict_notice(&catalog, &before_enabled, &after);
+                    parts.extend(conflict_notice(&catalog, &before_enabled, &after));
+                }
+                parts.extend(launch_notice(&catalog, &id));
+                if !parts.is_empty() {
+                    result.notice = Some(parts.join(" "));
                 }
             }
             Ok(result)
@@ -896,8 +921,19 @@ pub fn master_toggle(on: bool) -> Result<SaversState, ApiError> {
     // Only surface the "turned off X" heads-up when turning the master on; turning
     // it off intentionally disables everything, so a diff there is just noise.
     if on {
+        let mut parts: Vec<String> = Vec::new();
         if let Ok(after) = PiggyState::load() {
-            result.notice = conflict_notice(&catalog, &before_enabled, &after);
+            parts.extend(conflict_notice(&catalog, &before_enabled, &after));
+            // Wrapper-model savers in the default-on set (Headroom) need their
+            // launch instruction whenever the master switch turns them on.
+            for id in default_on_ids(&catalog) {
+                if after.savers.get(&id).map(|s| s.enabled).unwrap_or(false) {
+                    parts.extend(launch_notice(&catalog, &id));
+                }
+            }
+        }
+        if !parts.is_empty() {
+            result.notice = Some(parts.join(" "));
         }
     }
     Ok(result)

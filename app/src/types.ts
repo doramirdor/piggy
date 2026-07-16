@@ -111,6 +111,10 @@ export interface SaverRow {
   badge: Badge;
   /** True when the saver exposes user-tunable options (shows Configure). */
   configurable: boolean;
+  /** Wrapper-model savers only: the command that starts a session through this
+   * saver (e.g. Headroom's piggy-claude). Null when the saver applies to every
+   * session. */
+  launchCommand: string | null;
 }
 
 export interface SaversState {

@@ -30,9 +30,13 @@ approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks)
 - `stats_overview(period)` → totals per stream + est cost + headline multiplier {value|null,
   label: "measured"|"estimated"|"not_enough_data", n_holdout}
 - `savers_list()` → registry entries joined with install state + per-saver badge
-  {kind: measured|measuring|claimed, delta, n}
+  {kind: measured|measuring|claimed, delta, n}. Rows carry `launchCommand` for wrapper-model
+  savers (the command that starts a session through the saver, e.g. Headroom's `piggy-claude`;
+  null otherwise).
 - `saver_toggle(id, on)` / `master_toggle(on)` → engine install/enable/disable; returns new
-  state or plain-language error {title, detail, rolledBack: bool}
+  state or plain-language error {title, detail, rolledBack: bool}. On success the returned state
+  may carry a one-line `notice` (conflict auto-disable, and the launch instruction for
+  wrapper-model savers) that the UI shows as an info banner.
 - `sweep_report()` / `sweep_apply(item_ids)` / `sweep_restore(item_ids)`
 - `discovered_list()` → discovery module results (cached, refresh ≤1/day)
 - `share_card_data(period)` → numbers for the card; `save_share_card(png_bytes)` → writes

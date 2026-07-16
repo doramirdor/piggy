@@ -271,7 +271,7 @@
       "id": "headroom",
       "name": "Headroom",
       "plainLabel": "Deep compression engine",
-      "description": "Compresses everything Claude reads - launch Claude via the piggy-claude wrapper",
+      "description": "Compresses everything Claude reads. Works in sessions you start with piggy-claude.",
       "layer": "proxy",
       "installType": "venv+wrapper",
       "status": "curated_v1",
