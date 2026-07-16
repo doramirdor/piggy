@@ -125,8 +125,14 @@ impl SessionRates {
 /// Session-level A/B classification for the headline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionGroup {
-    /// Every managed saver was on.
+    /// Every managed saver was on, and every one of them was there because
+    /// Piggy's scheduler put it there (`rotation` / `holdout`). Randomized, so
+    /// measured-eligible.
     FullOn,
+    /// Every managed saver was on, but at least one because the user pinned it
+    /// (`manual`) or it predates Piggy. Same state, non-randomized provenance:
+    /// usable as an observational ON group, capped at `estimated`.
+    FullOnObservational,
     /// Rotation holdout — every saver off.
     Holdout,
     /// Predates Piggy — observational baseline (all off).
@@ -229,6 +235,16 @@ pub struct Headline {
     pub baseline: HeadlineBaseline,
     pub n_full_on: usize,
     pub n_baseline: usize,
+    /// Whether the full-on side is backed by **randomized** sessions (every
+    /// saver on because Piggy's scheduler said so). False once the ON group has
+    /// to lean on manually-pinned sessions, which are observational however many
+    /// of them there are.
+    ///
+    /// A `measured` label needs BOTH sides randomized, so callers must check
+    /// this as well as `baseline == Holdout`. Without it, "recent manual-on era
+    /// vs older holdout era" reads as measured and any drift between the eras is
+    /// credited to the savers.
+    pub on_randomized: bool,
     /// `median(baseline spend rate) / median(full_on spend rate)` — "lasts N.N×
     /// longer". Price-weighted, hence `estimated`. `None` if not computable.
     pub multiplier: Option<f64>,
@@ -356,14 +372,15 @@ impl Store {
                 r.get::<_, String>(2)?,
             ))
         })?;
-        let mut per_session: std::collections::HashMap<String, (bool, bool, bool, bool)> =
+        let mut per_session: std::collections::HashMap<String, (bool, bool, bool, bool, bool)> =
             std::collections::HashMap::new();
-        // tuple = (any_holdout, any_pre_install, all_enabled, any_disabled)
+        // tuple = (any_holdout, any_pre_install, all_enabled, any_disabled,
+        //          all_randomized)
         for row in rows {
             let (sid, enabled, src) = row?;
             let e = per_session
                 .entry(sid)
-                .or_insert((false, false, true, false));
+                .or_insert((false, false, true, false, true));
             if src == source::HOLDOUT {
                 e.0 = true;
             }
@@ -376,9 +393,12 @@ impl Store {
                 e.2 = false;
                 e.3 = true;
             }
+            if !is_randomized(&src) {
+                e.4 = false;
+            }
         }
         let mut out = Vec::new();
-        for (sid, (holdout, pre, all_on, any_off)) in per_session {
+        for (sid, (holdout, pre, all_on, any_off, all_randomized)) in per_session {
             let Some(rates) = rate_map.get(&sid) else {
                 continue;
             };
@@ -387,7 +407,17 @@ impl Store {
             } else if pre {
                 SessionGroup::PreInstall
             } else if all_on && !any_off {
-                SessionGroup::FullOn
+                // Same "everything on" state, but only randomized provenance can
+                // back a measured claim. A user who pins savers on by hand takes
+                // them out of rotation for good, so without this split a
+                // manual-on era compared against an older randomized holdout era
+                // reads as a green measured headline, with any drift between the
+                // eras landing on the savers.
+                if all_randomized {
+                    SessionGroup::FullOn
+                } else {
+                    SessionGroup::FullOnObservational
+                }
             } else {
                 SessionGroup::Mixed
             };
@@ -704,9 +734,14 @@ pub fn headline_with_map(
 ) -> Result<Headline> {
     let classified = store.classified_sessions(rate_map)?;
 
-    let full_on: Vec<SessionRates> = classified
+    let full_on_randomized: Vec<SessionRates> = classified
         .iter()
         .filter(|(g, _)| *g == SessionGroup::FullOn)
+        .map(|(_, r)| r.clone())
+        .collect();
+    let full_on_observational: Vec<SessionRates> = classified
+        .iter()
+        .filter(|(g, _)| *g == SessionGroup::FullOnObservational)
         .map(|(_, r)| r.clone())
         .collect();
     let holdout: Vec<SessionRates> = classified
@@ -730,11 +765,23 @@ pub fn headline_with_map(
     } else {
         (HeadlineBaseline::None, Vec::new())
     };
-    let ceiling = match baseline_kind {
+    let baseline_ceiling = match baseline_kind {
         HeadlineBaseline::Holdout => Badge::Measured,
         // No live holdout: any figure is observational.
         HeadlineBaseline::PreInstall | HeadlineBaseline::None => Badge::Estimated,
     };
+
+    // The ON side gets the same treatment as the baseline, and as the per-saver
+    // path in `attribute_with_map`. A randomized holdout on one side cannot make
+    // a manual-on era on the other side measured: randomization is a property of
+    // the contrast, not of the off-switch.
+    let (full_on, on_ceiling) = pick_group(full_on_randomized, full_on_observational);
+    let ceiling = if baseline_ceiling == Badge::Measured && on_ceiling == Badge::Measured {
+        Badge::Measured
+    } else {
+        Badge::Estimated
+    };
+    let on_randomized = on_ceiling == Badge::Measured;
     let n_baseline = baseline.len();
 
     // Price-weighted "lasts N.N× longer" (estimated).
@@ -771,6 +818,7 @@ pub fn headline_with_map(
         baseline: baseline_kind,
         n_full_on: full_on.len(),
         n_baseline,
+        on_randomized,
         multiplier,
         streams,
     })

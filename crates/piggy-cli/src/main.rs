@@ -1004,8 +1004,14 @@ fn cmd_report(json: bool) -> Result<()> {
             "Headline (full-on {} vs {} {} sessions):",
             hl.n_full_on, baseline_label, hl.n_baseline
         );
+        // A holdout baseline is not enough on its own: the full-on side has to be
+        // randomized too, or the contrast is a manual-on era against a holdout
+        // era and any drift between them lands on the savers.
         let per_turn_label = match hl.baseline {
-            HeadlineBaseline::Holdout => "  measured per-turn savings:",
+            HeadlineBaseline::Holdout if hl.on_randomized => "  measured per-turn savings:",
+            HeadlineBaseline::Holdout => {
+                "  estimated per-turn savings (savers pinned on by hand, so not randomized):"
+            }
             _ => "  estimated per-turn savings (observational baseline):",
         };
         println!("{per_turn_label}");

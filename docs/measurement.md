@@ -60,7 +60,12 @@ Per saver X:
   if the 90% CI crosses zero or either group has < 10 sessions → display **"not enough data
   yet · n sessions"** instead of a number. Never show a point estimate without n.
 - Overall headline: full-on vs holdout only (not pre-install, unless zero holdouts exist,
-  then labeled `vs. history (observational)`). "Your plan lasts N.N× longer" =
+  then labeled `vs. history (observational)`). The same both-sides rule applies here: a
+  full-on session counts as randomized only if **every** saver in it was on because the
+  scheduler said so. A session where any saver is pinned on by hand is an observational
+  full-on, so a holdout baseline alone does not earn `measured` and the headline is
+  labelled `estimated` instead. Both `piggy report` and the GUI headline check this, not
+  just the baseline kind. "Your plan lasts N.N× longer" =
   `median_rate(holdout) / median_rate(full_on)` on the plan-metered streams
   (input + output + cache_create at their price weights; cache_read excluded from "spend"
   weighting - labeled estimated because weights come from pricing).

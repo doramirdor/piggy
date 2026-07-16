@@ -902,3 +902,74 @@ fn a_manual_on_era_is_not_measured_against_an_older_randomised_off_era() {
         "an estimated badge still carries a point estimate"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 11. The HEADLINE must not measure a manual-on era against a holdout era.
+// ---------------------------------------------------------------------------
+//
+// The session-level mirror of test 10, on the number users actually read:
+// "Your Claude plan lasts N.N× longer, measured against N holdout sessions".
+//
+// `classified_sessions` used to decide FullOn purely on "every row enabled",
+// never consulting the row's source, while the baseline side WAS source-split.
+// So a session where every saver is (enabled, manual) counted as a randomized
+// full-on session, and the headline compared a manual-on era against an older
+// randomized holdout era and badged it measured. Same confound as test 10, one
+// layer up, and far more visible.
+
+#[test]
+fn the_headline_does_not_measure_a_manual_on_era_against_a_holdout_era() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00BA_DBED);
+
+    // Older randomised holdout era: everything off, ~2000 tokens/turn.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+
+    // Later manual-on era: the user pinned the saver on, and their work is
+    // lighter now (~1000/turn). The saver did nothing; the gap is era drift.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("manual-full-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::MANUAL)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x1357).unwrap();
+    eprintln!(
+        "[headline_manual_on] baseline={:?} n_full_on={} n_baseline={} on_randomized={} mult={:?}",
+        hl.baseline, hl.n_full_on, hl.n_baseline, hl.on_randomized, hl.multiplier
+    );
+
+    // The multiplier still computes (~2x) and is still worth showing. What it
+    // must not do is call itself measured.
+    assert!(
+        !hl.on_randomized,
+        "a full-on group made of manually-pinned sessions is not randomized"
+    );
+    for s in &hl.streams {
+        assert_ne!(
+            s.badge,
+            Badge::Measured,
+            "stream {:?}: a manual-on era vs a holdout era is observational drift, \
+             not a measured saving",
+            s.stream
+        );
+    }
+}

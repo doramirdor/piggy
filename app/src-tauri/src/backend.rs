@@ -339,15 +339,25 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         0
     };
     let has_mult = hl.multiplier.is_some();
-    let measured = has_mult
-        && hl.baseline == HeadlineBaseline::Holdout
-        && hl.n_full_on >= MIN_GROUP
-        && hl.n_baseline >= MIN_GROUP;
+    let enough = hl.n_full_on >= MIN_GROUP && hl.n_baseline >= MIN_GROUP;
+    // `measured` needs BOTH sides randomized, not just a live holdout baseline.
+    // `on_randomized` goes false once the full-on side leans on manually-pinned
+    // sessions, which no amount of data turns into a randomized contrast. Without
+    // that term, a recent manual-on era against an older holdout era printed
+    // "measured against N holdout sessions" and credited the savers with whatever
+    // had drifted between the two eras.
+    let measured =
+        has_mult && enough && hl.baseline == HeadlineBaseline::Holdout && hl.on_randomized;
+    // Still worth showing, just not as measured: either the baseline is the
+    // observational pre-install history, or the holdout is real but the ON side
+    // is pinned by hand.
     let estimated = has_mult
+        && enough
         && !measured
-        && hl.baseline == HeadlineBaseline::PreInstall
-        && hl.n_full_on >= MIN_GROUP
-        && hl.n_baseline >= MIN_GROUP;
+        && matches!(
+            hl.baseline,
+            HeadlineBaseline::PreInstall | HeadlineBaseline::Holdout
+        );
     let label = if measured {
         "measured"
     } else if estimated {
