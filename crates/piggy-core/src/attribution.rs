@@ -550,12 +550,37 @@ fn rate_vectors<'a>(stream: Stream, sessions: impl Iterator<Item = &'a SessionRa
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Whether an OFF session's `source` came from Piggy's **randomized** scheduler
-/// (rotation single-off or holdout). Only these are eligible for a `measured`
-/// badge. `pre_install` (predates Piggy) and `manual` (a deliberate user toggle)
-/// are non-randomized/observational and can back at most an `estimated` figure.
-fn is_randomized_off(src: &str) -> bool {
+/// Whether a session's `source` came from Piggy's **randomized** scheduler
+/// (rotation single-off / full-on, or holdout). Only these are eligible for a
+/// `measured` badge. `pre_install` (predates Piggy) and `manual` (a deliberate
+/// user toggle) are non-randomized/observational and can back at most an
+/// `estimated` figure.
+///
+/// This applies to BOTH sides of the comparison. Randomization is a property of
+/// the contrast, not of the off-switch: a manual-on era measured against an
+/// older randomized-off era is just as confounded as the reverse.
+fn is_randomized(src: &str) -> bool {
     src == source::ROTATION || src == source::HOLDOUT
+}
+
+/// Choose the rows for one side of the comparison, and the best badge that side
+/// can back.
+///
+/// Randomized rows alone when they meet [`MIN_GROUP`] (or when there is nothing
+/// observational to add anyway), which keeps a `measured` claim on randomized
+/// evidence only. Otherwise pool in the observational rows for a usable figure
+/// and cap that side at `estimated`.
+fn pick_group(
+    randomized: Vec<SessionRates>,
+    observational: Vec<SessionRates>,
+) -> (Vec<SessionRates>, Badge) {
+    if randomized.len() >= MIN_GROUP || observational.is_empty() {
+        (randomized, Badge::Measured)
+    } else {
+        let mut pooled = randomized;
+        pooled.extend(observational);
+        (pooled, Badge::Estimated)
+    }
 }
 
 /// Attribute savings to a single saver. `seed` seeds the bootstrap (fix it in
@@ -590,19 +615,24 @@ pub fn attribute_with_map(
 ) -> Result<SaverAttribution> {
     let rows = store.saver_group_rows(saver_id, rate_map)?;
 
-    let on: Vec<SessionRates> = rows
+    let on_randomized: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, _, _)| *en)
+        .filter(|(en, src, _)| *en && is_randomized(src))
+        .map(|(_, _, r)| r.clone())
+        .collect();
+    let on_observational: Vec<SessionRates> = rows
+        .iter()
+        .filter(|(en, src, _)| *en && !is_randomized(src))
         .map(|(_, _, r)| r.clone())
         .collect();
     let off_randomized: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| !*en && is_randomized_off(src))
+        .filter(|(en, src, _)| !*en && is_randomized(src))
         .map(|(_, _, r)| r.clone())
         .collect();
     let off_observational: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| !*en && !is_randomized_off(src))
+        .filter(|(en, src, _)| !*en && !is_randomized(src))
         .map(|(_, _, r)| r.clone())
         .collect();
     let mut off_by_source: BTreeMap<String, usize> = BTreeMap::new();
@@ -612,17 +642,27 @@ pub fn attribute_with_map(
         }
     }
 
-    // Prefer the randomized OFF group (measured-eligible). Only lean on the
-    // observational baseline when the randomized group can't stand on its own,
-    // and then cap the badge at `estimated`.
-    let (off_used, ceiling): (Vec<SessionRates>, Badge) =
-        if off_randomized.len() >= MIN_GROUP || off_observational.is_empty() {
-            (off_randomized, Badge::Measured)
-        } else {
-            let mut pooled = off_randomized;
-            pooled.extend(off_observational.iter().cloned());
-            (pooled, Badge::Estimated)
-        };
+    // Prefer the randomized rows on each side (measured-eligible). Only lean on
+    // observational rows when the randomized group can't stand on its own, and
+    // then cap that side's badge at `estimated`.
+    //
+    // Both sides get this treatment. Applying it to OFF alone left a hole: once
+    // a user manually toggles a saver, `rotation::controlled_savers` pins it out
+    // of rotation for good, so every later session is (enabled, source=manual)
+    // while the older rotation/holdout rows stay in `off_randomized`. With
+    // >= MIN_GROUP of those, the comparison became "recent manual-on era vs
+    // older randomized-off era" and still badged green. That contrast is
+    // observational: any drift between the eras lands on the saver.
+    let (on_used, on_ceiling) = pick_group(on_randomized, on_observational);
+    let (off_used, off_ceiling) = pick_group(off_randomized, off_observational);
+    // The weaker side governs: a randomized OFF group cannot launder a
+    // non-randomized ON group into a measured claim.
+    let ceiling = if on_ceiling == Badge::Measured && off_ceiling == Badge::Measured {
+        Badge::Measured
+    } else {
+        Badge::Estimated
+    };
+    let on = on_used;
 
     let streams = Stream::ALL
         .iter()

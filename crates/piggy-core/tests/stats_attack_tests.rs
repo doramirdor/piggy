@@ -812,3 +812,93 @@ fn subagent_rows_never_enter_attribution_groups() {
     // Because subagents are excluded, ON==OFF==1000/turn → delta ~0.
     assert!(out.delta.unwrap().abs() < 1e-6);
 }
+
+// ---------------------------------------------------------------------------
+// 10. A manual ON era must NOT be measured against an older randomised OFF era.
+// ---------------------------------------------------------------------------
+//
+// The mirror of test 7, on the other side of the comparison. The OFF group has
+// always been split by randomisation; the ON group used to take every enabled
+// row whatever its source, so this slipped through:
+//
+//   1. the user manually turns a saver on;
+//   2. `rotation::controlled_savers` drops it from rotation for good, because a
+//      manual toggle pins it;
+//   3. every later session tags it (enabled, source=manual);
+//   4. the older rotation/holdout OFF rows still sit in `off_randomized`.
+//
+// With >= MIN_GROUP randomised OFF rows the ceiling was `Measured`, so "recent
+// manual-on era vs older randomised-off era" rendered as a green measured badge.
+// Here the saver does NOTHING within a cell; the entire gap is era drift (the
+// user's later work is simply lighter). A measured badge would be a lie.
+
+#[test]
+fn a_manual_on_era_is_not_measured_against_an_older_randomised_off_era() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00C0_FFEE);
+
+    // Older randomised OFF era: 15 rotation-off sessions at ~2000 tokens/turn.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("rot-off-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::ROTATION)])
+            .unwrap();
+    }
+
+    // Later manual ON era: the user pinned the saver on, and their work happens
+    // to be lighter now (~1000/turn). The saver itself did nothing: the 50% gap
+    // is pure era drift, exactly what randomisation exists to rule out.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("manual-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::MANUAL)])
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x1357).unwrap();
+    let out = a.output().unwrap();
+    eprintln!(
+        "[manual_on_era] n_on={} n_off={} delta={:?} ci={:?} badge={:?}",
+        out.n_on, out.n_off, out.delta, out.ci, out.badge
+    );
+
+    // The comparison is not randomised on the ON side, so whatever figure comes
+    // out, it cannot be badged measured.
+    assert_ne!(
+        out.badge,
+        Badge::Measured,
+        "a manual-on era vs an older randomised-off era is observational: \
+         the ~50% gap is era drift, not the saver, and must never badge measured"
+    );
+    // Both halves of the fix, not just the downgrade. `assert_ne!` alone also
+    // passes when the ON group collapses to empty and the percentage silently
+    // disappears (n_on=0 -> Measuring), which would be a different regression
+    // wearing the same green-badge-is-gone disguise. The point is that Piggy
+    // still SHOWS the number, honestly labelled.
+    assert_eq!(
+        out.badge,
+        Badge::Estimated,
+        "the figure is still worth showing, it just isn't measured"
+    );
+    assert_eq!(
+        out.n_on, 15,
+        "the manual ON rows are pooled (not discarded) once they are the only ON \
+         evidence there is"
+    );
+    assert!(
+        out.delta.is_some(),
+        "an estimated badge still carries a point estimate"
+    );
+}

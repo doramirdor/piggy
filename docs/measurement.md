@@ -34,14 +34,27 @@ With master switch on, sessions are assigned (round-robin over a repeating block
 - Remainder: **full-on**.
 
 Rotation only ever toggles Piggy-managed savers. User's own hooks are never touched.
-If the user manually flips a toggle, rotation pauses for that saver (respect intent),
-and its badge falls back to whatever data exists.
+If the user manually flips a toggle, rotation pauses for that saver (respect intent).
+Piggy is then no longer randomizing it, so no *new* measured evidence accrues for it:
+post-toggle sessions are observational and are ignored for a measured claim. The badge
+stays `measured` only on the strength of the randomized era that came before the toggle,
+and falls to `estimated` once that era is too thin to stand on its own (see below). That
+is the honest trade for respecting intent, and it is symmetric with the pre-install
+baseline.
 
 ## Savings math
 
 Per saver X:
 - ON group: sessions where X enabled. OFF group: sessions where X disabled
   (single-off + holdout + pre-install baseline, flagged separately).
+- **Both** groups are split by source, not just the OFF one. `rotation` / `holdout` rows
+  are randomized and can back a `measured` badge; `manual` / `pre_install` rows are
+  observational and cap that side at `estimated`. Each side prefers its randomized rows
+  when they reach the 10-session bar, and pools in the observational ones only when they
+  do not. The weaker side governs the badge: a randomized OFF group cannot launder a
+  manual-on ON group into a measured claim. Randomization is a property of the contrast,
+  so "recent manual-on era vs older randomized-off era" is observational, and any drift
+  between the eras would otherwise land on the saver.
 - Delta per stream: `1 - median(rate_on) / median(rate_off)`, displayed as
   `measured 22% less input · 41 sessions`. Confidence interval via bootstrap (1,000 resamples);
   if the 90% CI crosses zero or either group has < 10 sessions → display **"not enough data
