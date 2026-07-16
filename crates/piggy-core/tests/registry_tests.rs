@@ -91,6 +91,18 @@ fn every_v1_step_kind_is_known() {
 }
 
 #[test]
+fn launch_command_is_exposed_for_wrapper_savers_only() {
+    let c = Catalog::embedded();
+    assert_eq!(
+        c.get("headroom").unwrap().launch_command().as_deref(),
+        Some("piggy-claude")
+    );
+    for id in ["rtk", "caveman", "ponytail", "sweep", "token-optimizer"] {
+        assert_eq!(c.get(id).unwrap().launch_command(), None, "{id}");
+    }
+}
+
+#[test]
 fn ordered_sorts_by_ordering_field() {
     let c = Catalog::embedded();
     let ids: Vec<&str> = c.ordered().iter().map(|e| e.id.as_str()).collect();

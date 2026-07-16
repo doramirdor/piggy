@@ -4,6 +4,7 @@ import { Switch } from "../components/Switch";
 import { StatusChip } from "../components/StatusChip";
 import { SaverIcon } from "../components/SaverIcon";
 import { SaverConfigPanel } from "../components/SaverConfig";
+import { CopyCmd } from "../components/CopyCmd";
 import type { SaverRow } from "../types";
 
 function WarnTri({ text }: { text: string | null }) {
@@ -94,6 +95,13 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
             <div className="lic-note">
               <span className="lic-badge">{saver.license}</span>
               <span>{saver.licenseNote}</span>
+            </div>
+          )}
+          {saver.launchCommand && saver.enabled && !busy && (
+            <div className="launch-note">
+              <span>Works in sessions you start with</span>
+              <CopyCmd cmd={saver.launchCommand} />
+              <span>instead of plain claude. Other sessions are untouched.</span>
             </div>
           )}
         </div>

@@ -51,6 +51,7 @@ function populatedSavers(): SaverRow[] {
       licenseNote: null,
       ordering: 5,
       configurable: false,
+      launchCommand: null,
       badge: { kind: "measured", delta: -0.09, n: 18 },
     },
     {
@@ -72,6 +73,7 @@ function populatedSavers(): SaverRow[] {
       licenseNote: null,
       ordering: 10,
       configurable: false,
+      launchCommand: null,
       badge: { kind: "measured", delta: -0.22, n: 41 },
     },
     {
@@ -94,14 +96,15 @@ function populatedSavers(): SaverRow[] {
         "Source-available, NOT open source. Free for individuals and small teams (<5 people or <$20k/mo).",
       ordering: 30,
       configurable: false,
+      launchCommand: null,
       badge: { kind: "measuring", delta: null, n: 0 },
     },
     {
       id: "headroom",
       name: "Headroom",
-      plainLabel: "Compress everything (Headroom)",
-      description: "Piggy's default compressor. Wraps terminal shrinking and more in one proxy.",
-      installType: "binary+proxy",
+      plainLabel: "Deep compression engine",
+      description: "Compresses everything Claude reads. Works in sessions you start with piggy-claude.",
+      installType: "venv+wrapper",
       status: "curated_v1",
       defaultOn: true,
       installed: true,
@@ -112,11 +115,12 @@ function populatedSavers(): SaverRow[] {
       behaviorChanging: false,
       warning: null,
       risk: "low",
-      claimedSavings: "~80% on shell output, plus prompt compression",
-      license: "MIT",
+      claimedSavings: "47–92% by workload (author, reproducible eval suite)",
+      license: "Apache-2.0",
       licenseNote: null,
       ordering: 40,
       configurable: false,
+      launchCommand: "piggy-claude",
       badge: { kind: "measuring", delta: null, n: 0 },
     },
     {
@@ -139,6 +143,7 @@ function populatedSavers(): SaverRow[] {
       licenseNote: null,
       ordering: 50,
       configurable: true,
+      launchCommand: null,
       // Estimated: enough observational history to show a number, but no live
       // holdout yet - the gray-blue "≈ −X% estimated" badge.
       badge: { kind: "estimated", delta: -0.085, n: 15 },
@@ -163,6 +168,7 @@ function populatedSavers(): SaverRow[] {
       licenseNote: null,
       ordering: 60,
       configurable: false,
+      launchCommand: null,
       badge: { kind: "measuring", delta: null, n: 4 },
     },
   ];
@@ -216,6 +222,13 @@ function conflictNotice(turnedOff: string[], replacerId: string): string | undef
       (id) => `${friendlyName(id)} turned off - ${friendlyName(replacerId)} does the same job and is now on.`,
     )
     .join(" ");
+}
+
+/** Mirror of the real backend's wrapper-saver heads-up (backend.rs launch_notice). */
+function launchNotice(id: string): string | undefined {
+  const s = savers.find((x) => x.id === id);
+  if (!s?.launchCommand || !s.enabled) return undefined;
+  return `${s.name} is on. It saves only in sessions you start with ${s.launchCommand}. Plain claude sessions are untouched.`;
 }
 
 // The master switch is a system-level flag, independent of individual savers -
@@ -621,7 +634,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         savers = savers.map((s) =>
           s.id === id ? { ...s, installed: on ? true : s.installed, enabled: on } : s,
         );
-        const notice = on ? conflictNotice(applyConflicts(id), id) : undefined;
+        const notice = on
+          ? [conflictNotice(applyConflicts(id), id), launchNotice(id)].filter(Boolean).join(" ") || undefined
+          : undefined;
         return saversState(notice);
       }
       case "master_toggle": {
@@ -645,7 +660,13 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           if (off.length > 0) replacer = d.id;
           turnedOff.push(...off);
         }
-        return saversState(replacer ? conflictNotice(turnedOff, replacer) : undefined);
+        const parts = [
+          replacer ? conflictNotice(turnedOff, replacer) : undefined,
+          ...savers
+            .filter((s) => s.defaultOn && s.enabled && s.launchCommand)
+            .map((s) => launchNotice(s.id)),
+        ].filter(Boolean);
+        return saversState(parts.length > 0 ? parts.join(" ") : undefined);
       }
       case "sweep_report":
         return sweepReport();

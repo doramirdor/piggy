@@ -47,6 +47,20 @@ piggy stats          # today / week / month token totals, per project and model
 piggy doctor         # checks your setup and Piggy's own health
 ```
 
+## Run Claude through Piggy
+
+Most savers work in every session automatically. The deepest one, Headroom, is scoped on
+purpose: it compresses only the sessions you start with `piggy-claude`, a launcher Piggy
+adds when you turn Headroom on.
+
+```
+piggy-claude    # Claude Code with deep compression
+claude          # plain Claude Code, untouched
+```
+
+Use `piggy-claude` wherever you'd normally run `claude`. If anything ever misbehaves, plain
+`claude` keeps working exactly as before - nothing about your normal setup changes.
+
 ## For saver authors
 
 Piggy never forks or vendors your code — it downloads your official release artifacts, pins
