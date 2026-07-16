@@ -1,20 +1,20 @@
-//! `piggy` — measure Claude Code token usage and manage token-saving add-ons.
+//! `piggy` - measure Claude Code token usage and manage token-saving add-ons.
 //!
 //! Subcommands:
-//!   * `index`  — scan `~/.claude/projects/**/*.jsonl` into the local DB.
-//!   * `stats`  — human tables (or `--json`) of token usage and estimated cost.
-//!   * `doctor` — environment / data-health checks.
-//!   * `parse`  — dump one file's parsed aggregate as JSON (the jq cross-check).
-//!   * `list`   — the saver catalog with on/off state and claimed savings.
-//!   * `install` / `remove` — turn a saver on (install) or fully off (uninstall).
-//!   * `on` / `off` — fast toggle without uninstalling (the A/B path).
-//!   * `sweep`  — find unused add-ons that cost tokens; `--apply N` disables one.
+//!   * `index`  - scan `~/.claude/projects/**/*.jsonl` into the local DB.
+//!   * `stats`  - human tables (or `--json`) of token usage and estimated cost.
+//!   * `doctor` - environment / data-health checks.
+//!   * `parse`  - dump one file's parsed aggregate as JSON (the jq cross-check).
+//!   * `list`   - the saver catalog with on/off state and claimed savings.
+//!   * `install` / `remove` - turn a saver on (install) or fully off (uninstall).
+//!   * `on` / `off` - fast toggle without uninstalling (the A/B path).
+//!   * `sweep`  - find unused add-ons that cost tokens; `--apply N` disables one.
 //!   * `report` - measured savings: per-saver attribution table + honest headline.
 //!   * `holdout` - view or change the share of sessions that run with savers off.
 //!   * `discover` - token-savers found on GitHub (cached; `--refresh` pulls).
 //!   * `watch`  - index and tag new sessions live, in the foreground.
-//!   * `restore-defaults` — undo everything Piggy changed.
-//!   * `backups` — list the settings.json backups Piggy has taken.
+//!   * `restore-defaults` - undo everything Piggy changed.
+//!   * `backups` - list the settings.json backups Piggy has taken.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -31,6 +31,7 @@ use piggy_core::{
 #[derive(Parser)]
 #[command(
     name = "piggy",
+    version,
     about = "Measure Claude Code token usage from session logs."
 )]
 struct Cli {
@@ -350,7 +351,7 @@ fn print_action(report: &engine::ActionReport) {
     if let Some(h) = &report.health {
         for (desc, passed, detail) in &h.checks {
             let mark = if *passed { "ok" } else { "FAIL" };
-            println!("  [{mark}] {desc} — {detail}");
+            println!("  [{mark}] {desc} - {detail}");
         }
     }
     for w in &report.warnings {
@@ -411,7 +412,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     }
 
     println!(
-        "Sweep — usage over the last {} session(s)",
+        "Sweep - usage over the last {} session(s)",
         report.sessions_considered
     );
     if report.items.is_empty() {
@@ -430,7 +431,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                 commafy(i.used),
                 format!("~{}", commafy(i.est_tokens)),
                 if i.recommend_disable {
-                    format!("turn off — {}", i.reason)
+                    format!("turn off - {}", i.reason)
                 } else {
                     "keep".to_string()
                 },
@@ -446,7 +447,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
             commafy(report.est_recoverable_tokens())
         );
     } else {
-        println!("everything here is in use — nothing to sweep.");
+        println!("everything here is in use - nothing to sweep.");
     }
     println!("token costs are estimates (config-size heuristic), not measured.");
     println!(
@@ -455,7 +456,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     );
     if report.recommended().any(|i| i.kind == "mcp") {
         println!(
-            "note: a project you use only occasionally can fall outside a {}-session window — if an MCP server you rely on was flagged, re-run with a wider `--sessions <N>`.",
+            "note: a project you use only occasionally can fall outside a {}-session window - if an MCP server you rely on was flagged, re-run with a wider `--sessions <N>`.",
             report.sessions_considered
         );
     }
@@ -694,12 +695,12 @@ fn print_groups_table(period: Period, by: ByArg, rows: &[piggy_core::GroupRow]) 
         })
         .collect();
     println!(
-        "{} — by {} (cost estimated)",
+        "{} - by {} (cost estimated)",
         period.label(),
         first.to_lowercase()
     );
     if table.is_empty() {
-        println!("  (no data — run `piggy index`)");
+        println!("  (no data - run `piggy index`)");
         return;
     }
     render_table(&headers, &table);
@@ -839,7 +840,7 @@ fn cmd_doctor() -> Result<bool> {
                     );
                 }
                 Ok(_) => println!(
-                    "✅ pricing table loaded ({} models); no indexed tokens yet — run `piggy index`",
+                    "✅ pricing table loaded ({} models); no indexed tokens yet - run `piggy index`",
                     pricing.model_count()
                 ),
                 Err(e) => {
@@ -984,20 +985,20 @@ fn cmd_report(json: bool) -> Result<()> {
     // ---- Headline block --------------------------------------------------
     // The banner must not claim "holdout-based" when there is no live holdout.
     match hl.baseline {
-        HeadlineBaseline::Holdout => println!("Piggy report — measured savings (holdout-based)"),
+        HeadlineBaseline::Holdout => println!("Piggy report - measured savings (holdout-based)"),
         HeadlineBaseline::PreInstall => println!(
-            "Piggy report — estimated savings (observational pre-install baseline, no live holdout yet)"
+            "Piggy report - estimated savings (observational pre-install baseline, no live holdout yet)"
         ),
-        HeadlineBaseline::None => println!("Piggy report — not enough data yet"),
+        HeadlineBaseline::None => println!("Piggy report - not enough data yet"),
     }
     println!();
     let baseline_label = match hl.baseline {
         HeadlineBaseline::Holdout => "holdout",
         HeadlineBaseline::PreInstall => "pre-install history",
-        HeadlineBaseline::None => "—",
+        HeadlineBaseline::None => "-",
     };
     if hl.baseline == HeadlineBaseline::None {
-        println!("Headline: not enough data yet — need holdout or pre-install sessions.");
+        println!("Headline: not enough data yet - need holdout or pre-install sessions.");
     } else {
         println!(
             "Headline (full-on {} vs {} {} sessions):",
@@ -1027,7 +1028,7 @@ fn cmd_report(json: bool) -> Result<()> {
         }
         if hl.baseline == HeadlineBaseline::PreInstall {
             println!(
-                "  note: baseline is pre-install history (observational — no live holdout yet)."
+                "  note: baseline is pre-install history (observational - no live holdout yet)."
             );
         }
     }
@@ -1069,13 +1070,13 @@ fn cmd_report(json: bool) -> Result<()> {
     );
     println!("the × multiplier is estimated (uses price weights).");
     // Flag any pre-install (observational) OFF sessions. These never count
-    // toward a measured badge — they are only a fallback for an `estimated`
+    // toward a measured badge - they are only a fallback for an `estimated`
     // figure when randomized OFF data is short.
     for a in &attribs {
         if let Some(n) = a.off_by_source.get("pre_install") {
             if *n > 0 {
                 println!(
-                    "  {}: {} pre-install (observational) OFF sessions — never used for a measured badge.",
+                    "  {}: {} pre-install (observational) OFF sessions - never used for a measured badge.",
                     a.saver_id, n
                 );
             }
@@ -1224,7 +1225,7 @@ fn cmd_discover(refresh: bool, json: bool) -> Result<()> {
         }
     );
     if cache.repos.is_empty() {
-        println!("  (nothing found — try `piggy discover --refresh`)");
+        println!("  (nothing found - try `piggy discover --refresh`)");
         return Ok(());
     }
     let headers = ["Stars", "Repo", "What it is"];
@@ -1233,13 +1234,13 @@ fn cmd_discover(refresh: bool, json: bool) -> Result<()> {
         .iter()
         .map(|r| {
             let what = if r.listed_only {
-                "listed only — not installable".to_string()
+                "listed only - not installable".to_string()
             } else {
                 r.description.clone().unwrap_or_default()
             };
             vec![
                 if r.listed_only {
-                    "—".to_string()
+                    "-".to_string()
                 } else {
                     commafy(r.stars)
                 },
@@ -1256,7 +1257,7 @@ fn cmd_discover(refresh: bool, json: bool) -> Result<()> {
         println!("Listed for transparency, never installed by Piggy:");
         for r in listed {
             println!(
-                "  {} — {}",
+                "  {} - {}",
                 r.full_name,
                 r.exclusion_reason.as_deref().unwrap_or("(no reason given)")
             );
@@ -1290,7 +1291,7 @@ fn cmd_watch(once: bool) -> Result<()> {
     }
 
     // Watch every session-log root that exists (Claude Code + Codex). A fresh
-    // machine may have neither — fall back to creating/watching the Claude
+    // machine may have neither - fall back to creating/watching the Claude
     // projects dir, the historical behaviour.
     let roots = piggy_core::default_roots();
     let (mut watcher, label) = if roots.is_empty() {

@@ -307,7 +307,7 @@ pub fn set_enabled_src(
         .ok_or_else(|| anyhow!("no saver named '{id}' in the registry"))?;
     let mut state = PiggyState::load()?;
     let Some(saver) = state.savers.get(id).cloned() else {
-        bail!("'{id}' is not installed — turn it on with `piggy install {id}` first");
+        bail!("'{id}' is not installed - turn it on with `piggy install {id}` first");
     };
     let settings_path = config::claude_settings_path();
     let mut warnings = Vec::new();
@@ -668,7 +668,7 @@ impl InstallCtx<'_> {
             "pip_install" => self.step_pip_install(step),
             "write_launcher" => self.step_write_launcher(step),
             "builtin_enable" => Ok(()), // sweep: state bookkeeping only (recorded on insert)
-            other => bail!("unknown install step '{other}' — catalog is newer than Piggy"),
+            other => bail!("unknown install step '{other}' - catalog is newer than Piggy"),
         }
     }
 
@@ -1146,7 +1146,7 @@ fn run_uninstall_step(
             let restored = crate::sweep::restore_all(state)?;
             Ok(Some(format!("restored {restored} swept item(s)")))
         }
-        other => bail!("unknown uninstall step '{other}' — catalog is newer than Piggy"),
+        other => bail!("unknown uninstall step '{other}' - catalog is newer than Piggy"),
     }
 }
 

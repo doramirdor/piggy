@@ -62,6 +62,17 @@ const dest = join(outDir, `piggy-${triple}`);
 
 if (triple === UNIVERSAL) {
   const halves = UNIVERSAL_MEMBERS.map((t) => buildOne(t, host));
+  // A universal `tauri build` is really two per-arch sub-builds that get lipo-ed
+  // at the end, and each one re-resolves `binaries/piggy` against its OWN triple
+  // (TAURI_ENV_TARGET_TRIPLE=x86_64-apple-darwin, then aarch64). So the per-arch
+  // names have to exist too: staging only the merged universal binary fails the
+  // first sub-build with "resource path binaries/piggy-x86_64-apple-darwin
+  // doesn't exist". Stage all three and let each sub-build find its own.
+  UNIVERSAL_MEMBERS.forEach((member, i) => {
+    const half = join(outDir, `piggy-${member}`);
+    copyFileSync(halves[i], half);
+    chmodSync(half, 0o755);
+  });
   run("lipo", ["-create", "-output", dest, ...halves], { stdio: "inherit" });
 } else {
   copyFileSync(buildOne(triple, host), dest);

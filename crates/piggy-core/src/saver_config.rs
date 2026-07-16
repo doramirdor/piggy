@@ -159,7 +159,7 @@ pub fn set_config(
     }
     match apply_kind(opt) {
         "json_field" => write_json_field(opt, value)?,
-        other => bail!("unknown config apply kind '{other}' — this catalog is newer than Piggy"),
+        other => bail!("unknown config apply kind '{other}' - this catalog is newer than Piggy"),
     }
 
     // Remember the choice (best-effort bookkeeping; the saver's file is truth).
