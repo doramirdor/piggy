@@ -33,6 +33,12 @@ With master switch on, sessions are assigned (round-robin over a repeating block
 - For each installed saver X: ~10% **single-off**: everything on except X.
 - Remainder: **full-on**.
 
+"All savers off" is the intent, not a guarantee. Rotation only controls savers it manages,
+so a saver the user has pinned on keeps running through the holdout slot. A holdout with a
+pinned saver in it is still real evidence about the savers that *do* rotate, and it is still
+used, but it is not the no-savers baseline the headline's "N.N× longer" is a claim about,
+so it caps that headline at `estimated`.
+
 Rotation only ever toggles Piggy-managed savers. User's own hooks are never touched.
 If the user manually flips a toggle, rotation pauses for that saver (respect intent).
 Piggy is then no longer randomizing it, so no *new* measured evidence accrues for it:
@@ -59,6 +65,9 @@ Per saver X:
   `measured 22% less input · 41 sessions`. Confidence interval via bootstrap (1,000 resamples);
   if the 90% CI crosses zero or either group has < 10 sessions → display **"not enough data
   yet · n sessions"** instead of a number. Never show a point estimate without n.
+  An **empty** ON group has no delta at all, not a 100% one: `median` of nothing is 0, so the
+  formula would otherwise read `1 - 0/median_off = 1.0` and claim a perfect saving from no
+  data. A non-empty ON group that medians to zero is different, and is a real 100% reduction.
 - Overall headline: full-on vs holdout only (not pre-install, unless zero holdouts exist,
   then labeled `vs. history (observational)`). The same both-sides rule applies here: a
   full-on session counts as randomized only if **every** saver in it was on because the

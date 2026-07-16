@@ -255,6 +255,16 @@ pub struct Headline {
     /// `"measured" | "estimated" | "not_enough_data"`.
     pub label: String,
     pub n_holdout: u64,
+    /// Why the figure is only `estimated`, in the user's terms. `None` when the
+    /// label is not `estimated`.
+    ///
+    /// The reason is not always "no holdout yet": a holdout can exist and still
+    /// not back a measured claim, because the savers were pinned on by hand or
+    /// because a pinned saver ran through the holdout itself. The frontends
+    /// cannot tell those apart from `label` alone, and hard-coding one of them
+    /// ("estimated vs your history, holdout measurement in progress") was simply
+    /// false for the other two.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,6 +299,7 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
                 value: None,
                 label: "not_enough_data".to_string(),
                 n_holdout: 0,
+                note: None,
             });
         Ok(StatsOverview {
             period: period_key(period).to_string(),
@@ -340,14 +351,16 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
     };
     let has_mult = hl.multiplier.is_some();
     let enough = hl.n_full_on >= MIN_GROUP && hl.n_baseline >= MIN_GROUP;
-    // `measured` needs BOTH sides randomized, not just a live holdout baseline.
-    // `on_randomized` goes false once the full-on side leans on manually-pinned
-    // sessions, which no amount of data turns into a randomized contrast. Without
-    // that term, a recent manual-on era against an older holdout era printed
-    // "measured against N holdout sessions" and credited the savers with whatever
-    // had drifted between the two eras.
-    let measured =
-        has_mult && enough && hl.baseline == HeadlineBaseline::Holdout && hl.on_randomized;
+    // `hl.ceiling` is the authority on whether a measured claim is available: it
+    // already accounts for a manually-pinned full-on group and for a holdout that
+    // had a saver running through it. This used to re-derive "measured" from the
+    // baseline kind alone, which is exactly how a manual-on era reached the
+    // dashboard labelled measured while the core had it right. Only the sample
+    // bar is ours to add.
+    let measured = has_mult
+        && enough
+        && hl.baseline == HeadlineBaseline::Holdout
+        && hl.ceiling == CoreBadge::Measured;
     // Still worth showing, just not as measured: either the baseline is the
     // observational pre-install history, or the holdout is real but the ON side
     // is pinned by hand.
@@ -365,6 +378,25 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
     } else {
         "not_enough_data"
     };
+    // Say which of the three reasons applies, in the user's terms. Order matters:
+    // a pinned ON side is the thing the user can actually undo, so lead with it.
+    let note = if !estimated {
+        None
+    } else if !hl.on_randomized {
+        Some(
+            "estimated: you turned savers on yourself, so Piggy is not rotating them and \
+             cannot measure them"
+                .to_string(),
+        )
+    } else if !hl.baseline_clean {
+        Some(
+            "estimated: a saver you turned on yourself kept running through the holdout, \
+             so it was not a no-savers comparison"
+                .to_string(),
+        )
+    } else {
+        Some("estimated vs your history · holdout measurement in progress".to_string())
+    };
     Headline {
         value: if label == "not_enough_data" {
             None
@@ -373,6 +405,7 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         },
         label: label.to_string(),
         n_holdout,
+        note,
     }
 }
 

@@ -983,9 +983,18 @@ fn cmd_report(json: bool) -> Result<()> {
     }
 
     // ---- Headline block --------------------------------------------------
-    // The banner must not claim "holdout-based" when there is no live holdout.
+    // A live holdout is necessary but not sufficient for "measured": the full-on
+    // side has to be randomized and the holdout has to have been clean. `ceiling`
+    // is the authority on that (see `Headline::ceiling`); deriving this banner
+    // from `hl.baseline` alone printed "measured savings" over a report whose
+    // very next line said "estimated".
     match hl.baseline {
-        HeadlineBaseline::Holdout => println!("Piggy report - measured savings (holdout-based)"),
+        HeadlineBaseline::Holdout if hl.ceiling == Badge::Measured => {
+            println!("Piggy report - measured savings (holdout-based)")
+        }
+        HeadlineBaseline::Holdout => println!(
+            "Piggy report - estimated savings (holdout-based, but not a randomized comparison)"
+        ),
         HeadlineBaseline::PreInstall => println!(
             "Piggy report - estimated savings (observational pre-install baseline, no live holdout yet)"
         ),
@@ -1004,13 +1013,19 @@ fn cmd_report(json: bool) -> Result<()> {
             "Headline (full-on {} vs {} {} sessions):",
             hl.n_full_on, baseline_label, hl.n_baseline
         );
-        // A holdout baseline is not enough on its own: the full-on side has to be
-        // randomized too, or the contrast is a manual-on era against a holdout
-        // era and any drift between them lands on the savers.
+        // A holdout baseline is not enough on its own. The full-on side has to be
+        // randomized too, and the holdout has to have actually been all-off. Say
+        // which one is missing rather than an unexplained "estimated".
         let per_turn_label = match hl.baseline {
-            HeadlineBaseline::Holdout if hl.on_randomized => "  measured per-turn savings:",
-            HeadlineBaseline::Holdout => {
+            HeadlineBaseline::Holdout if hl.on_randomized && hl.baseline_clean => {
+                "  measured per-turn savings:"
+            }
+            HeadlineBaseline::Holdout if !hl.on_randomized => {
                 "  estimated per-turn savings (savers pinned on by hand, so not randomized):"
+            }
+            HeadlineBaseline::Holdout => {
+                "  estimated per-turn savings (a pinned saver ran through the holdout, \
+                 so it was not a no-savers baseline):"
             }
             _ => "  estimated per-turn savings (observational baseline):",
         };
@@ -1133,9 +1148,18 @@ fn headline_json(hl: &piggy_core::Headline) -> serde_json::Value {
             HeadlineBaseline::PreInstall => "pre_install",
             HeadlineBaseline::None => "none",
         },
-        "observational": hl.baseline == HeadlineBaseline::PreInstall,
+        // A holdout baseline is not enough to call this randomized. Deriving
+        // `observational` from the baseline kind alone told a machine consumer
+        // `baseline: "holdout", observational: false` for a headline the core had
+        // already capped at estimated, while the per-stream badges (which do flow
+        // from `ceiling`) said otherwise in the same payload.
+        "observational": hl.ceiling != Badge::Measured,
         "nFullOn": hl.n_full_on,
         "nBaseline": hl.n_baseline,
+        // Why it is observational, when it is: the full-on side was pinned on by
+        // hand, and/or the holdout had a pinned saver running through it.
+        "onRandomized": hl.on_randomized,
+        "baselineClean": hl.baseline_clean,
         "multiplier": hl.multiplier,
         "multiplierEstimated": true,
         "streams": hl.streams.iter().map(stream_json).collect::<Vec<_>>(),

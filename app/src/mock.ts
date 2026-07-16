@@ -355,7 +355,7 @@ function statsOverview(period: Period): StatsOverview {
       costEstimated: true,
       fullyPriced: true,
       todayTokens: 0,
-      headline: { value: null, label: "not_enough_data", nHoldout: 0 },
+      headline: { value: null, label: "not_enough_data", nHoldout: 0, note: null },
     };
   }
   const scale = { today: 0.12, week: 1, month: 4.2, all: 11 }[period];
@@ -376,7 +376,7 @@ function statsOverview(period: Period): StatsOverview {
     costEstimated: true,
     fullyPriced: true,
     todayTokens: 184_000,
-    headline: { value: 1.7, label: "measured", nHoldout: 12 },
+    headline: { value: 1.7, label: "measured", nHoldout: 12, note: null },
   };
 }
 

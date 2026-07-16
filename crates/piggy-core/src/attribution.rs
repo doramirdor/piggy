@@ -133,8 +133,15 @@ pub enum SessionGroup {
     /// (`manual`) or it predates Piggy. Same state, non-randomized provenance:
     /// usable as an observational ON group, capped at `estimated`.
     FullOnObservational,
-    /// Rotation holdout — every saver off.
+    /// Rotation holdout, and a clean one: every saver really was off.
     Holdout,
+    /// A holdout slot that had at least one saver still running. `controlled_savers`
+    /// drops manually-toggled savers from rotation, so a saver the user pinned on
+    /// rides straight through the "all off" slot. The contrast is still randomized
+    /// for the savers that DO rotate, but the headline's counterfactual (no savers
+    /// at all) was never actually observed, so it can only back an `estimated`
+    /// figure.
+    HoldoutContaminated,
     /// Predates Piggy — observational baseline (all off).
     PreInstall,
     /// Some on, some off (single-off rotation slots).
@@ -235,16 +242,23 @@ pub struct Headline {
     pub baseline: HeadlineBaseline,
     pub n_full_on: usize,
     pub n_baseline: usize,
+    /// The best badge this headline can back, both sides considered. **This is
+    /// the authority on the label**: `measured` requires
+    /// `ceiling == Badge::Measured` on top of the usual sample bar. Callers must
+    /// not re-derive it from `baseline` alone, which is how the manual-on era bug
+    /// reached the dashboard even though the core had already computed the right
+    /// answer.
+    pub ceiling: Badge,
     /// Whether the full-on side is backed by **randomized** sessions (every
     /// saver on because Piggy's scheduler said so). False once the ON group has
     /// to lean on manually-pinned sessions, which are observational however many
-    /// of them there are.
-    ///
-    /// A `measured` label needs BOTH sides randomized, so callers must check
-    /// this as well as `baseline == Holdout`. Without it, "recent manual-on era
-    /// vs older holdout era" reads as measured and any drift between the eras is
-    /// credited to the savers.
+    /// of them there are. Carried so the CLI can say *why* a figure is only
+    /// estimated.
     pub on_randomized: bool,
+    /// Whether the baseline is a **clean** all-off holdout. False when the only
+    /// holdouts available had a pinned saver running through them, so the
+    /// "no savers at all" counterfactual was never actually observed.
+    pub baseline_clean: bool,
     /// `median(baseline spend rate) / median(full_on spend rate)` — "lasts N.N×
     /// longer". Price-weighted, hence `estimated`. `None` if not computable.
     pub multiplier: Option<f64>,
@@ -372,48 +386,67 @@ impl Store {
                 r.get::<_, String>(2)?,
             ))
         })?;
-        let mut per_session: std::collections::HashMap<String, (bool, bool, bool, bool, bool)> =
-            std::collections::HashMap::new();
-        // tuple = (any_holdout, any_pre_install, all_enabled, any_disabled,
-        //          all_randomized)
-        for row in rows {
-            let (sid, enabled, src) = row?;
-            let e = per_session
-                .entry(sid)
-                .or_insert((false, false, true, false, true));
-            if src == source::HOLDOUT {
-                e.0 = true;
-            }
-            if src == source::PRE_INSTALL {
-                e.1 = true;
-            }
-            if enabled {
-                // all_enabled stays true only if every row is enabled
-            } else {
-                e.2 = false;
-                e.3 = true;
-            }
-            if !is_randomized(&src) {
-                e.4 = false;
+        /// What one session's saver tags add up to. Was a tuple; grew a field per
+        /// bug until nobody could read it.
+        struct Facts {
+            any_holdout: bool,
+            any_pre_install: bool,
+            any_enabled: bool,
+            any_disabled: bool,
+            /// Every tag came from Piggy's scheduler rather than the user.
+            all_randomized: bool,
+        }
+        impl Facts {
+            fn new() -> Self {
+                Facts {
+                    any_holdout: false,
+                    any_pre_install: false,
+                    any_enabled: false,
+                    any_disabled: false,
+                    all_randomized: true,
+                }
             }
         }
+
+        let mut per_session: std::collections::HashMap<String, Facts> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (sid, enabled, src) = row?;
+            let f = per_session.entry(sid).or_insert_with(Facts::new);
+            f.any_holdout |= src == source::HOLDOUT;
+            f.any_pre_install |= src == source::PRE_INSTALL;
+            if enabled {
+                f.any_enabled = true;
+            } else {
+                f.any_disabled = true;
+            }
+            f.all_randomized &= is_randomized(&src);
+        }
         let mut out = Vec::new();
-        for (sid, (holdout, pre, all_on, any_off, all_randomized)) in per_session {
+        for (sid, f) in per_session {
             let Some(rates) = rate_map.get(&sid) else {
                 continue;
             };
-            let group = if holdout {
-                SessionGroup::Holdout
-            } else if pre {
+            let group = if f.any_holdout {
+                // A holdout is only the all-off counterfactual if it was actually
+                // all off. `controlled_savers` drops manually-toggled savers from
+                // rotation, so a pinned saver rides straight through the holdout
+                // slot and the "every saver off" baseline still has one running.
+                if f.any_enabled {
+                    SessionGroup::HoldoutContaminated
+                } else {
+                    SessionGroup::Holdout
+                }
+            } else if f.any_pre_install {
                 SessionGroup::PreInstall
-            } else if all_on && !any_off {
+            } else if !f.any_disabled {
                 // Same "everything on" state, but only randomized provenance can
                 // back a measured claim. A user who pins savers on by hand takes
                 // them out of rotation for good, so without this split a
                 // manual-on era compared against an older randomized holdout era
                 // reads as a green measured headline, with any drift between the
                 // eras landing on the savers.
-                if all_randomized {
+                if f.all_randomized {
                     SessionGroup::FullOn
                 } else {
                     SessionGroup::FullOnObservational
@@ -446,8 +479,23 @@ pub fn median(xs: &[f64]) -> f64 {
     }
 }
 
-/// The delta `1 - median(on)/median(off)`, or `None` if `off` medians to zero.
+/// The delta `1 - median(on)/median(off)`, or `None` when there is nothing to
+/// compare: an empty ON group, or an OFF group that medians to zero.
 fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
+    // `median(&[])` is 0.0, so an empty ON group computes `1 - 0/mo == 1.0`: a
+    // nominal 100% saving conjured out of no data at all. Downstream gates do
+    // already suppress it (MIN_GROUP in `stream_stat`, and the bootstrap, which
+    // cannot resample an empty group), so this is defense in depth rather than a
+    // live leak. It is still worth refusing at the source: the worst number this
+    // app could print should not exist as a value at all, waiting for a refactor
+    // to move a gate.
+    //
+    // Note the guard is emptiness, NOT `median(on) == 0.0`: ON sessions that
+    // genuinely used none of a stream really are a 100% reduction, and that is a
+    // real figure worth showing.
+    if on.is_empty() {
+        return None;
+    }
     let mo = median(off);
     if mo == 0.0 {
         return None;
@@ -604,12 +652,51 @@ fn pick_group(
     randomized: Vec<SessionRates>,
     observational: Vec<SessionRates>,
 ) -> (Vec<SessionRates>, Badge) {
+    // Nothing randomized to stand on, so whatever comes back is observational at
+    // best. Without this, `(empty, empty)` satisfies `observational.is_empty()`
+    // and reports `Measured` over zero sessions, which prints a "measured"
+    // heading above an empty table.
+    if randomized.is_empty() {
+        return (observational, Badge::Estimated);
+    }
     if randomized.len() >= MIN_GROUP || observational.is_empty() {
         (randomized, Badge::Measured)
     } else {
         let mut pooled = randomized;
         pooled.extend(observational);
         (pooled, Badge::Estimated)
+    }
+}
+
+/// Pick the headline's baseline from the clean and contaminated holdouts.
+///
+/// Deliberately NOT `pick_group`. That helper pools its two groups when the
+/// preferred one is thin, which is sound there because both groups are the same
+/// treatment state and differ only in provenance: pooling buys sample size for
+/// one estimand, and the `estimated` cap prices the confounding.
+///
+/// These two groups are different treatment arms. A clean holdout is "every
+/// saver off"; a contaminated one is "every saver off except the one you pinned,
+/// which kept running". A median across the union estimates neither population:
+/// it tracks whichever arm is larger, so the headline would move with the mix
+/// rather than with the savers. Worse, pooling would manufacture MIN_GROUP
+/// eligibility out of a second population: 5 clean holdouts alone correctly show
+/// no number at all, and 5 clean + 15 contaminated would show one, which is the
+/// exact gate MIN_GROUP exists to enforce.
+///
+/// So: prefer the clean holdouts when they can stand alone, otherwise use the
+/// contaminated ones alone and cap at `estimated`. Nothing is discarded, the
+/// number still shows, and it always describes one coherent population. Note the
+/// contaminated arm answers a narrower question than the headline's "versus no
+/// savers at all", which is why it can never be `measured`.
+fn pick_baseline(
+    clean: Vec<SessionRates>,
+    contaminated: Vec<SessionRates>,
+) -> (Vec<SessionRates>, Badge) {
+    if clean.len() >= MIN_GROUP || contaminated.is_empty() {
+        (clean, Badge::Measured)
+    } else {
+        (contaminated, Badge::Estimated)
     }
 }
 
@@ -744,9 +831,14 @@ pub fn headline_with_map(
         .filter(|(g, _)| *g == SessionGroup::FullOnObservational)
         .map(|(_, r)| r.clone())
         .collect();
-    let holdout: Vec<SessionRates> = classified
+    let holdout_clean: Vec<SessionRates> = classified
         .iter()
         .filter(|(g, _)| *g == SessionGroup::Holdout)
+        .map(|(_, r)| r.clone())
+        .collect();
+    let holdout_contaminated: Vec<SessionRates> = classified
+        .iter()
+        .filter(|(g, _)| *g == SessionGroup::HoldoutContaminated)
         .map(|(_, r)| r.clone())
         .collect();
     let pre_install: Vec<SessionRates> = classified
@@ -756,20 +848,28 @@ pub fn headline_with_map(
         .collect();
 
     // Prefer a live holdout; fall back to observational pre-install history.
-    // A holdout is randomized (measured-eligible); the pre-install baseline is
-    // observational, so its per-stream figures are capped at `estimated`.
-    let (baseline_kind, baseline) = if !holdout.is_empty() {
-        (HeadlineBaseline::Holdout, holdout)
-    } else if !pre_install.is_empty() {
-        (HeadlineBaseline::PreInstall, pre_install)
-    } else {
-        (HeadlineBaseline::None, Vec::new())
-    };
-    let baseline_ceiling = match baseline_kind {
-        HeadlineBaseline::Holdout => Badge::Measured,
-        // No live holdout: any figure is observational.
-        HeadlineBaseline::PreInstall | HeadlineBaseline::None => Badge::Estimated,
-    };
+    // A clean holdout is the randomized all-off counterfactual the "N.N× longer"
+    // claim is about. A contaminated one (a pinned saver rode through it) is
+    // still useful evidence and still gets shown, but the counterfactual it
+    // describes was never observed, so it can only back an `estimated` figure.
+    // The pre-install baseline is observational for the older reason: it predates
+    // Piggy and was never randomized at all.
+    let (baseline_kind, baseline, baseline_ceiling, baseline_clean) =
+        if !holdout_clean.is_empty() || !holdout_contaminated.is_empty() {
+            let (used, ceiling) = pick_baseline(holdout_clean, holdout_contaminated);
+            // `pick_baseline` returns Measured exactly when it took the
+            // clean-only branch, so deriving the flag from the ceiling keeps the
+            // two from drifting apart later.
+            let clean = ceiling == Badge::Measured;
+            (HeadlineBaseline::Holdout, used, ceiling, clean)
+        } else if !pre_install.is_empty() {
+            // Not a holdout at all: "clean holdout" does not apply, and claiming
+            // it does would be a field that quietly means something other than
+            // its name.
+            (HeadlineBaseline::PreInstall, pre_install, Badge::Estimated, false)
+        } else {
+            (HeadlineBaseline::None, Vec::new(), Badge::Estimated, false)
+        };
 
     // The ON side gets the same treatment as the baseline, and as the per-saver
     // path in `attribute_with_map`. A randomized holdout on one side cannot make
@@ -818,7 +918,9 @@ pub fn headline_with_map(
         baseline: baseline_kind,
         n_full_on: full_on.len(),
         n_baseline,
+        ceiling,
         on_randomized,
+        baseline_clean,
         multiplier,
         streams,
     })

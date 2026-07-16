@@ -150,7 +150,10 @@ export function Overview() {
           {measured
             ? `measured against ${h!.nHoldout} holdout sessions · ${stats!.periodLabel.toLowerCase()}`
             : estimated
-              ? "estimated vs your history · holdout measurement in progress"
+              ? // The backend names the reason: "no holdout yet" is only one of
+                // three, and the other two (savers pinned on by hand, a pinned
+                // saver riding through the holdout) are not "in progress" at all.
+                (h!.note ?? "estimated")
               : off
                 ? "No savers are on, so nothing is saving right now. Turn one on to start banking tokens."
                 : `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`}

@@ -973,3 +973,228 @@ fn the_headline_does_not_measure_a_manual_on_era_against_a_holdout_era() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 12. A holdout with a pinned saver running through it is not a no-savers
+//     baseline, so the headline must not call itself measured (#3).
+// ---------------------------------------------------------------------------
+//
+// `rotation::controlled_savers` drops manually-toggled savers on purpose, so a
+// saver the user pinned ON never gets turned off by the holdout slot: it rides
+// straight through. `classified_sessions` used to file a session as Holdout on
+// the presence of ANY holdout row, so those sessions backed a green headline
+// while the "every saver off" baseline still had a saver running.
+//
+// The headline's claim is "your plan lasts N.N x longer" against no savers at
+// all. That counterfactual was never observed here, so the figure is a
+// projection: show it, label it estimated.
+//
+// The full-on era below is deliberately CLEAN (headroom has been uninstalled by
+// then, so every remaining tag is rotation-sourced). That isolates this bug from
+// the ON-side one: `on_randomized` is true here, so the only thing that can stop
+// a green headline is noticing the holdout itself was dirty. Had headroom stayed
+// pinned through the full-on era, the ON-side quarantine would have caught it
+// first and this test would pass without exercising the fix at all.
+
+#[test]
+fn a_holdout_with_a_pinned_saver_cannot_back_a_measured_headline() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00D1_5EA5);
+
+    // "Holdout" era: rtk is rotated off, but headroom is pinned on by the user
+    // and rotation never touches it. Not an all-off baseline.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("dirty-holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::HOLDOUT),
+                    SaverTag::new("headroom", true, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    // Full-on era, after headroom was uninstalled: only rtk is tagged, and by
+    // rotation, so this side is genuinely randomized.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("full-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x2468).unwrap();
+    eprintln!(
+        "[dirty_holdout] baseline={:?} n_baseline={} baseline_clean={} ceiling={:?} mult={:?}",
+        hl.baseline, hl.n_baseline, hl.baseline_clean, hl.ceiling, hl.multiplier
+    );
+
+    // The sessions still count: they are real evidence and the number still shows.
+    assert_eq!(
+        hl.n_baseline, 15,
+        "the contaminated holdouts are kept as a baseline, not thrown away"
+    );
+    assert!(hl.multiplier.is_some(), "the figure is still worth showing");
+    // The ON side is clean, so this is the holdout's contamination doing the work
+    // and not the ON-side quarantine standing in for it.
+    assert!(
+        hl.on_randomized,
+        "the full-on era is rotation-only, so the ON side is randomized: whatever \
+         downgrades this headline has to be the dirty holdout"
+    );
+    // What the dirty holdout cannot do is back a measured claim.
+    assert!(
+        !hl.baseline_clean,
+        "a holdout with headroom pinned on is not a no-savers baseline"
+    );
+    assert_eq!(
+        hl.ceiling,
+        Badge::Estimated,
+        "the no-savers counterfactual was never observed, so the headline is a projection"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. An empty ON group must not compute a 100% saving (#4).
+// ---------------------------------------------------------------------------
+//
+// `median(&[])` is 0.0, so `1 - median(on)/median(off)` on an empty ON group
+// used to yield Some(1.0): a nominal 100% saving out of no data. Only the
+// MIN_GROUP gate kept it off the screen. A saver that has NEVER been on is the
+// realistic way to reach an empty ON group.
+
+#[test]
+fn a_saver_never_seen_on_has_no_delta_rather_than_a_100_percent_one() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00FA_CADE);
+
+    // 20 sessions, rtk off in every one. No ON sessions at all.
+    for i in 0..20 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1500.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;
+        let id = format!("off-only-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::ROTATION)])
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x1111).unwrap();
+    let out = a.output().unwrap();
+    eprintln!(
+        "[never_on] n_on={} n_off={} delta={:?} badge={:?}",
+        out.n_on, out.n_off, out.delta, out.badge
+    );
+
+    assert_eq!(out.n_on, 0);
+    assert_eq!(
+        out.delta, None,
+        "a saver never seen on saved nothing measurable; 1 - median(&[])/median(off) == 1.0 \
+         is a 100% saving conjured from no data"
+    );
+    assert_eq!(out.badge, Badge::Measuring);
+}
+
+// ---------------------------------------------------------------------------
+// 14. Clean and contaminated holdouts must never be pooled into one baseline.
+// ---------------------------------------------------------------------------
+//
+// The first cut of the #3 fix reused `pick_group` for the baseline, which pools
+// its two groups when the preferred one is thin. That is sound for groups that
+// differ only in PROVENANCE, but a clean holdout ("every saver off") and a
+// contaminated one ("every saver off except the pinned one, still running") are
+// different treatment arms. The median of their union tracks whichever arm is
+// bigger, so the headline moves with the mix instead of with the savers.
+//
+// Here the clean holdouts (the truth, 2000/turn) are outnumbered by heavier
+// contaminated ones (3000/turn). Pooling would drag the baseline median up and
+// INFLATE the multiplier well above the clean-only truth, in the direction of
+// Piggy's own product claim. Worse, pooling would clear MIN_GROUP on a count
+// (9 + 15) that no single population supports.
+
+#[test]
+fn clean_and_contaminated_holdouts_are_not_pooled_into_one_baseline() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00C1_EA11);
+
+    // 9 clean holdouts: genuinely everything off. Below MIN_GROUP on their own.
+    for i in 0..9 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("clean-holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+
+    // 15 contaminated holdouts from a heavier era, headroom pinned on throughout.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (3000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("dirty-holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::HOLDOUT),
+                    SaverTag::new("headroom", true, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    // Full-on era, rotation-only.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("full-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x3691).unwrap();
+    eprintln!(
+        "[no_pooling] n_baseline={} baseline_clean={} ceiling={:?} mult={:?}",
+        hl.n_baseline, hl.baseline_clean, hl.ceiling, hl.multiplier
+    );
+
+    // 9 clean is under MIN_GROUP, so the contaminated arm is used ALONE. The
+    // giveaway for pooling is a baseline of 24: a count no single population has.
+    assert_eq!(
+        hl.n_baseline, 15,
+        "the baseline must be one coherent population (the 15 contaminated), never \
+         the 24-session union of two different treatment arms"
+    );
+    assert!(!hl.baseline_clean);
+    assert_eq!(hl.ceiling, Badge::Estimated);
+}

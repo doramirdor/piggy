@@ -17,6 +17,13 @@ export interface Headline {
   value: number | null;
   label: HeadlineLabel;
   nHoldout: number;
+  /**
+   * Why the figure is only estimated, in the user's terms. Null unless the label
+   * is "estimated". There is more than one reason (no holdout yet, savers pinned
+   * on by hand, a pinned saver ran through the holdout) and they are not
+   * distinguishable from `label`, so the backend names the right one.
+   */
+  note: string | null;
 }
 
 export interface StatsOverview {
