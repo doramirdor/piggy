@@ -70,7 +70,7 @@
       "id": "caveman",
       "name": "Caveman",
       "plainLabel": "Terse replies",
-      "description": "Claude answers in short caveman speak — fewer words, same code",
+      "description": "Claude answers in short caveman speak - fewer words, same code",
       "layer": "reply_style",
       "installType": "claude_plugin",
       "status": "curated_v1",
@@ -121,7 +121,7 @@
       "conflictsWith": ["ponytail"],
       "ordering": 50,
       "behaviorChanging": true,
-      "warning": "Independent JetBrains A/B test (82–86 tasks) measured ~8.5% real-world savings vs the 65% claim — with no quality loss. Modest but real.",
+      "warning": "Independent JetBrains A/B test (82–86 tasks) measured ~8.5% real-world savings vs the 65% claim - with no quality loss. Modest but real.",
       "claimedSavings": "65% fewer output tokens (author, chat-only benchmark)",
       "measuredPrior": { "source": "JetBrains SkillsBench A/B, July 2026", "outputTokenDelta": -0.085, "qualityP": 0.82 },
       "risk": "low",
@@ -131,7 +131,7 @@
       "id": "ponytail",
       "name": "Ponytail",
       "plainLabel": "Write less code",
-      "description": "Nudges Claude to build only what you asked for — no gold-plating",
+      "description": "Nudges Claude to build only what you asked for - no gold-plating",
       "layer": "reply_style",
       "installType": "claude_plugin",
       "status": "curated_v1",
@@ -152,7 +152,7 @@
       },
       "uninstall": {
         "steps": [
-          { "step": "run_plugin_script", "script": "scripts/uninstall.js", "runner": "node", "ignoreFailure": true, "note": "must run BEFORE plugin uninstall — cleans ~/.config/ponytail and any statusLine entry" },
+          { "step": "run_plugin_script", "script": "scripts/uninstall.js", "runner": "node", "ignoreFailure": true, "note": "must run BEFORE plugin uninstall - cleans ~/.config/ponytail and any statusLine entry" },
           { "step": "claude_cli", "args": ["plugin", "uninstall", "ponytail@ponytail"] },
           { "step": "claude_cli", "args": ["plugin", "marketplace", "remove", "ponytail"], "ignoreFailure": true },
           { "step": "verify_no_setting", "path": "statusLine", "contains": "ponytail" }
@@ -169,7 +169,7 @@
       "warning": "Changes how Claude writes code (less of it). Authors retracted their early 80–94% claim themselves; current honest benchmark: −22% tokens.",
       "claimedSavings": "−22% tokens / −20% cost (author agentic benchmark, n=4)",
       "risk": "low",
-      "notes": "Node.js soft dependency. Authors publicly self-corrected inflated benchmarks — good honesty signal."
+      "notes": "Node.js soft dependency. Authors publicly self-corrected inflated benchmarks - good honesty signal."
     },
     {
       "id": "sweep",
@@ -203,7 +203,7 @@
       "defaultOn": false,
       "license": "MIT",
       "source": { "type": "npm", "package": "claude-token-optimizer", "pinnedVersion": "2.3.20" },
-      "install": { "steps": [{ "step": "todo_v1_1", "note": "per-project npx run; needs project picker UI. Its hook templates are NOT installed — Piggy's merge engine would own that if ever enabled." }] },
+      "install": { "steps": [{ "step": "todo_v1_1", "note": "per-project npx run; needs project picker UI. Its hook templates are NOT installed. Piggy's merge engine would own that if ever enabled." }] },
       "uninstall": { "steps": [{ "step": "todo_v1_1" }] },
       "healthCheck": { "checks": [] },
       "conflictsWith": [],
@@ -258,20 +258,20 @@
       "license": "Elastic-2.0",
       "licenseNote": "Source-available, NOT open source. Fine for personal use; restricts hosted resale. Piggy shows this label before install.",
       "source": { "type": "claude_plugin_marketplace", "repo": "mksglu/context-mode", "marketplace": "context-mode", "plugin": "context-mode" },
-      "install": { "steps": [{ "step": "todo_v1_1", "note": "bundles an MCP server + 6 hook events; uninstall path unverified upstream — must be empirically tested before enabling." }] },
+      "install": { "steps": [{ "step": "todo_v1_1", "note": "bundles an MCP server + 6 hook events; uninstall path unverified upstream, must be empirically tested before enabling." }] },
       "uninstall": { "steps": [{ "step": "todo_v1_1" }] },
       "healthCheck": { "checks": [{ "check": "plugin_enabled", "plugin": "context-mode@context-mode" }] },
       "conflictsWith": [],
       "ordering": 40,
       "behaviorChanging": false,
-      "claimedSavings": "98% on sandboxed tool output (author; unverified 'used at' logo wall — ignore it)",
+      "claimedSavings": "98% on sandboxed tool output (author; unverified 'used at' logo wall - ignore it)",
       "risk": "medium"
     },
     {
       "id": "headroom",
       "name": "Headroom",
       "plainLabel": "Deep compression engine",
-      "description": "Compresses everything Claude reads — launch Claude via the piggy-claude wrapper",
+      "description": "Compresses everything Claude reads - launch Claude via the piggy-claude wrapper",
       "layer": "proxy",
       "installType": "venv+wrapper",
       "status": "curated_v1",
@@ -287,7 +287,7 @@
           { "step": "ensure_dir_on_path", "dir": "${PIGGY_BIN}",
             "note": "so the piggy-claude launcher resolves by bare name. Shared with rtk; the PATH line is removed only when the last ${PIGGY_BIN} consumer is uninstalled." },
           { "step": "write_launcher", "name": "piggy-claude", "exec": "${PIGGY_HOME}/venvs/headroom/bin/headroom", "args": ["wrap", "claude"],
-            "note": "WRAPPER MODEL (chosen deliberately): compression is scoped to sessions the user starts with `piggy-claude`, which runs `headroom wrap claude`. Piggy sets NO global ANTHROPIC_BASE_URL and runs NO persistent proxy daemon — headroom's proxy lives and dies with the wrapped session — so a stopped proxy can never break normal `claude`. The trade-off vs an always-on default is explicit and reversible." }
+            "note": "WRAPPER MODEL (chosen deliberately): compression is scoped to sessions the user starts with `piggy-claude`, which runs `headroom wrap claude`. Piggy sets NO global ANTHROPIC_BASE_URL and runs NO persistent proxy daemon. Headroom's proxy lives and dies with the wrapped session, so a stopped proxy can never break normal `claude`. The trade-off vs an always-on default is explicit and reversible." }
         ]
       },
       "uninstall": {
@@ -308,7 +308,7 @@
       "behaviorChanging": false,
       "claimedSavings": "47–92% by workload (author, reproducible eval suite)",
       "risk": "medium",
-      "notes": "Piggy's default compressor (defaultOn), installed as an isolated Python venv + a `piggy-claude` launcher. Wraps rtk internally, so it conflictsWith rtk — turning Headroom on auto-disables rtk and vice versa. Also conflictsWith nadirclaw: both are proxies and can't both own ANTHROPIC_BASE_URL. Uses the wrapper-launcher model rather than a global proxy: run `piggy-claude` to compress a session; plain `claude` is untouched."
+      "notes": "Piggy's default compressor (defaultOn), installed as an isolated Python venv + a `piggy-claude` launcher. Wraps rtk internally, so it conflictsWith rtk. Turning Headroom on auto-disables rtk and vice versa. Also conflictsWith nadirclaw: both are proxies and can't both own ANTHROPIC_BASE_URL. Uses the wrapper-launcher model rather than a global proxy: run `piggy-claude` to compress a session; plain `claude` is untouched."
     },
     {
       "id": "nadirclaw",
@@ -331,7 +331,7 @@
       "warning": "Routes some prompts to cheaper/local models, so answer quality (not just token count) can change. Measure before trusting it.",
       "claimedSavings": "40–70% by routing to cheaper models (author, getnadir.com)",
       "risk": "medium",
-      "notes": "LLM router / proxy. Sets ANTHROPIC_BASE_URL + ANTHROPIC_MODEL via `nadirclaw claude onboard`. conflictsWith headroom — two proxies can't both own ANTHROPIC_BASE_URL. Does NOT conflict with rtk (rtk's Bash-output hook is an orthogonal layer). Repo NadirRouter/NadirClaw; pip package `nadirclaw`."
+      "notes": "LLM router / proxy. Sets ANTHROPIC_BASE_URL + ANTHROPIC_MODEL via `nadirclaw claude onboard`. conflictsWith headroom. Two proxies can't both own ANTHROPIC_BASE_URL. Does NOT conflict with rtk (rtk's Bash-output hook is an orthogonal layer). Repo NadirRouter/NadirClaw; pip package `nadirclaw`."
     },
     {
       "id": "token-optimizer-mcp",
@@ -352,7 +352,7 @@
       "behaviorChanging": false,
       "claimedSavings": "60–90% (author; GPT-4 tokenizer approximation)",
       "risk": "high",
-      "exclusionReason": "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months. Shown in Discovered tab with this explanation — never installable until fixed upstream."
+      "exclusionReason": "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months. Shown in Discovered tab with this explanation - never installable until fixed upstream."
     }
   ]
 }

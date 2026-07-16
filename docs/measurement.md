@@ -4,8 +4,8 @@ The moat is honest numbers. This doc defines exactly how savings are computed an
 
 ## Vocabulary
 
-- **measured** — derived from token counts in session logs. The only thing the dashboard shows.
-- **estimated** — anything involving a pricing table or a projection (cost, sweep context-cost).
+- **measured** - derived from token counts in session logs. The only thing the dashboard shows.
+- **estimated** - anything involving a pricing table or a projection (cost, sweep context-cost).
   Always labeled `(estimated)`. Never blended with measured in one number.
 
 ## Why not before/after totals
@@ -33,7 +33,7 @@ With master switch on, sessions are assigned (round-robin over a repeating block
 - For each installed saver X: ~10% **single-off**: everything on except X.
 - Remainder: **full-on**.
 
-Rotation only ever toggles Piggy-managed savers — user's own hooks are never touched.
+Rotation only ever toggles Piggy-managed savers. User's own hooks are never touched.
 If the user manually flips a toggle, rotation pauses for that saver (respect intent),
 and its badge falls back to whatever data exists.
 
@@ -46,15 +46,15 @@ Per saver X:
   `measured 22% less input · 41 sessions`. Confidence interval via bootstrap (1,000 resamples);
   if the 90% CI crosses zero or either group has < 10 sessions → display **"not enough data
   yet · n sessions"** instead of a number. Never show a point estimate without n.
-- Overall headline: full-on vs holdout only (not pre-install, unless zero holdouts exist —
+- Overall headline: full-on vs holdout only (not pre-install, unless zero holdouts exist,
   then labeled `vs. history (observational)`). "Your plan lasts N.N× longer" =
   `median_rate(holdout) / median_rate(full_on)` on the plan-metered streams
   (input + output + cache_create at their price weights; cache_read excluded from "spend"
-  weighting — labeled estimated because weights come from pricing).
+  weighting - labeled estimated because weights come from pricing).
   If weights are involved, the × number is `estimated`; the raw per-stream percentages are
   `measured`. Show the measured percentages first.
 - Added latency per saver: median wall-clock gap between consecutive message timestamps in ON
-  vs OFF sessions — only if measurable; otherwise omit (never guess).
+  vs OFF sessions, only if measurable; otherwise omit (never guess).
 
 ## Storage
 
@@ -64,8 +64,8 @@ Per saver X:
 
 ## UI copy rules
 
-- `measured 22% · 41 sessions` — green badge, only when CI excludes zero.
-- `not enough data yet · 6 sessions` — neutral badge.
-- `claimed 60–90% (author)` — gray, install card only.
+- `measured 22% · 41 sessions` - green badge, only when CI excludes zero.
+- `not enough data yet · 6 sessions` - neutral badge.
+- `claimed 60–90% (author)` - gray, install card only.
 - Holdout explainer, one line: "Piggy occasionally runs a session with savers off to measure
   honestly. You can turn this off in Settings (your badges will say 'estimated')."

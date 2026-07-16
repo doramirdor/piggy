@@ -1,12 +1,12 @@
-# M4 spec — Tauri menu bar app (head decisions)
+# M4 spec - Tauri menu bar app (head decisions)
 
 Design reference (binding): `docs/mockups/panel.html` (panel), `docs/mockups/sharecard.html`
-(share card), `docs/mockups/icon.svg` (icon). Match them visually — they were reviewed and
+(share card), `docs/mockups/icon.svg` (icon). Match them visually. They were reviewed and
 approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks).
 
 ## Shell
 
-- Tauri v2, tray-only app (`ActivationPolicy::Accessory` — no dock icon).
+- Tauri v2, tray-only app (`ActivationPolicy::Accessory` - no dock icon).
 - Tray icon: monochrome template piggy glyph + optional short text (today's saved %) via
   tray title. Left-click toggles a popover-style window anchored to the tray icon
   (`tauri-plugin-positioner`, tray-center). Window: 360×600, no decorations, rounded 14px,
@@ -14,7 +14,7 @@ approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks)
   hides on blur (focus loss), Esc hides.
 - Frontend: React 18 + Tailwind v4 + Vite. Dark default; respects system light mode (the
   mockup palette has CSS-var equivalents both ways). No UI kit; components hand-rolled to
-  match mockup. Zustand for state. No localStorage — all state via Tauri commands.
+  match mockup. Zustand for state. No localStorage - all state via Tauri commands.
 - The Rust side links `piggy-core` directly (workspace member `app/src-tauri`).
 
 ## Background behavior (the daemon lives here)
@@ -38,7 +38,7 @@ approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks)
 - `share_card_data(period)` → numbers for the card; `save_share_card(png_bytes)` → writes
   ~/Desktop/piggy-savings.png + reveals in Finder; copy handled in JS via clipboard API.
 - `settings_get()/settings_set()` → holdout fraction, launch at login, rotation on/off
-- `restore_defaults()` — confirmation UI first ("puts Claude's settings back exactly as
+- `restore_defaults()` - confirmation UI first ("puts Claude's settings back exactly as
   before Piggy"), then engine call.
 - `doctor()` → checks for Settings > Health section.
 
@@ -63,9 +63,9 @@ approved. Vocabulary rules from DESIGN.md apply everywhere (savers, never hooks)
   above. Numbers only from `share_card_data`; if headline is estimated, the card must say
   "estimated"; if not enough data, share button disabled with "measuring" tooltip.
 
-## Empty/degraded states (non-developers — every state must say what to do)
+## Empty/degraded states (non-developers - every state must say what to do)
 
-- No Claude Code found → friendly setup card ("Piggy needs Claude Code — install it first").
+- No Claude Code found → friendly setup card ("Piggy needs Claude Code - install it first").
 - Fresh install, no data yet → "Piggy is reading your history…" progress, then first stats.
 - No holdout data yet → headline shows "measuring… N of 10 sessions" instead of multiplier.
 - Engine error → plain sentence + "Everything was rolled back" when true. Never show JSON.

@@ -1,7 +1,7 @@
-# M2 spec — registry, install engine, config merge (head decisions)
+# M2 spec - registry, install engine, config merge (head decisions)
 
 Locked decisions for the install engine. The catalog lives in `registry/catalog.json`
-(already authored, live-verified 2026-07-12 — see docs/research/optimizers.md).
+(already authored, live-verified 2026-07-12 - see docs/research/optimizers.md).
 
 ## Ownership model
 
@@ -10,7 +10,7 @@ Locked decisions for the install engine. The catalog lives in `registry/catalog.
   with their original config snippets, backup ledger, content hash of settings.json after our
   last write.
 - "Piggy-owned" hook entries are identified by **structural equality against state.json
-  records** — never by guessing. Removal deletes only exact matches; user hooks (e.g. this
+  records**, never by guessing. Removal deletes only exact matches; user hooks (e.g. this
   machine's openbar wildcard hooks) are untouchable.
 
 ## Merge engine (crates/piggy-core::config)
@@ -23,23 +23,23 @@ Locked decisions for the install engine. The catalog lives in `registry/catalog.
 4. Serialization: 2-space indent (matches Claude Code's own writer) to minimize diff noise.
 5. **Byte-identical uninstall**: after structural removal, if resulting structure ==
    pre-install backup structure, write the backup's exact bytes. If user made unrelated edits
-   since, keep them (structural removal only) — document this in the uninstall result.
+   since, keep them (structural removal only). Document this in the uninstall result.
 6. Hook merge is additive, ordered by registry `ordering` among Piggy-owned entries;
    pre-existing user hooks always stay first in their arrays.
-7. Handle: missing file (create minimal), empty file, BOM (strip + warn — real bug seen in
+7. Handle: missing file (create minimal), empty file, BOM (strip + warn - real bug seen in
    the wild from token-optimizer-mcp), trailing newline preservation, unknown top-level keys
-   (preserve verbatim — settings.json evolves).
+   (preserve verbatim - settings.json evolves).
 
 ## Install step DSL (interpret registry/catalog.json steps)
 
-- `download_release_asset` — GitHub release, arch-mapped asset, sha256 verified from the
+- `download_release_asset` - GitHub release, arch-mapped asset, sha256 verified from the
   release's checksum file (fetched from same tag). reqwest, no redirects to non-github hosts.
 - `extract_binary` → `~/.piggy/bin/`, chmod 755.
-- `merge_hooks` — via merge engine; record injected objects in state.json.
-- `claude_cli` — run `claude <args>` non-interactively (locate binary: `which claude`,
+- `merge_hooks` - via merge engine; record injected objects in state.json.
+- `claude_cli` - run `claude <args>` non-interactively (locate binary: `which claude`,
   fallback known paths). Backup settings.json before AND after (plugin installs write to it).
   If `claude` CLI absent → saver shows "needs Claude Code CLI" and install is refused cleanly.
-- `require_binary` (soft) — warn-only gate.
+- `require_binary` (soft) - warn-only gate.
 - `run_plugin_script`, `verify_no_setting`, `remove_hooks`, `delete_file`, `builtin_enable/disable`.
 - Unknown step in catalog → refuse install of that saver ("catalog newer than app"), never guess.
 
@@ -60,7 +60,7 @@ Locked decisions for the install engine. The catalog lives in `registry/catalog.
 - Data sources: `~/.claude/settings.json` (enabledPlugins, hooks), `~/.claude.json`
   `projects.*.mcpServers`, `~/.claude/plugins/installed_plugins.json`, `~/.claude/skills/`.
 - Usage cross-ref from session DB: MCP tool invocations appear in logs as `mcp__<server>__*`
-  tool_use names; skills as Skill tool invocations — count per source over last N=50 sessions.
+  tool_use names; skills as Skill tool invocations - count per source over last N=50 sessions.
 - Unused item → offer disable: MCP server: remove entry but snapshot the exact JSON in
   state.json for restore; plugin: enabledPlugins=false; skill: move dir to
   `~/.piggy/disabled/skills/` (restore = move back). Cost numbers are **estimated** (schema/
@@ -72,9 +72,9 @@ Locked decisions for the install engine. The catalog lives in `registry/catalog.
 `piggy install|remove|on|off <saver>`, `piggy list` (with measured/claimed labels),
 `piggy sweep [--apply N]`, `piggy restore-defaults`, `piggy backups`.
 
-## Test fixtures (tests/fixtures/settings/) — the hardest-tested code in the repo
+## Test fixtures (tests/fixtures/settings/) - the hardest-tested code in the repo
 
-- `openbar.json` — replica of this machine's real settings.json (wildcard matchers on 6 events).
+- `openbar.json` - replica of this machine's real settings.json (wildcard matchers on 6 events).
 - `empty.json`, `missing` (no file), `bom.json`, `minimal.json` (`{}`),
 - `already-has-rtk.json` (user manually installed rtk before Piggy),
 - `unknown-keys.json` (future settings fields must round-trip verbatim),
