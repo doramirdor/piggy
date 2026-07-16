@@ -21,6 +21,12 @@ use crate::registry::Catalog;
 /// installable.
 const LISTED_ONLY: &str = "listed_only";
 
+/// Piggy's own repo. It carries the `claude-code` and `token-optimization`
+/// topics (so people looking for a token saver can find it), which means every
+/// query below matches it. Piggy is not in its own catalog, so nothing else
+/// filters it out, and without this it would list itself as a candidate saver.
+const SELF_REPO: &str = "doramirdor/piggy";
+
 /// The GitHub topic searches we run. Results are merged.
 ///
 /// Every query is anchored to a topic. An unanchored free-text search (the old
@@ -158,7 +164,8 @@ pub fn merge_and_filter(
     let mut by_name: BTreeMap<String, DiscoveredRepo> = BTreeMap::new();
     for batch in batches {
         for repo in batch {
-            if known.contains(&repo.full_name)
+            if repo.full_name.eq_ignore_ascii_case(SELF_REPO)
+                || known.contains(&repo.full_name)
                 || known_packages
                     .iter()
                     .any(|p| repo_is_package(&repo.full_name, p))
@@ -376,6 +383,24 @@ mod tests {
                 "query {q:?} is not topic-anchored; it will poison the feed"
             );
         }
+    }
+
+    /// Piggy tags its own repo `claude-code` + `token-optimization` so users can
+    /// find it, which makes every query match it. It is not in its own catalog,
+    /// so nothing else would filter it out of its own feed.
+    #[test]
+    fn piggy_does_not_discover_itself() {
+        let catalog = Catalog::from_json(CATALOG_JSON).unwrap();
+        let batch = vec![
+            repo("doramirdor/piggy", 0),
+            repo("DorAmirDor/Piggy", 3), // same repo, GitHub is case-insensitive here
+            repo("stranger/lean-ctx", 120),
+        ];
+        assert_eq!(
+            feed_names(&merge_and_filter(vec![batch], &catalog)),
+            vec!["stranger/lean-ctx"],
+            "Piggy must not list itself as a candidate saver"
+        );
     }
 
     /// A `listed_only` tool must appear exactly once, in the appended

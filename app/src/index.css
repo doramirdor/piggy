@@ -1408,6 +1408,9 @@ button {
   font-weight: 600;
   background: var(--card-2);
   color: var(--text);
+  /* Labels are short ("Check now", "Turn on"): let the button size to the text
+     rather than wrap mid-label when a header title crowds it. */
+  white-space: nowrap;
   transition: background 0.13s ease, transform 0.08s ease, filter 0.13s ease;
 }
 .btn:hover:not(:disabled) {
