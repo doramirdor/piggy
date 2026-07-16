@@ -45,6 +45,10 @@ struct RawLine {
     cwd: Option<String>,
     #[serde(default)]
     git_branch: Option<String>,
+    /// Which surface wrote the line (`cli`, `claude-desktop`, `claude-vscode`,
+    /// `sdk-cli`, …) — the GUI/TUI discriminator.
+    #[serde(default)]
+    entrypoint: Option<String>,
     #[serde(default)]
     message: Option<RawMessage>,
 }
@@ -130,6 +134,15 @@ impl ModelTokens {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionParse {
     pub session_id: String,
+    /// Which tool wrote the log: `"claude-code"` or `"codex"` (see
+    /// [`crate::sources::SourceKind`]).
+    pub source: String,
+    /// The surface it ran in: `"gui"`, `"tui"`, or `"unknown"` (see
+    /// [`crate::sources::Interface`]).
+    pub interface: String,
+    /// The raw client marker the classification came from (Claude Code
+    /// `entrypoint` / Codex `originator`), kept for diagnostics.
+    pub client: Option<String>,
     /// Most common `cwd` seen in the file.
     pub project_path: Option<String>,
     /// Most common non-empty `gitBranch` seen in the file.
@@ -184,6 +197,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
     let mut parse_errors: u64 = 0;
     let mut cwd_counts: HashMap<String, u64> = HashMap::new();
     let mut branch_counts: HashMap<String, u64> = HashMap::new();
+    let mut entrypoint_counts: HashMap<String, u64> = HashMap::new();
     let mut first_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
 
@@ -223,6 +237,11 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         if let Some(b) = &raw.git_branch {
             if !b.is_empty() {
                 *branch_counts.entry(b.clone()).or_insert(0) += 1;
+            }
+        }
+        if let Some(e) = &raw.entrypoint {
+            if !e.is_empty() {
+                *entrypoint_counts.entry(e.clone()).or_insert(0) += 1;
             }
         }
 
@@ -295,8 +314,17 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         }
     }
 
+    let client = most_common(&entrypoint_counts);
+    let interface = client
+        .as_deref()
+        .map(crate::sources::classify_claude_entrypoint)
+        .unwrap_or(crate::sources::Interface::Unknown);
+
     Ok(SessionParse {
         session_id,
+        source: crate::sources::SourceKind::ClaudeCode.as_str().to_string(),
+        interface: interface.as_str().to_string(),
+        client,
         project_path: most_common(&cwd_counts),
         git_branch: most_common(&branch_counts),
         first_ts,

@@ -1,4 +1,4 @@
-// The Piggy brand mark — a compact vector piggy bank (pink body + gold star
+// The Piggy brand mark - a compact vector piggy bank (pink body + gold star
 // coin) distilled from the app icon (docs/mockups/icon.svg). Used in the header
 // wordmark in place of the 🐷 emoji so the brand reads the same in every theme.
 // Solid fills only (no gradients) to stay crisp at ~18px.

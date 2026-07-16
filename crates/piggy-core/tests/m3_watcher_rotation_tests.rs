@@ -36,6 +36,9 @@ impl Sandbox {
         std::env::set_var("PIGGY_CLAUDE_DIR", dir.path().join("claude"));
         std::env::set_var("PIGGY_CLAUDE_JSON", dir.path().join("claude.json"));
         std::env::set_var("PIGGY_CLAUDE_PROJECTS", dir.path().join("projects"));
+        // Sandbox the shell profile: rtk's install runs `ensure_dir_on_path`,
+        // which would otherwise append a PATH line to the real `~/.zshrc`.
+        std::env::set_var("PIGGY_SHELL_PROFILE", dir.path().join("zshrc"));
         std::env::remove_var("PIGGY_CLAUDE_BIN");
         std::env::remove_var("PIGGY_ASSET_CACHE_DIR");
         std::fs::create_dir_all(dir.path().join("claude")).unwrap();
@@ -192,6 +195,7 @@ fn saver(id: &str, enabled: bool, src: Option<&str>) -> SaverState {
         installed_files: Vec::new(),
         pre_install_backup: None,
         last_toggle_source: src.map(String::from),
+        config: BTreeMap::new(),
     }
 }
 

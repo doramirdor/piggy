@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { IS_MOCK } from "./ipc";
-// Inter — bundled locally (woff2 served from 'self', CSP-safe & offline). The
+// Inter - bundled locally (woff2 served from 'self', CSP-safe & offline). The
 // variable file covers every weight the brand system uses (Regular→Bold).
 import "@fontsource-variable/inter";
 import "./index.css";

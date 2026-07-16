@@ -1,8 +1,10 @@
 import { useStore } from "../store";
 import { SaverIcon } from "../components/SaverIcon";
 import { StatusChip } from "../components/StatusChip";
+import { UsageChart } from "../components/UsageChart";
 import { statusView, type StatusTone } from "../lib/badge";
-import { pctMagnitude } from "../lib/format";
+import { pctMagnitude, formatTokens } from "../lib/format";
+import { analyzeUsage, shortDay } from "../lib/usage";
 import type { SaverRow } from "../types";
 
 /** Directional trend affordance (not per-point data): rising line for savers
@@ -39,18 +41,96 @@ function Row({ saver }: { saver: SaverRow }) {
       <div className="rname">
         <SaverIcon id={saver.id} size={34} />
         <div>
-          <div className="rn-name">{saver.plainLabel ?? saver.name}</div>
+          <div className="rn-name">{saver.name}</div>
           <div className="rn-desc">{saver.description}</div>
         </div>
       </div>
       <StatusChip badge={saver.badge} />
       <span className={`rsave ${v.tone === "estimated" ? "est" : ""} ${hasSaving ? "" : "none"}`}>
-        {hasSaving ? pctMagnitude(delta!) : "—"}
+        {hasSaving ? pctMagnitude(delta!) : "-"}
       </span>
       <span className="rnum">{saver.badge.n}</span>
       <span className="col-right">
         <Trend tone={v.tone} />
       </span>
+    </div>
+  );
+}
+
+/** Day-over-day usage + token-maximization analysis, above the savers table. */
+function Analytics() {
+  const series = useStore((s) => s.series);
+  const stats = useStore((s) => s.stats);
+  const a = analyzeUsage(series);
+  const label = (series?.periodLabel ?? stats?.periodLabel ?? "").toLowerCase();
+
+  if (!series || a.activeDays === 0) {
+    return (
+      <div className="analytics">
+        <div className="sect">
+          Day over day
+          <span className="sect-sub">usage and token maximization</span>
+        </div>
+        <div className="foot-note" style={{ marginTop: 0 }}>
+          No usage in this window yet. Once Claude runs, your day-over-day tokens and cache reuse
+          show up here.
+        </div>
+      </div>
+    );
+  }
+
+  const trend = a.trendPct;
+  const trendUp = trend != null && trend > 0;
+  const cachePct = a.cacheHitRate != null ? Math.round(a.cacheHitRate * 100) : null;
+
+  return (
+    <div className="analytics">
+      <div className="sect">
+        Day over day
+        <span className="sect-sub">usage and token maximization · {label}</span>
+      </div>
+
+      <div className="kpis">
+        <div className="kpi">
+          <small>Tokens</small>
+          <strong>{formatTokens(a.totalTokens)}</strong>
+          <p>across {a.activeDays} active day{a.activeDays === 1 ? "" : "s"}</p>
+        </div>
+        <div className="kpi">
+          <small>Daily average</small>
+          <strong>{formatTokens(a.dailyAvg)}</strong>
+          <p>
+            {trend != null ? (
+              <span className={`trend ${trendUp ? "up" : "down"}`}>
+                {trendUp ? "▲" : "▼"} {pctMagnitude(trend)} vs prior day
+              </span>
+            ) : (
+              "per active day"
+            )}
+          </p>
+        </div>
+        <div className="kpi">
+          <small>Busiest day</small>
+          <strong>{a.busiest ? formatTokens(a.busiest.totalTokens) : "-"}</strong>
+          <p>{a.busiest ? shortDay(a.busiest.date) : "no data"}</p>
+        </div>
+        <div className="kpi">
+          <small>Cache reuse</small>
+          <strong className={cachePct != null && cachePct >= 40 ? "green" : ""}>
+            {cachePct != null ? `${cachePct}%` : "-"}
+          </strong>
+          <p>context served from cache</p>
+        </div>
+      </div>
+
+      <div className="uchart-card">
+        <UsageChart series={series} />
+      </div>
+      <div className="foot-note" style={{ marginTop: 0 }}>
+        Tokens are measured from your session logs; cost and cache reuse are computed from them.
+        Cache reuse is the main token-maximization lever - the higher it is, the less context Claude
+        re-reads each turn.
+      </div>
     </div>
   );
 }
@@ -67,8 +147,15 @@ export function Reports() {
       <div className="head">
         <div>
           <h1>Reports</h1>
-          <div className="sub">Every saver's measured status, savings, and session count.</div>
+          <div className="sub">Day-over-day usage, plus every saver's measured status and savings.</div>
         </div>
+      </div>
+
+      <Analytics />
+
+      <div className="sect">
+        Savers
+        <span className="sect-sub">measured status, savings, and session count</span>
       </div>
 
       <div className="summary">

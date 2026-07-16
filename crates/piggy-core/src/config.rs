@@ -32,6 +32,26 @@ pub fn piggy_bin_dir() -> PathBuf {
     piggy_home().join("bin")
 }
 
+/// The shell profile Piggy appends a `PATH` line to so binaries in
+/// [`piggy_bin_dir`] resolve by *bare name*.
+///
+/// This is required by savers whose runtime self-invokes by bare name rather
+/// than an absolute path — notably `rtk`, whose `PreToolUse` hook rewrites a
+/// matched command to `rtk <cmd>` (no path). The hook itself is injected with an
+/// absolute path, but that rewrite is not, so `<piggy_bin_dir>` must be on
+/// `PATH` for the rewritten command to run.
+///
+/// Resolution order: `PIGGY_SHELL_PROFILE` env var (tests point this at a temp
+/// file), else `~/.zshrc`. The app targets macOS/zsh, and `~/.zshrc` is where
+/// this user's interactive `PATH` is established and what Claude Code's shell
+/// snapshot sources.
+pub fn shell_profile_path() -> PathBuf {
+    if let Ok(v) = std::env::var("PIGGY_SHELL_PROFILE") {
+        return PathBuf::from(v);
+    }
+    home().join(".zshrc")
+}
+
 /// Directory holding timestamped `settings.json` backups plus the one-time
 /// `pre-piggy.json` (the Restore Defaults target). `<piggy_home>/backups`.
 pub fn backups_dir() -> PathBuf {
@@ -134,6 +154,21 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file()
 }
 
+/// The `python3` interpreter used to build a saver's isolated venv (e.g.
+/// Headroom, a Python package installed via `pip` into `<piggy_home>/venvs/…`).
+///
+/// Resolution order: `PIGGY_PYTHON_BIN` env var (tests point this at a shim that
+/// fakes `-m venv` + `pip` with no network), else the bare name `python3`.
+pub fn python_bin() -> String {
+    std::env::var("PIGGY_PYTHON_BIN").unwrap_or_else(|_| "python3".to_string())
+}
+
+/// Directory holding per-saver isolated Python virtualenvs.
+/// `<piggy_home>/venvs`.
+pub fn piggy_venvs_dir() -> PathBuf {
+    piggy_home().join("venvs")
+}
+
 /// Directory containing Claude Code session logs (`<project>/<session>.jsonl`).
 ///
 /// Resolution order: `PIGGY_CLAUDE_PROJECTS`, else `<claude_dir>/projects`.
@@ -143,6 +178,47 @@ pub fn claude_projects_dir() -> PathBuf {
         return PathBuf::from(v);
     }
     claude_dir().join("projects")
+}
+
+/// Codex's home directory (default `~/.codex`).
+///
+/// Resolution order: `PIGGY_CODEX_DIR` env var, else `~/.codex`. Only ever
+/// read — Piggy never writes under Codex's home.
+pub fn codex_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("PIGGY_CODEX_DIR") {
+        return PathBuf::from(v);
+    }
+    home().join(".codex")
+}
+
+/// Directories containing Codex rollout session logs
+/// (`sessions/YYYY/MM/DD/rollout-*.jsonl`, plus `archived_sessions`). Only the
+/// directories that exist are returned; both are read-only for Piggy.
+pub fn codex_sessions_dirs() -> Vec<PathBuf> {
+    let root = codex_dir();
+    ["sessions", "archived_sessions"]
+        .iter()
+        .map(|d| root.join(d))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// The XDG-style user config root (default `~/.config`) — where some savers
+/// keep their own user configuration (e.g. Caveman's
+/// `~/.config/caveman/config.json`).
+///
+/// Resolution order: `PIGGY_XDG_CONFIG` env var (tests point this at a temp
+/// dir), else `$XDG_CONFIG_HOME`, else `~/.config`.
+pub fn xdg_config_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("PIGGY_XDG_CONFIG") {
+        return PathBuf::from(v);
+    }
+    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    home().join(".config")
 }
 
 /// Path to Claude Code's `settings.json` (`<claude_dir>/settings.json`).

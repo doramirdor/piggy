@@ -51,6 +51,9 @@ fn insert_session(
     );
     let parse = SessionParse {
         session_id: id.to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: Some("2026-01-01T00:00:00.000Z".into()),

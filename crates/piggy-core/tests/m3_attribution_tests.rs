@@ -47,6 +47,9 @@ fn insert_session(
     );
     let parse = SessionParse {
         session_id: id.to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: Some("2026-01-01T00:00:00.000Z".into()),
@@ -294,6 +297,9 @@ fn subagent_sessions_are_excluded_from_groups() {
     );
     let parse = SessionParse {
         session_id: "sub".into(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: Some("2026-01-01T00:00:00.000Z".into()),
@@ -580,6 +586,9 @@ fn tag_pre_install_only_touches_untagged_old_sessions() {
 fn insert_at(store: &mut Store, pricing: &Pricing, id: &str, ts: &str) {
     let parse = SessionParse {
         session_id: id.to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: Some(ts.to_string()),
@@ -690,6 +699,9 @@ fn session_without_model_rows_does_not_break_rate_map() {
     // …and an empty one: parsed file with zero assistant messages → no models.
     let parse = SessionParse {
         session_id: "s-empty".to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: None,

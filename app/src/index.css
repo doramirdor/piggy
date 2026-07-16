@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ==========================================================================
-   Piggy — desktop window (redesign).
+   Piggy - desktop window (redesign).
    A native macOS sidebar app: left rail (brand + nav + connection) and a
    scrolling content column. Dark is the default; light mirrors the palette.
    The blueprint/brand personality lives in the mark, the hero cards, and the
@@ -10,7 +10,7 @@
 
 :root {
   color-scheme: light dark;
-  /* Piggy Design System v1.0 — core surfaces */
+  /* Piggy Design System v1.0 - core surfaces */
   --bg: #06080b;
   --sidebar: #0b0e12;
   --card: #0f1216;
@@ -33,7 +33,7 @@
   --accent: #3b82f6;
   --accent-strong: #3b82f6;
   --accent-dim: rgba(59, 130, 246, 0.16);
-  /* teal — "Estimating" / in-progress measurement */
+  /* teal - "Estimating" / in-progress measurement */
   --teal: #2dd4bf;
   --teal-dim: rgba(45, 212, 191, 0.15);
   --pink: #ff7da8;
@@ -416,9 +416,14 @@ button {
     linear-gradient(135deg, var(--accent-dim), var(--card));
   border: 0.5px solid var(--hairline);
 }
+/* Off: no green glow (nothing is saving), a neutral surface instead. */
+.hero.off {
+  background: var(--card);
+}
 .hero .hero-top {
   display: flex;
   align-items: flex-start;
+  gap: 12px;
 }
 .hero .eyebrow {
   font-size: 12px;
@@ -500,6 +505,143 @@ button {
   gap: 14px;
   margin-top: 14px;
 }
+
+/* ---------- per-tool observability grid (Overview "Across your tools") ---------- */
+.sect-sub {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-3);
+}
+.src-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.src-cell {
+  border-radius: 14px;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  padding: 15px 16px;
+}
+.src-cell.quiet strong,
+.src-cell.quiet p {
+  color: var(--text-3);
+}
+.src-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.src-ic {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.src-ic svg {
+  width: 17px;
+  height: 17px;
+}
+.src-ic.claude {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.src-ic.codex {
+  background: var(--teal-dim);
+  color: var(--teal);
+}
+.src-name b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.src-name small {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.src-cell strong {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.src-cell strong.none {
+  font-weight: 500;
+}
+.src-cell p {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 4px;
+}
+.src-cell p .est {
+  color: var(--teal);
+}
+
+/* ---------- per-saver options panel (Savers row expansion) ---------- */
+.cfg {
+  padding: 4px 15px 14px 61px;
+  border-top: 0.5px solid var(--hairline);
+  background: var(--card-2);
+}
+.cfg .desc {
+  font-size: 12px;
+  color: var(--text-3);
+  padding-top: 9px;
+}
+.cfg-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 11px;
+}
+.cfg-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.cfg-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 0.5px solid var(--hairline);
+  flex-shrink: 0;
+}
+.seg-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.seg-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.seg-btn.on {
+  background: var(--accent);
+  color: #fff;
+}
+.info-btn.gear.open {
+  color: var(--accent);
+}
 .metric {
   border-radius: 14px;
   background: var(--card);
@@ -528,6 +670,127 @@ button {
 }
 .metric p .meas {
   color: var(--green-bright);
+}
+
+/* ---------- day-over-day analytics (Reports) ---------- */
+.analytics {
+  margin-bottom: 8px;
+}
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+@media (max-width: 560px) {
+  .kpis {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.kpi {
+  border-radius: 14px;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  padding: 14px 15px;
+}
+.kpi small {
+  font-size: 11px;
+  color: var(--text-2);
+}
+.kpi strong {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi strong.green {
+  color: var(--green-bright);
+}
+.kpi p {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 4px;
+}
+.kpi .trend {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.kpi .trend.up {
+  color: var(--amber);
+}
+.kpi .trend.down {
+  color: var(--green-bright);
+}
+
+.uchart-card {
+  border-radius: 14px;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  padding: 16px 16px 12px;
+  margin-top: 12px;
+}
+.uchart-svg {
+  display: block;
+  width: 100%;
+  height: 150px;
+}
+.uchart-avg {
+  stroke: var(--accent);
+  stroke-width: 0.5;
+  stroke-dasharray: 1.6 1.6;
+  opacity: 0.6;
+  vector-effect: non-scaling-stroke;
+}
+.uchart-zero {
+  fill: var(--text-3);
+  opacity: 0.35;
+}
+.uchart-x {
+  display: flex;
+  margin-top: 8px;
+}
+.uchart-x span {
+  flex: 1;
+  font-size: 10px;
+  color: var(--text-3);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.uchart-x span:first-child {
+  text-align: left;
+}
+.uchart-x span:last-child {
+  text-align: right;
+}
+.uchart-x span.hide {
+  overflow: hidden;
+}
+.uchart-legend {
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.uchart-legend span {
+  font-size: 11px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.uchart-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.uchart-legend .uchart-avg-key i {
+  width: 12px;
+  height: 0;
+  border-radius: 0;
+  border-top: 1.5px dashed var(--accent);
 }
 
 /* ---------- section label ---------- */
@@ -618,6 +881,7 @@ button {
   gap: 16px;
 }
 .master .mpower {
+  position: relative;
   width: 56px;
   height: 56px;
   border-radius: 50%;
@@ -666,6 +930,46 @@ button {
   box-shadow: none;
 }
 
+/* ---- master "turning on/off" loader ---- */
+.master.busy {
+  background: linear-gradient(120deg, var(--accent-dim), transparent 55%, var(--green-dim));
+}
+.master.busy.turning-off {
+  background: linear-gradient(120deg, rgba(127, 127, 127, 0.14), transparent 60%);
+}
+.master.busy .mpower {
+  color: var(--accent);
+  background: var(--accent-dim);
+  animation: mpower-pulse 1.3s ease-in-out infinite;
+}
+.master.busy.turning-off .mpower {
+  color: var(--text-2);
+  background: rgba(127, 127, 127, 0.14);
+}
+/* A spinning arc that "charges up" the power icon while the switch is in flight. */
+.mpower-ring {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0deg, currentColor 60deg, transparent 300deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  animation: spin 0.9s linear infinite;
+}
+.master .master-progress {
+  width: auto;
+  margin-top: 10px;
+}
+@keyframes mpower-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-dim);
+  }
+}
+
 .rows {
   border-radius: 14px;
   background: var(--card);
@@ -706,6 +1010,26 @@ button {
   color: var(--text-2);
   margin-top: 3px;
   line-height: 1.4;
+}
+.row .lic-note {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 5px;
+  line-height: 1.4;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.row .lic-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-2);
+  background: rgba(127, 127, 127, 0.14);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
 }
 
 /* ---------- badges ---------- */
@@ -801,6 +1125,23 @@ button {
   border: 2px solid currentColor;
   border-right-color: transparent;
   animation: spin 0.7s linear infinite;
+}
+/* Determinate holdout-progress bar inside the "Measuring" chip. */
+.chip-progress {
+  width: 26px;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.chip-progress-fill {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  transition: width 0.4s ease;
 }
 
 /* ---------- info button + warning triangle ---------- */
@@ -1292,6 +1633,10 @@ button {
   gap: 10px;
   align-items: flex-start;
 }
+.banner.info {
+  background: var(--accent-dim);
+  border-color: rgba(59, 130, 246, 0.4);
+}
 .banner .btitle {
   font-size: 13px;
   font-weight: 700;
@@ -1350,6 +1695,58 @@ button {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Indeterminate loading bar (booting / long fetches). */
+.progress {
+  width: 180px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--switch-off);
+  overflow: hidden;
+  position: relative;
+}
+.progress-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--pink));
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+.row-progress {
+  width: 100%;
+  max-width: 220px;
+  height: 3px;
+  margin-top: 6px;
+}
+.desc.applying {
+  color: var(--accent);
+}
+@keyframes progress-slide {
+  0% {
+    left: -40%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.6;
+  }
+  .mpower-ring {
+    animation: none;
+    opacity: 0.6;
+  }
+  .master.busy .mpower {
+    animation: none;
   }
 }
 
@@ -1434,6 +1831,7 @@ button {
     padding: 30px 22px 40px;
   }
   .metric-grid,
+  .src-grid,
   .disc-grid {
     grid-template-columns: 1fr;
   }

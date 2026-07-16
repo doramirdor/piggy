@@ -34,6 +34,13 @@ pub const KNOWN_STEP_KINDS: &[&str] = &[
     "delete_file",
     "builtin_enable",
     "builtin_disable",
+    "ensure_dir_on_path",
+    "remove_dir_from_path",
+    "require_python",
+    "create_venv",
+    "pip_install",
+    "write_launcher",
+    "delete_dir",
 ];
 
 /// The whole parsed catalog.
@@ -95,6 +102,40 @@ pub struct Entry {
     pub license_note: Option<String>,
     #[serde(default)]
     pub exclusion_reason: Option<String>,
+    /// User-tunable options this saver exposes in the app (empty for most).
+    #[serde(default)]
+    pub config_options: Vec<ConfigOption>,
+}
+
+/// One user-tunable option a saver exposes (e.g. Caveman's intensity level).
+/// `apply` declares how the engine writes the chosen value; like install
+/// steps, an unknown apply kind refuses the action rather than guessing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOption {
+    /// Stable option key (unique within the saver).
+    pub key: String,
+    /// Short UI label, e.g. "Intensity".
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    /// The allowed values, in display order.
+    pub choices: Vec<ConfigChoice>,
+    /// The value in effect when the user never chose one.
+    pub default: String,
+    /// How to apply a chosen value (raw object with a `kind` discriminator,
+    /// interpreted by [`crate::saver_config`]).
+    pub apply: Value,
+}
+
+/// One selectable value of a [`ConfigOption`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChoice {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Where a saver's artifacts come from. Polymorphic on `type`; only the fields

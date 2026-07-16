@@ -18,6 +18,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,70 @@ fn time_seed() -> u64 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
         | 1
+}
+
+// ---------------------------------------------------------------------------
+// Attribution cache
+//
+// The bootstrap over every indexed session is the daemon's heaviest work, and
+// the UI refreshes on every session write. Recomputing it per saver + headline
+// on each refresh pegs every core once the session table is large. Instead we
+// compute the whole bundle (headline + one attribution per curated saver) once
+// per *index version* — bumped whenever indexing or rotation changes the data —
+// and hand out a shared snapshot. Repeat refreshes for unchanged data are O(1),
+// and a single recompute builds the per-session rate map once and reuses it
+// across every saver and the headline (instead of one full scan per call).
+// ---------------------------------------------------------------------------
+
+static ATTR_INDEX_VERSION: AtomicU64 = AtomicU64::new(0);
+static ATTR_CACHE: Mutex<Option<(u64, Arc<AttrBundle>)>> = Mutex::new(None);
+
+struct AttrBundle {
+    headline: CoreHeadline,
+    per_saver: std::collections::HashMap<String, SaverAttribution>,
+}
+
+/// Invalidate the attribution cache so the next dashboard read recomputes.
+/// Called after anything that changes the session data (indexing, rotation
+/// tagging, baseline anchoring).
+fn bump_attr_version() {
+    ATTR_INDEX_VERSION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The per-saver attribution + headline for the current index version, computed
+/// once and cached. Best-effort: an unreadable store propagates as `Err` and the
+/// caller degrades to an honest "measuring"/"not_enough_data" rather than crash.
+fn attribution_bundle() -> anyhow::Result<Arc<AttrBundle>> {
+    let version = ATTR_INDEX_VERSION.load(Ordering::Relaxed);
+    if let Ok(guard) = ATTR_CACHE.lock() {
+        if let Some((v, bundle)) = guard.as_ref() {
+            if *v == version {
+                return Ok(bundle.clone());
+            }
+        }
+    }
+    let home = config::piggy_home();
+    let store = Store::open(&home)?;
+    let pricing = Pricing::load(&home);
+    let catalog = Catalog::embedded();
+    let seed = time_seed();
+    // One full-table scan for the whole bundle.
+    let rate_map = store.session_rate_map(&pricing)?;
+    let headline = attribution::headline_with_map(&store, &rate_map, seed)?;
+    let mut per_saver = std::collections::HashMap::new();
+    for e in curated_installable(&catalog) {
+        if let Ok(attr) = attribution::attribute_with_map(&store, &rate_map, &e.id, seed) {
+            per_saver.insert(e.id.clone(), attr);
+        }
+    }
+    let bundle = Arc::new(AttrBundle {
+        headline,
+        per_saver,
+    });
+    if let Ok(mut guard) = ATTR_CACHE.lock() {
+        *guard = Some((version, bundle.clone()));
+    }
+    Ok(bundle)
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +213,8 @@ fn session_count() -> u64 {
 pub struct Environment {
     /// Claude Code appears to be present on this machine.
     pub claude_installed: bool,
+    /// Codex appears to be present on this machine (`~/.codex` exists).
+    pub codex_installed: bool,
     /// At least one session has been indexed.
     pub has_data: bool,
     pub sessions: u64,
@@ -154,9 +222,11 @@ pub struct Environment {
 
 pub fn environment() -> Environment {
     let claude_installed = config::claude_dir().exists() || config::claude_projects_dir().exists();
+    let codex_installed = config::codex_dir().exists();
     let sessions = session_count();
     Environment {
         claude_installed,
+        codex_installed,
         has_data: sessions > 0,
         sessions,
     }
@@ -204,15 +274,15 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
     (|| -> anyhow::Result<StatsOverview> {
         let home = config::piggy_home();
         let store = Store::open(&home)?;
-        let pricing = Pricing::load(&home);
         let period = period_from(&period_s);
         let t = store.totals(period)?;
         let today = store.totals(Period::Today)?;
-        // Real holdout-backed headline. Attribution is best-effort: an unreadable
-        // or dataless store yields an honest "not_enough_data" rather than an error
-        // (the token totals above are the load-bearing part of this call).
-        let headline = attribution::headline(&store, &pricing, time_seed())
-            .map(|hl| map_headline(&hl))
+        // Real holdout-backed headline, from the cached attribution bundle.
+        // Best-effort: an unreadable or dataless store yields an honest
+        // "not_enough_data" rather than an error (the token totals above are the
+        // load-bearing part of this call).
+        let headline = attribution_bundle()
+            .map(|b| map_headline(&b.headline))
             .unwrap_or_else(|_| Headline {
                 value: None,
                 label: "not_enough_data".to_string(),
@@ -286,6 +356,159 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
 }
 
 // ---------------------------------------------------------------------------
+// sources_overview (per-tool / per-surface observability)
+// ---------------------------------------------------------------------------
+
+/// One `(tool, surface)` cell of the observability grid: Claude Code or Codex,
+/// via the desktop app / IDE (gui) or the terminal (tui). Tokens are measured
+/// from the tool's own session logs; cost is always an estimate.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCell {
+    /// `"claude-code"` | `"codex"`.
+    pub source: String,
+    /// `"gui"` | `"tui"`.
+    pub interface: String,
+    pub sessions: u64,
+    pub total_tokens: u64,
+    pub cost_usd_est: f64,
+    /// True when the tool looks installed on this machine, so the UI can say
+    /// "nothing yet" (installed, no sessions in window) vs "not detected".
+    pub tool_present: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcesOverview {
+    pub period: String,
+    /// The four canonical cells (Claude Code / Codex × App / Terminal), always
+    /// present and zero-filled, in that fixed order.
+    pub cells: Vec<SourceCell>,
+    /// Tokens from sessions whose surface couldn't be classified (old logs
+    /// without a client marker, exotic clients). Shown honestly, never folded
+    /// into a guessed bucket.
+    pub unknown_tokens: u64,
+    pub unknown_sessions: u64,
+}
+
+pub fn sources_overview(period_s: String) -> Result<SourcesOverview, ApiError> {
+    (|| -> anyhow::Result<SourcesOverview> {
+        let home = config::piggy_home();
+        let store = Store::open(&home)?;
+        let period = period_from(&period_s);
+        let rows = store.by_source(period)?;
+
+        let claude_present =
+            config::claude_dir().exists() || config::claude_projects_dir().exists();
+        let codex_present = config::codex_dir().exists();
+
+        let mut cells: Vec<SourceCell> = [
+            ("claude-code", "gui", claude_present),
+            ("claude-code", "tui", claude_present),
+            ("codex", "gui", codex_present),
+            ("codex", "tui", codex_present),
+        ]
+        .iter()
+        .map(|(source, interface, present)| SourceCell {
+            source: source.to_string(),
+            interface: interface.to_string(),
+            sessions: 0,
+            total_tokens: 0,
+            cost_usd_est: 0.0,
+            tool_present: *present,
+        })
+        .collect();
+
+        let mut unknown_tokens = 0u64;
+        let mut unknown_sessions = 0u64;
+        for row in rows {
+            match cells
+                .iter_mut()
+                .find(|c| c.source == row.source && c.interface == row.interface)
+            {
+                Some(cell) => {
+                    cell.sessions = row.totals.sessions;
+                    cell.total_tokens = row.totals.total_tokens();
+                    cell.cost_usd_est = round2(row.totals.cost_usd_est);
+                }
+                None => {
+                    unknown_tokens += row.totals.total_tokens();
+                    unknown_sessions += row.totals.sessions;
+                }
+            }
+        }
+
+        Ok(SourcesOverview {
+            period: period_key(period).to_string(),
+            cells,
+            unknown_tokens,
+            unknown_sessions,
+        })
+    })()
+    .map_err(generic("Couldn't read your per-tool history"))
+}
+
+// ---------------------------------------------------------------------------
+// usage_series (day-over-day analytics)
+// ---------------------------------------------------------------------------
+
+/// One UTC calendar day of usage, with the four token streams kept separate so
+/// the UI can chart them and derive cache efficiency. Cost is always an estimate.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyPoint {
+    /// `YYYY-MM-DD` (UTC).
+    pub date: String,
+    pub total_tokens: u64,
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub cost_usd_est: f64,
+    pub sessions: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSeries {
+    pub period: String,
+    pub period_label: String,
+    /// Oldest day first, zero-filled so the day-over-day series is continuous.
+    pub points: Vec<DailyPoint>,
+}
+
+/// The day-over-day usage series for the window: per-day token streams, cost,
+/// and session counts. The token-maximization rollups (cache-hit rate, busiest
+/// day, trend) are derived from these points in the UI so they stay testable and
+/// the payload stays small.
+pub fn usage_series(period_s: String) -> Result<UsageSeries, ApiError> {
+    (|| -> anyhow::Result<UsageSeries> {
+        let store = Store::open(&config::piggy_home())?;
+        let period = period_from(&period_s);
+        let points = store
+            .daily_series(period)?
+            .into_iter()
+            .map(|r| DailyPoint {
+                date: r.date,
+                total_tokens: r.totals.total_tokens(),
+                input: r.totals.input_tokens,
+                output: r.totals.output_tokens,
+                cache_write: r.totals.cache_creation_tokens,
+                cache_read: r.totals.cache_read_tokens,
+                cost_usd_est: round2(r.totals.cost_usd_est),
+                sessions: r.totals.sessions,
+            })
+            .collect();
+        Ok(UsageSeries {
+            period: period_key(period).to_string(),
+            period_label: period.label().to_string(),
+            points,
+        })
+    })()
+    .map_err(generic("Couldn't read your day-over-day usage"))
+}
+
+// ---------------------------------------------------------------------------
 // savers_list / toggles
 // ---------------------------------------------------------------------------
 
@@ -329,6 +552,8 @@ pub struct SaverRow {
     pub license_note: Option<String>,
     pub ordering: i64,
     pub badge: Badge,
+    /// True when the saver exposes user-tunable options (a Configure control).
+    pub configurable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,6 +561,12 @@ pub struct SaverRow {
 pub struct SaversState {
     pub master_on: bool,
     pub savers: Vec<SaverRow>,
+    /// A one-line, plain-language heads-up produced by the last mutation - e.g.
+    /// when turning the master switch on auto-disabled a conflicting saver.
+    /// `None` on plain reads (`savers_list`), so the UI only flashes it after an
+    /// action the user just took.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Curated savers this build can actually install (real, known steps). These are
@@ -384,6 +615,7 @@ fn saver_row(e: &Entry, state: &PiggyState, attr: Option<&SaverAttribution>) -> 
             delta: None,
             n: 0,
         }),
+        configurable: !e.config_options.is_empty(),
     }
 }
 
@@ -421,36 +653,97 @@ fn saver_badge(a: &SaverAttribution) -> Badge {
     }
 }
 
-fn master_is_on(catalog: &Catalog, state: &PiggyState) -> bool {
-    let ids = default_on_ids(catalog);
-    !ids.is_empty()
-        && ids
-            .iter()
-            .all(|id| state.savers.get(id).map(|s| s.enabled).unwrap_or(false))
+/// The master switch is a system-level flag, not a rollup of savers: disabling
+/// any single saver leaves Piggy ON. Only the master switch writes it. Legacy
+/// state (`None`) falls back to "is anything running" so upgrades read sensibly
+/// until the switch is next used.
+fn master_is_on(state: &PiggyState) -> bool {
+    state
+        .master_on
+        .unwrap_or_else(|| state.savers.values().any(|s| s.enabled))
 }
 
 fn build_savers_state() -> anyhow::Result<SaversState> {
     let catalog = Catalog::embedded();
     let state = PiggyState::load()?;
-    // Per-saver attribution shares one store/pricing/seed so every row agrees with
-    // `piggy report`. A store failure degrades each row to an honest "measuring".
-    let home = config::piggy_home();
-    let store = Store::open(&home).ok();
-    let pricing = Pricing::load(&home);
-    let seed = time_seed();
+    // Per-saver attribution comes from the cached bundle (shared store/pricing/seed
+    // so every row agrees with `piggy report`). A store failure degrades each row
+    // to an honest "measuring".
+    let bundle = attribution_bundle().ok();
     let savers = curated_installable(&catalog)
         .iter()
         .map(|e| {
-            let attr = store
-                .as_ref()
-                .and_then(|st| attribution::attribute(st, &pricing, &e.id, seed).ok());
-            saver_row(e, &state, attr.as_ref())
+            let attr = bundle.as_ref().and_then(|b| b.per_saver.get(&e.id));
+            saver_row(e, &state, attr)
         })
         .collect();
     Ok(SaversState {
-        master_on: master_is_on(&catalog, &state),
+        master_on: master_is_on(&state),
         savers,
+        notice: None,
     })
+}
+
+/// The ids of every saver currently enabled, as a set for before/after diffing.
+fn enabled_ids(state: &PiggyState) -> std::collections::HashSet<String> {
+    state
+        .savers
+        .iter()
+        .filter(|(_, s)| s.enabled)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// A user-facing label for a saver id: its real name, else the id.
+fn friendly_name(catalog: &Catalog, id: &str) -> String {
+    catalog
+        .get(id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// Build the "we turned these off for you" notice after a mutation, given the
+/// savers that were enabled before and the state afterward. `auto_off` is the set
+/// of savers that were on before and are off now - each was disabled because a
+/// saver Piggy just turned on conflicts with it. Returns `None` when nothing was
+/// silently turned off. Best-effort names the saver that replaced each one.
+fn conflict_notice(
+    catalog: &Catalog,
+    before: &std::collections::HashSet<String>,
+    after_state: &PiggyState,
+) -> Option<String> {
+    let after = enabled_ids(after_state);
+    let mut auto_off: Vec<&String> = before.difference(&after).collect();
+    if auto_off.is_empty() {
+        return None;
+    }
+    auto_off.sort();
+    let parts: Vec<String> = auto_off
+        .iter()
+        .map(|id| {
+            let name = friendly_name(catalog, id);
+            // Find an enabled saver that conflicts with this one, in either direction.
+            let replacer = after.iter().find(|other| {
+                let declared_here = catalog
+                    .get(other)
+                    .map(|e| e.conflicts_with.iter().any(|c| c == *id))
+                    .unwrap_or(false);
+                let declared_there = catalog
+                    .get(id)
+                    .map(|e| e.conflicts_with.iter().any(|c| c == *other))
+                    .unwrap_or(false);
+                declared_here || declared_there
+            });
+            match replacer {
+                Some(other) => format!(
+                    "{name} turned off - {} does the same job and is now on.",
+                    friendly_name(catalog, other)
+                ),
+                None => format!("{name} turned off - it conflicts with a saver that's now on."),
+            }
+        })
+        .collect();
+    Some(parts.join(" "))
 }
 
 pub fn savers_list() -> Result<SaversState, ApiError> {
@@ -461,6 +754,9 @@ pub fn savers_list() -> Result<SaversState, ApiError> {
 /// engine's own health-check + rollback); `off` uses the fast A/B disable path.
 pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
     let catalog = Catalog::embedded();
+    let before_enabled = PiggyState::load()
+        .map(|s| enabled_ids(&s))
+        .unwrap_or_default();
     let installed = PiggyState::load()
         .map(|s| s.is_installed(&id))
         .unwrap_or(false);
@@ -488,7 +784,16 @@ pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
                 .unwrap_or_else(|| "It failed its health check.".to_string()),
             true,
         )),
-        Ok(_) => build_savers_state().map_err(generic("Couldn't read your savers")),
+        Ok(_) => {
+            let mut result = build_savers_state().map_err(generic("Couldn't read your savers"))?;
+            // Turning a saver on can auto-disable one it conflicts with; tell the user.
+            if on {
+                if let Ok(after) = PiggyState::load() {
+                    result.notice = conflict_notice(&catalog, &before_enabled, &after);
+                }
+            }
+            Ok(result)
+        }
         Err(e) => Err(ApiError::new(
             if on {
                 "Couldn't turn that saver on"
@@ -505,6 +810,11 @@ pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
 /// `ordering` order; off disables every Piggy-managed saver (kept installed).
 pub fn master_toggle(on: bool) -> Result<SaversState, ApiError> {
     let catalog = Catalog::embedded();
+    // What was on before, so we can tell the user which savers a conflict silently
+    // turned off (e.g. enabling the default-on Headroom auto-disables rtk).
+    let before_enabled = PiggyState::load()
+        .map(|s| enabled_ids(&s))
+        .unwrap_or_default();
 
     if on {
         let ids = default_on_ids(&catalog);
@@ -558,14 +868,114 @@ pub fn master_toggle(on: bool) -> Result<SaversState, ApiError> {
             if let Err(e) = engine::set_enabled(&catalog, &id, false) {
                 return Err(ApiError::new(
                     "Couldn't turn everything off",
-                    first_sentence(&e.to_string()),
+                    format!(
+                        "\u{201c}{}\u{201d} couldn't turn off: {}",
+                        catalog
+                            .get(&id)
+                            .map(|e| e.name.as_str())
+                            .unwrap_or(id.as_str()),
+                        first_sentence(&e.to_string())
+                    ),
                     false,
                 ));
             }
         }
     }
 
-    build_savers_state().map_err(generic("Couldn't read your savers"))
+    // Persist the system switch itself. This is the *only* writer of `master_on`;
+    // individual saver toggles deliberately leave it untouched, so disabling one
+    // saver never turns Piggy off.
+    if let Ok(mut state) = PiggyState::load() {
+        state.master_on = Some(on);
+        state
+            .save()
+            .map_err(generic("Couldn't save the master switch"))?;
+    }
+
+    let mut result = build_savers_state().map_err(generic("Couldn't read your savers"))?;
+    // Only surface the "turned off X" heads-up when turning the master on; turning
+    // it off intentionally disables everything, so a diff there is just noise.
+    if on {
+        if let Ok(after) = PiggyState::load() {
+            result.notice = conflict_notice(&catalog, &before_enabled, &after);
+        }
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// saver configuration (catalog configOptions)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChoiceDto {
+    pub value: String,
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigOptionDto {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub choices: Vec<ConfigChoiceDto>,
+    pub default: String,
+    /// The value in effect now: the saver's own config file wins, then the
+    /// user's last choice in Piggy, then the default.
+    pub current: String,
+}
+
+fn config_dtos(resolved: Vec<piggy_core::saver_config::ResolvedOption>) -> Vec<ConfigOptionDto> {
+    resolved
+        .into_iter()
+        .map(|r| ConfigOptionDto {
+            key: r.option.key,
+            label: r.option.label,
+            description: r.option.description,
+            choices: r
+                .option
+                .choices
+                .into_iter()
+                .map(|c| ConfigChoiceDto {
+                    value: c.value,
+                    label: c.label,
+                    description: c.description,
+                })
+                .collect(),
+            default: r.option.default,
+            current: r.current,
+        })
+        .collect()
+}
+
+/// The options a saver exposes, resolved to their current values.
+pub fn saver_config_get(id: String) -> Result<Vec<ConfigOptionDto>, ApiError> {
+    (|| -> anyhow::Result<Vec<ConfigOptionDto>> {
+        let catalog = Catalog::embedded();
+        let state = PiggyState::load().unwrap_or_default();
+        Ok(config_dtos(piggy_core::saver_config::get_config(
+            &catalog, &state, &id,
+        )?))
+    })()
+    .map_err(generic("Couldn't read that saver's options"))
+}
+
+/// Apply one option value and return the re-resolved options.
+pub fn saver_config_set(
+    id: String,
+    key: String,
+    value: String,
+) -> Result<Vec<ConfigOptionDto>, ApiError> {
+    (|| -> anyhow::Result<Vec<ConfigOptionDto>> {
+        let catalog = Catalog::embedded();
+        Ok(config_dtos(piggy_core::saver_config::set_config(
+            &catalog, &id, &key, &value,
+        )?))
+    })()
+    .map_err(generic("Couldn't change that setting"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1471,21 @@ pub fn doctor() -> DoctorDto {
         },
     });
 
+    // Codex is optional: found = we're reading it; missing = informational,
+    // never a failure (Piggy works fine on a Claude-only machine).
+    let codex_dirs = config::codex_sessions_dirs();
+    checks.push(DoctorCheck {
+        label: "Codex history".to_string(),
+        ok: true,
+        detail: if !codex_dirs.is_empty() {
+            "Piggy can read your Codex sessions too.".to_string()
+        } else if config::codex_dir().exists() {
+            "Codex is installed but has no session history yet.".to_string()
+        } else {
+            "Codex isn't installed - nothing to measure there.".to_string()
+        },
+    });
+
     let settings = config::claude_settings_path();
     if settings.exists() {
         let parses = std::fs::read_to_string(&settings)
@@ -1140,8 +1565,10 @@ pub struct ReindexDto {
 pub fn reindex() -> Result<ReindexDto, ApiError> {
     (|| -> anyhow::Result<ReindexDto> {
         let home = config::piggy_home();
-        let projects = config::claude_projects_dir();
-        if !projects.exists() {
+        // Every session-log root on this machine: Claude Code projects plus
+        // Codex sessions/archived_sessions, whichever exist.
+        let roots = piggy_core::default_roots();
+        if roots.is_empty() {
             return Ok(ReindexDto {
                 ran: false,
                 sessions: 0,
@@ -1151,7 +1578,11 @@ pub fn reindex() -> Result<ReindexDto, ApiError> {
         }
         let pricing = Pricing::load(&home);
         let mut store = Store::open(&home)?;
-        let rep = piggy_core::run_index(&mut store, &pricing, &projects, false)?;
+        let rep = piggy_core::run_index_roots(&mut store, &pricing, &roots, false)?;
+        // New/changed sessions invalidate the attribution cache.
+        if rep.updated > 0 {
+            bump_attr_version();
+        }
         Ok(ReindexDto {
             ran: true,
             sessions: rep.sessions,
@@ -1180,6 +1611,8 @@ pub fn anchor_baseline() {
     if let Ok(mut store) = Store::open(&config::piggy_home()) {
         let catalog = Catalog::embedded();
         let _ = tagging::tag_pre_install_baseline(&mut store, &state, &catalog);
+        // Baseline tags change the OFF groups the attribution reads.
+        bump_attr_version();
     }
 }
 
@@ -1203,8 +1636,13 @@ pub fn rotation_tick_if_enabled() -> bool {
     let Ok(mut store) = Store::open(&config::piggy_home()) else {
         return false;
     };
-    matches!(
+    let applied = matches!(
         rotation::tick_now(&catalog, &mut store, &projects),
         Ok(RotationOutcome::Applied { .. })
-    )
+    );
+    if applied {
+        // A new holdout/full-on assignment retags a session: invalidate the cache.
+        bump_attr_version();
+    }
+    applied
 }

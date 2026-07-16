@@ -9,6 +9,9 @@ export interface Banner {
   title: string;
   body: string;
   rolledBack: boolean;
+  /** "error" is the red alert banner; "info" is a neutral heads-up (e.g. a
+   * conflicting saver was auto-disabled). Defaults to "error". */
+  kind: "error" | "info";
 }
 
 export function errorBanner(e: ApiError): Banner {
@@ -17,7 +20,13 @@ export function errorBanner(e: ApiError): Banner {
     title: e.title,
     body: `${e.detail}${rolled}`.trim(),
     rolledBack: e.rolledBack,
+    kind: "error",
   };
+}
+
+/** A neutral, dismissible heads-up - no title, just the one-line message. */
+export function infoBanner(body: string): Banner {
+  return { title: "", body, rolledBack: false, kind: "info" };
 }
 
 /** Normalize any thrown/rejected value into an `ApiError`. */

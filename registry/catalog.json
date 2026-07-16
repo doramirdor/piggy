@@ -1,7 +1,7 @@
 {
   "$schema": "./catalog.schema.json",
   "registryVersion": 1,
-  "updated": "2026-07-12",
+  "updated": "2026-07-16",
   "minAppVersion": "0.1.0",
   "entries": [
     {
@@ -12,7 +12,7 @@
       "layer": "tool_output",
       "installType": "binary+hook",
       "status": "curated_v1",
-      "defaultOn": true,
+      "defaultOn": false,
       "license": "Apache-2.0",
       "source": {
         "type": "github_release",
@@ -28,6 +28,8 @@
         "steps": [
           { "step": "download_release_asset", "verify": "sha256_from_checksum_file" },
           { "step": "extract_binary", "binary": "rtk", "dest": "${PIGGY_BIN}/rtk" },
+          { "step": "ensure_dir_on_path", "dir": "${PIGGY_BIN}",
+            "note": "rtk's PreToolUse hook rewrites a matched command to `rtk <cmd>` (bare name, no path) via Claude Code's updatedInput. The hook itself is injected with an absolute path, but that rewrite is not, so ${PIGGY_BIN} must be on PATH or every rewritten command dies with `command not found: rtk`. Appends an idempotent, delimited block to the shell profile (~/.zshrc); reversed by remove_dir_from_path." },
           { "step": "merge_hooks", "hooks": {
               "PreToolUse": [
                 {
@@ -45,13 +47,16 @@
       "uninstall": {
         "steps": [
           { "step": "remove_hooks", "ownedOnly": true },
+          { "step": "remove_dir_from_path",
+            "note": "rtk is the only binary saver, so removing the PATH block on uninstall is safe. Revisit if a second ${PIGGY_BIN} binary saver is added." },
           { "step": "delete_file", "path": "${PIGGY_BIN}/rtk" }
         ]
       },
       "healthCheck": {
         "checks": [
           { "check": "binary_runs", "cmd": ["${PIGGY_BIN}/rtk", "--version"] },
-          { "check": "hook_present", "event": "PreToolUse", "commandContains": "rtk" }
+          { "check": "hook_present", "event": "PreToolUse", "commandContains": "rtk" },
+          { "check": "path_configured" }
         ]
       },
       "conflictsWith": [],
@@ -69,7 +74,7 @@
       "layer": "reply_style",
       "installType": "claude_plugin",
       "status": "curated_v1",
-      "defaultOn": false,
+      "defaultOn": true,
       "license": "MIT",
       "source": {
         "type": "claude_plugin_marketplace",
@@ -94,6 +99,25 @@
           { "check": "plugin_enabled", "plugin": "caveman@caveman" }
         ]
       },
+      "configOptions": [
+        {
+          "key": "defaultMode",
+          "label": "Intensity",
+          "description": "How compressed Claude's replies are. Applies from the next session.",
+          "choices": [
+            { "value": "lite", "label": "Lite", "description": "Trims filler, keeps normal sentences" },
+            { "value": "full", "label": "Full", "description": "Classic caveman: drops articles, fragments OK" },
+            { "value": "ultra", "label": "Ultra", "description": "Maximum compression, telegram style" }
+          ],
+          "default": "full",
+          "apply": {
+            "kind": "json_field",
+            "path": "${XDG_CONFIG}/caveman/config.json",
+            "field": "defaultMode",
+            "note": "The plugin's documented user config (resolution order: env var, repo-local, this file, built-in 'full'). Piggy sets only defaultMode and preserves every other field; the plugin re-reads it at each session start."
+          }
+        }
+      ],
       "conflictsWith": ["ponytail"],
       "ordering": 50,
       "behaviorChanging": true,
@@ -196,19 +220,31 @@
       "description": "Sends Claude only what changed in files it already saw",
       "layer": "context_input",
       "installType": "claude_plugin",
-      "status": "curated_v1_1",
+      "status": "curated_v1",
       "defaultOn": false,
       "license": "PolyForm-Noncommercial-1.0.0",
-      "licenseNote": "Source-available, NOT open source. Free for individuals and small teams (<5 people or <$20k/mo). Piggy shows this label before install.",
+      "licenseNote": "Source-available, NOT open source. Free for individuals and small teams (<5 people or <$20k/mo). Piggy shows this label before you turn it on.",
       "source": { "type": "claude_plugin_marketplace", "repo": "alexgreensh/token-optimizer", "marketplace": "alexgreensh-token-optimizer", "plugin": "token-optimizer" },
-      "install": { "steps": [{ "step": "todo_v1_1", "note": "plugin install + one-time /token-optimizer wiring run; needs license-acknowledge UI." }] },
-      "uninstall": { "steps": [{ "step": "claude_cli", "args": ["plugin", "uninstall", "token-optimizer@alexgreensh-token-optimizer"] }] },
+      "install": {
+        "steps": [
+          { "step": "require_binary", "binary": "python3", "reason": "the plugin's compression hooks are Python; without python3 they no-op and save nothing", "soft": true },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "add", "alexgreensh/token-optimizer"] },
+          { "step": "claude_cli", "args": ["plugin", "install", "token-optimizer@alexgreensh-token-optimizer"] }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "claude_cli", "args": ["plugin", "uninstall", "token-optimizer@alexgreensh-token-optimizer"] },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "remove", "alexgreensh-token-optimizer"], "ignoreFailure": true }
+        ]
+      },
       "healthCheck": { "checks": [{ "check": "plugin_enabled", "plugin": "token-optimizer@alexgreensh-token-optimizer" }] },
       "conflictsWith": [],
       "ordering": 30,
       "behaviorChanging": false,
       "claimedSavings": "~18% overall (author, 684-session counterfactual, methodology unusually honest)",
-      "risk": "low"
+      "risk": "low",
+      "notes": "VERIFIED 2026-07-16 against plugin v5.11.50: the plugin ships its own hooks/hooks.json (PreToolUse Read/Bash/Agent/mcp, PreCompact, SessionStart), which Claude Code loads when the plugin is enabled, so Piggy owns no settings.json hooks for it and enabling is enough for it to work. The author's `/token-optimizer` slash command is optional one-time onboarding (audit + dashboard), not required for the saving hooks. Hooks are Python-based and degrade to a no-op if python3 is absent (the soft require_binary above only warns)."
     },
     {
       "id": "context-mode",
@@ -235,22 +271,67 @@
       "id": "headroom",
       "name": "Headroom",
       "plainLabel": "Deep compression engine",
-      "description": "Proxy-level compression for everything Claude reads",
+      "description": "Compresses everything Claude reads — launch Claude via the piggy-claude wrapper",
       "layer": "proxy",
-      "installType": "proxy",
-      "status": "deferred_v2",
-      "defaultOn": false,
+      "installType": "venv+wrapper",
+      "status": "curated_v1",
+      "defaultOn": true,
       "license": "Apache-2.0",
-      "source": { "type": "pip", "package": "headroom-ai" },
-      "install": { "steps": [{ "step": "todo_v2", "note": "Python 3.10+ runtime dependency; paid competitor 'headroom-desktop' exists (name collision, user-confusion risk)." }] },
-      "uninstall": { "steps": [{ "step": "todo_v2" }] },
-      "healthCheck": { "checks": [] },
-      "conflictsWith": ["rtk"],
+      "source": { "type": "pip", "package": "headroom-ai", "pinnedVersion": "0.31.0" },
+      "install": {
+        "steps": [
+          { "step": "require_python", "python": "python3", "minVersion": "3.10", "reason": "Headroom is a Python package (headroom-ai)" },
+          { "step": "create_venv", "python": "python3", "dir": "${PIGGY_HOME}/venvs/headroom",
+            "note": "Isolated venv so Piggy never touches the user's global site-packages; uninstall deletes the whole tree." },
+          { "step": "pip_install", "venv": "${PIGGY_HOME}/venvs/headroom", "package": "headroom-ai[all]", "version": "0.31.0" },
+          { "step": "ensure_dir_on_path", "dir": "${PIGGY_BIN}",
+            "note": "so the piggy-claude launcher resolves by bare name. Shared with rtk; the PATH line is removed only when the last ${PIGGY_BIN} consumer is uninstalled." },
+          { "step": "write_launcher", "name": "piggy-claude", "exec": "${PIGGY_HOME}/venvs/headroom/bin/headroom", "args": ["wrap", "claude"],
+            "note": "WRAPPER MODEL (chosen deliberately): compression is scoped to sessions the user starts with `piggy-claude`, which runs `headroom wrap claude`. Piggy sets NO global ANTHROPIC_BASE_URL and runs NO persistent proxy daemon — headroom's proxy lives and dies with the wrapped session — so a stopped proxy can never break normal `claude`. The trade-off vs an always-on default is explicit and reversible." }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "delete_file", "path": "${PIGGY_BIN}/piggy-claude" },
+          { "step": "delete_dir", "dir": "${PIGGY_HOME}/venvs/headroom" },
+          { "step": "remove_dir_from_path", "note": "conditional: kept if rtk (or any other ${PIGGY_BIN} saver) is still installed." }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "binary_runs", "cmd": ["${PIGGY_HOME}/venvs/headroom/bin/headroom", "--version"] },
+          { "check": "path_configured" }
+        ]
+      },
+      "conflictsWith": ["rtk", "nadirclaw"],
       "ordering": 90,
       "behaviorChanging": false,
       "claimedSavings": "47–92% by workload (author, reproducible eval suite)",
       "risk": "medium",
-      "notes": "Wraps rtk internally — conflictsWith rtk to avoid double-compression."
+      "notes": "Piggy's default compressor (defaultOn), installed as an isolated Python venv + a `piggy-claude` launcher. Wraps rtk internally, so it conflictsWith rtk — turning Headroom on auto-disables rtk and vice versa. Also conflictsWith nadirclaw: both are proxies and can't both own ANTHROPIC_BASE_URL. Uses the wrapper-launcher model rather than a global proxy: run `piggy-claude` to compress a session; plain `claude` is untouched."
+    },
+    {
+      "id": "nadirclaw",
+      "name": "NadirClaw",
+      "plainLabel": "Route to cheaper models",
+      "description": "Sends simple prompts to cheap/local models and hard ones to Claude, through a local router proxy",
+      "layer": "proxy",
+      "installType": "proxy",
+      "status": "deferred_v2",
+      "defaultOn": false,
+      "license": "PolyForm-Noncommercial-1.0.0",
+      "licenseNote": "Source-available, NOT open source. Free for noncommercial use; commercial use needs a license from getnadir.com. Piggy shows this label before install.",
+      "source": { "type": "pip", "package": "nadirclaw", "repo": "NadirRouter/NadirClaw", "pinnedVersion": "v0.21.1" },
+      "install": { "steps": [{ "step": "todo_v2", "note": "pip install nadirclaw, then `nadirclaw claude onboard` wires ANTHROPIC_BASE_URL/ANTHROPIC_MODEL to the local router. Needs the same v2 proxy install engine as headroom (pip + proxy lifecycle + settings env wiring); no proxy/pip step kind exists yet, so this is refused as not-installable today." }] },
+      "uninstall": { "steps": [{ "step": "todo_v2" }] },
+      "healthCheck": { "checks": [] },
+      "conflictsWith": ["headroom"],
+      "ordering": 91,
+      "behaviorChanging": true,
+      "warning": "Routes some prompts to cheaper/local models, so answer quality (not just token count) can change. Measure before trusting it.",
+      "claimedSavings": "40–70% by routing to cheaper models (author, getnadir.com)",
+      "risk": "medium",
+      "notes": "LLM router / proxy. Sets ANTHROPIC_BASE_URL + ANTHROPIC_MODEL via `nadirclaw claude onboard`. conflictsWith headroom — two proxies can't both own ANTHROPIC_BASE_URL. Does NOT conflict with rtk (rtk's Bash-output hook is an orthogonal layer). Repo NadirRouter/NadirClaw; pip package `nadirclaw`."
     },
     {
       "id": "token-optimizer-mcp",

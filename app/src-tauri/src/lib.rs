@@ -49,7 +49,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::environment,
             commands::stats_overview,
+            commands::sources_overview,
+            commands::usage_series,
             commands::savers_list,
+            commands::saver_config_get,
+            commands::saver_config_set,
             commands::saver_toggle,
             commands::master_toggle,
             commands::sweep_report,
@@ -109,25 +113,29 @@ pub fn run() {
 fn background_loop(handle: tauri::AppHandle) {
     use piggy_core::{config, Pricing, SessionWatcher};
 
-    // Initial pass: index history, anchor the pre-install baseline, paint once.
+    // Initial pass: index history (Claude Code + Codex), anchor the pre-install
+    // baseline, paint once.
     let _ = backend::reindex();
     backend::anchor_baseline();
     // Set up the first assignment if we're already idle (covers a restart mid-gap).
     let _ = backend::rotation_tick_if_enabled();
     let _ = handle.emit(STATS_UPDATED, ());
 
-    let projects = config::claude_projects_dir();
-    // Don't create ~/.claude/projects if Claude Code isn't installed — without a
-    // history dir there is nothing to watch, so idle out rather than materialise it.
-    if !projects.exists() {
+    // Watch every session-log root that exists: Claude Code's projects dir plus
+    // Codex's sessions dirs. Nothing is created if a tool isn't installed —
+    // without a history dir there is nothing to watch, so idle out rather than
+    // materialise one.
+    let roots = piggy_core::default_roots();
+    if roots.is_empty() {
         return;
     }
     let home = config::piggy_home();
     let pricing = Pricing::load(&home);
-    let mut watcher = match SessionWatcher::new(projects, &home) {
-        Ok(w) => w,
-        Err(_) => return,
-    };
+    let mut watcher =
+        match SessionWatcher::with_roots(roots, &home, piggy_core::watcher::DEFAULT_POLL) {
+            Ok(w) => w,
+            Err(_) => return,
+        };
 
     // Edge-triggered rotation: a session wrote (`pending_rotation`), so once the
     // dir falls idle we apply exactly one rotation step — never re-ticking during

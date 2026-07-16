@@ -19,7 +19,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
     attribution::{self, Badge, HeadlineBaseline},
-    config, discovery, engine, parse_file, run_index,
+    config, discovery, engine, parse_file,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -528,11 +528,14 @@ fn cmd_backups() -> Result<()> {
 
 fn cmd_index(full: bool) -> Result<()> {
     let home = config::piggy_home();
-    let projects = config::claude_projects_dir();
-    if !projects.exists() {
+    // Every session-log root on this machine: Claude Code projects plus
+    // Codex sessions/archived_sessions, whichever exist.
+    let roots = piggy_core::default_roots();
+    if roots.is_empty() {
         eprintln!(
-            "error: Claude projects directory not found at {}",
-            projects.display()
+            "error: no session logs found (looked for {} and {})",
+            config::claude_projects_dir().display(),
+            config::codex_dir().join("sessions").display()
         );
         std::process::exit(1);
     }
@@ -540,7 +543,7 @@ fn cmd_index(full: bool) -> Result<()> {
     let mut store = Store::open(&home)?;
 
     let start = Instant::now();
-    let rep = run_index(&mut store, &pricing, &projects, full)?;
+    let rep = piggy_core::run_index_roots(&mut store, &pricing, &roots, full)?;
     let secs = start.elapsed().as_secs_f64();
 
     // Anchor the pre-install baseline the first time we index, then backfill the
@@ -552,7 +555,12 @@ fn cmd_index(full: bool) -> Result<()> {
     let catalog = Catalog::embedded();
     let tagged = piggy_core::tagging::tag_pre_install_baseline(&mut store, &state, &catalog)?;
 
-    println!("indexed {} in {:.2}s", projects.display(), secs);
+    let root_list = roots
+        .iter()
+        .map(|r| r.dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("indexed {root_list} in {secs:.2}s");
     if tagged > 0 {
         println!(
             "  tagged {} pre-Piggy session(s) as the measurement baseline",
@@ -1264,7 +1272,6 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn cmd_watch(once: bool) -> Result<()> {
     let home = config::piggy_home();
-    let projects = config::claude_projects_dir();
     let pricing = Pricing::load(&home);
 
     // Anchor the pre-install baseline so live sessions are attributed correctly.
@@ -1273,8 +1280,26 @@ fn cmd_watch(once: bool) -> Result<()> {
         state.save()?;
     }
 
-    let mut watcher = SessionWatcher::new(projects.clone(), &home)?;
-    println!("watching {} (Ctrl-C to stop)…", projects.display());
+    // Watch every session-log root that exists (Claude Code + Codex). A fresh
+    // machine may have neither — fall back to creating/watching the Claude
+    // projects dir, the historical behaviour.
+    let roots = piggy_core::default_roots();
+    let (mut watcher, label) = if roots.is_empty() {
+        let projects = config::claude_projects_dir();
+        let label = projects.display().to_string();
+        (SessionWatcher::new(projects, &home)?, label)
+    } else {
+        let label = roots
+            .iter()
+            .map(|r| r.dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        (
+            SessionWatcher::with_roots(roots, &home, piggy_core::watcher::DEFAULT_POLL)?,
+            label,
+        )
+    };
+    println!("watching {label} (Ctrl-C to stop)…");
     loop {
         let events = watcher.tick(Duration::from_secs(2), &pricing)?;
         for e in &events {

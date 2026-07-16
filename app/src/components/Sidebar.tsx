@@ -86,7 +86,7 @@ export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
         <div className="master-mini">
           <div className="mtxt">
             <div className="m1">{masterOn ? "Piggy is ON" : "Piggy is OFF"}</div>
-            <div className="m2">{masterOn ? "All savers are active" : "Savers are paused"}</div>
+            <div className="m2">{masterOn ? "Your savers are live" : "Savers are paused"}</div>
           </div>
           <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Piggy master switch" />
         </div>

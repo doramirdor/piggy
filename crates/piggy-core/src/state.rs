@@ -46,6 +46,12 @@ pub struct PiggyState {
     /// `None` until Piggy has written once.
     #[serde(default)]
     pub settings_hash: Option<String>,
+    /// The system-level master switch, independent of individual savers. `Some`
+    /// once the user has explicitly flipped it; `None` on legacy state, where the
+    /// GUI falls back to "is any saver enabled". Toggling a single saver never
+    /// writes this - only the master switch does.
+    #[serde(default)]
+    pub master_on: Option<bool>,
     /// User-tunable measurement settings (M3), e.g. the holdout fraction.
     #[serde(default)]
     pub settings: Settings,
@@ -68,6 +74,7 @@ impl Default for PiggyState {
             sweep_disabled: Vec::new(),
             backups: Vec::new(),
             settings_hash: None,
+            master_on: None,
             settings: Settings::default(),
             created_at: None,
         }
@@ -130,6 +137,11 @@ pub struct SaverState {
     /// (Piggy respects an explicit choice). `None` == as-installed, never toggled.
     #[serde(default)]
     pub last_toggle_source: Option<String>,
+    /// Values the user chose for this saver's catalog `configOptions`,
+    /// keyed by option key. Absent keys mean "never chosen" (the option's
+    /// default, or whatever the saver's own config file already says).
+    #[serde(default)]
+    pub config: BTreeMap<String, String>,
 }
 
 /// One Sweep-disabled item (MCP server / plugin / skill) plus what to restore.

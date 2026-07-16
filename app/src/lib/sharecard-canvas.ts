@@ -1,4 +1,4 @@
-// Canvas2D renderer for the share card — draws docs/mockups/sharecard.html at
+// Canvas2D renderer for the share card - draws docs/mockups/sharecard.html at
 // 2400×1260 (4× the 600×315 mockup) with no html2canvas dependency. All text
 // comes from shareCardText() so the honesty rules live in one place.
 
@@ -222,7 +222,7 @@ function drawPiggyMark(
   }
 }
 
-/** roundRect polyfill — Safari/WKWebView versions Piggy targets may lack it. */
+/** roundRect polyfill - Safari/WKWebView versions Piggy targets may lack it. */
 function roundRectPath(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -248,7 +248,7 @@ function setLetterSpacing(ctx: CanvasRenderingContext2D, value: number): void {
   }
 }
 
-/** Base64 PNG (no data-URL prefix) — the payload for the save-to-Desktop command. */
+/** Base64 PNG (no data-URL prefix) - the payload for the save-to-Desktop command. */
 export function canvasToPngBase64(canvas: HTMLCanvasElement): string {
   const url = canvas.toDataURL("image/png");
   return url.slice(url.indexOf(",") + 1);

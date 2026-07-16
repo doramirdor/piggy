@@ -17,8 +17,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 
-use crate::index::run_index;
+use crate::index::{run_index_roots, SourceRoot};
 use crate::pricing::Pricing;
+use crate::sources::SourceKind;
 use crate::state::PiggyState;
 use crate::store::Store;
 use crate::tagging::snapshot_new_session;
@@ -38,30 +39,44 @@ pub struct WatchEvent {
     pub newly_tagged: bool,
 }
 
-/// A live watcher over the projects directory. Owns its own [`Store`] handle.
+/// A live watcher over one or more session-log roots (Claude Code projects,
+/// Codex sessions). Owns its own [`Store`] handle.
 pub struct SessionWatcher {
     // Field order matters for drop: the watcher must drop before the receiver.
     _watcher: PollWatcher,
     rx: Receiver<notify::Result<notify::Event>>,
-    projects_dir: PathBuf,
+    roots: Vec<SourceRoot>,
     store: Store,
 }
 
 impl SessionWatcher {
-    /// Watch `projects_dir`, persisting into the DB under `home`. Uses
-    /// [`DEFAULT_POLL`].
+    /// Watch `projects_dir` (Claude Code logs), persisting into the DB under
+    /// `home`. Uses [`DEFAULT_POLL`].
     pub fn new(projects_dir: PathBuf, home: &Path) -> Result<Self> {
         Self::with_poll_interval(projects_dir, home, DEFAULT_POLL)
     }
 
-    /// Watch with an explicit poll interval (tests use a short one).
+    /// Watch a Claude Code projects dir with an explicit poll interval (tests
+    /// use a short one).
     pub fn with_poll_interval(
         projects_dir: PathBuf,
         home: &Path,
         interval: Duration,
     ) -> Result<Self> {
+        // The Claude root is created if missing (Piggy has always done so for
+        // its primary source); multi-root callers pass only dirs that exist.
         std::fs::create_dir_all(&projects_dir)
             .with_context(|| format!("creating {}", projects_dir.display()))?;
+        Self::with_roots(
+            vec![SourceRoot::new(projects_dir, SourceKind::ClaudeCode)],
+            home,
+            interval,
+        )
+    }
+
+    /// Watch several source roots at once (e.g. Claude Code projects + Codex
+    /// sessions). Roots must exist; each is watched recursively.
+    pub fn with_roots(roots: Vec<SourceRoot>, home: &Path, interval: Duration) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let mut watcher = PollWatcher::new(
             move |res| {
@@ -70,14 +85,16 @@ impl SessionWatcher {
             Config::default().with_poll_interval(interval),
         )
         .context("starting the filesystem poll watcher")?;
-        watcher
-            .watch(&projects_dir, RecursiveMode::Recursive)
-            .with_context(|| format!("watching {}", projects_dir.display()))?;
+        for root in &roots {
+            watcher
+                .watch(&root.dir, RecursiveMode::Recursive)
+                .with_context(|| format!("watching {}", root.dir.display()))?;
+        }
         let store = Store::open(home)?;
         Ok(SessionWatcher {
             _watcher: watcher,
             rx,
-            projects_dir,
+            roots,
             store,
         })
     }
@@ -104,6 +121,8 @@ impl SessionWatcher {
 
         // Snapshot-tag new sessions from the *current* saver set, before indexing
         // (the snapshot is a session-start fact, independent of parse results).
+        // Only Claude Code sessions are tagged: savers act on Claude Code, so a
+        // Codex session carries no saver set and must stay out of attribution.
         let state = PiggyState::load()?;
         let mut events = Vec::new();
         for path in &paths {
@@ -114,7 +133,11 @@ impl SessionWatcher {
             if session_id.is_empty() {
                 continue;
             }
-            let newly_tagged = snapshot_new_session(&mut self.store, &state, &session_id)?;
+            let newly_tagged = if self.claude_owns(path) {
+                snapshot_new_session(&mut self.store, &state, &session_id)?
+            } else {
+                false
+            };
             events.push(WatchEvent {
                 path: path.clone(),
                 session_id,
@@ -123,8 +146,15 @@ impl SessionWatcher {
         }
 
         // Incremental index so token aggregates reflect the new/changed files.
-        run_index(&mut self.store, pricing, &self.projects_dir, false)?;
+        run_index_roots(&mut self.store, pricing, &self.roots, false)?;
         Ok(events)
+    }
+
+    /// Whether `path` lives under a Claude Code root (vs Codex).
+    fn claude_owns(&self, path: &Path) -> bool {
+        self.roots
+            .iter()
+            .any(|r| r.kind == SourceKind::ClaudeCode && path.starts_with(&r.dir))
     }
 
     /// Read-only access to the underlying store (e.g. to query after a tick).

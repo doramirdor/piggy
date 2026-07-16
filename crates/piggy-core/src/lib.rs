@@ -9,6 +9,7 @@
 //! link against it.
 
 pub mod attribution;
+pub mod codex;
 pub mod config;
 pub mod discovery;
 pub mod engine;
@@ -18,7 +19,9 @@ pub mod pricing;
 pub mod registry;
 pub mod rng;
 pub mod rotation;
+pub mod saver_config;
 pub mod settings;
+pub mod sources;
 pub mod state;
 pub mod stats;
 pub mod store;
@@ -29,15 +32,17 @@ pub mod watcher;
 pub use attribution::{
     attribute, headline, Badge, Headline, HeadlineBaseline, SaverAttribution, Stream, StreamStat,
 };
+pub use codex::parse_codex_file;
 pub use discovery::{DiscoveredRepo, DiscoveryCache};
 pub use engine::{ActionReport, HealthReport};
-pub use index::{run_index, IndexReport};
+pub use index::{default_roots, run_index, run_index_roots, IndexReport, SourceRoot};
 pub use parser::{parse_file, ModelTokens, SessionParse};
 pub use pricing::{ModelPrice, Pricing};
 pub use registry::{Catalog, Entry};
 pub use rotation::{RotationOutcome, RotationPlan};
+pub use sources::{Interface, SourceKind};
 pub use state::PiggyState;
-pub use stats::{GroupRow, Period, Totals};
+pub use stats::{GroupRow, Period, SourceRow, Totals};
 pub use store::{SaverTag, Store};
 pub use sweep::{SweepItem, SweepReport};
 pub use watcher::{SessionWatcher, WatchEvent};

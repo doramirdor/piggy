@@ -10,6 +10,7 @@ import { Proof } from "./screens/Proof";
 import { Reports } from "./screens/Reports";
 import { Settings } from "./screens/Settings";
 import { NoClaude, FirstRun } from "./screens/EmptyStates";
+import { PiggyMark } from "./components/PiggyMark";
 
 export default function App() {
   const booting = useStore((s) => s.booting);
@@ -39,15 +40,20 @@ export default function App() {
     };
   }, [refresh]);
 
-  // Full-bleed states (no sidebar): booting spinner, no-Claude, first-run.
+  // Full-bleed states (no sidebar): booting progress, no-Claude, first-run.
   if (booting) {
     return (
       <div className="empty">
-        <div className="spinner" />
+        <PiggyMark size={56} className="mark" />
+        <div className="progress" role="progressbar" aria-label="Loading Piggy">
+          <div className="progress-bar" />
+        </div>
       </div>
     );
   }
-  if (env && !env.claudeInstalled) return <NoClaude />;
+  // Full-bleed only when NEITHER tool is present; a Codex-only Mac still gets
+  // the real app (observability works there, savers just have nothing to hook).
+  if (env && !env.claudeInstalled && !env.codexInstalled) return <NoClaude />;
   if (env && !env.hasData) return <FirstRun />;
 
   const screen =

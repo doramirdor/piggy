@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-MTok USD list prices. input/output only; cache_read = 0.1x input, cache_write_5m = 1.25x input, cache_write_1h = 2x input are derived in code. Current-model prices sourced from the claude-api skill (2026). Older-model prices are Anthropic's published list prices for those tiers. Override per-model via ~/.piggy/pricing.json (merged over these).",
+  "_comment": "Per-MTok USD list prices. input/output only; cache_read = 0.1x input, cache_write_5m = 1.25x input, cache_write_1h = 2x input are derived in code. Current-model prices sourced from the claude-api skill (2026). Older-model prices are Anthropic's published list prices for those tiers. gpt-* rows are OpenAI's published API list prices (Codex sessions; the 0.1x cache-read multiplier matches OpenAI's cached-input discount; Codex logs never carry cache writes). The bare gpt-5 row is the family's longest-prefix fallback at the flagship rate. Override per-model via ~/.piggy/pricing.json (merged over these).",
   "models": {
     "claude-fable-5":    { "input": 10.0, "output": 50.0 },
     "claude-mythos-5":   { "input": 10.0, "output": 50.0 },
@@ -18,6 +18,13 @@
     "claude-3-5-sonnet": { "input": 3.0,  "output": 15.0 },
     "claude-haiku-4-5":  { "input": 1.0,  "output": 5.0 },
     "claude-3-5-haiku":  { "input": 0.8,  "output": 4.0 },
-    "claude-3-haiku":    { "input": 0.25, "output": 1.25 }
+    "claude-3-haiku":    { "input": 0.25, "output": 1.25 },
+    "gpt-5.1-codex-mini": { "input": 0.25, "output": 2.0 },
+    "gpt-5.1-codex":     { "input": 1.25, "output": 10.0 },
+    "gpt-5.1":           { "input": 1.25, "output": 10.0 },
+    "gpt-5-codex":       { "input": 1.25, "output": 10.0 },
+    "gpt-5-mini":        { "input": 0.25, "output": 2.0 },
+    "gpt-5-nano":        { "input": 0.05, "output": 0.4 },
+    "gpt-5":             { "input": 1.25, "output": 10.0 }
   }
 }

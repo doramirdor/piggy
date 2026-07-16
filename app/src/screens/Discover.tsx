@@ -36,7 +36,7 @@ export function Discover() {
         <div>
           <h1>Discover</h1>
           <div className="sub">
-            Savers Piggy found in the wild. Nothing here installs yet — claims are the author's own,
+            Savers Piggy found in the wild. Nothing here installs yet - claims are the author's own,
             never Piggy's measurements.
           </div>
         </div>

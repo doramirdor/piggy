@@ -19,7 +19,8 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
@@ -89,16 +90,35 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
             .push(format!("'{id}' is already installed; nothing to do"));
         return Ok(r);
     }
-    // Refuse if an enabled conflicting saver is present (symmetric check —
-    // either side may declare the conflict).
-    if let Some(other) = conflicting_enabled_saver(catalog, entry, &state) {
-        bail!("'{id}' conflicts with '{other}', which is on — turn '{other}' off first");
-    }
-
     let settings_path = config::claude_settings_path();
+
+    // Capture pre-install settings BEFORE auto-disabling any conflict, so a
+    // rollback restores them — re-adding the conflicting saver's hooks / plugin
+    // enable — as well as undoing this install.
     let pre = settings::load(&settings_path)?;
     let pre_bytes = pre.raw.clone();
     let pre_existed = pre.existed;
+
+    // Mutual exclusion: rather than refuse, turn OFF any enabled saver that
+    // conflicts with this one (symmetric — either side may declare it), so
+    // turning one on cleanly wins. e.g. rtk ↔ headroom, headroom ↔ nadirclaw.
+    let mut auto_disabled: Vec<String> = Vec::new();
+    let mut auto_disable_warnings: Vec<String> = Vec::new();
+    for other in conflicting_enabled_savers(catalog, entry, &state) {
+        disable_saver_in_place(
+            catalog,
+            &other,
+            &mut state,
+            &settings_path,
+            crate::store::source::MANUAL,
+            &mut auto_disable_warnings,
+        )
+        .with_context(|| format!("auto-disabling '{other}' (conflicts with '{id}')"))?;
+        auto_disabled.push(other);
+    }
+    if !auto_disabled.is_empty() {
+        state.save()?;
+    }
 
     let mut ctx = InstallCtx {
         entry,
@@ -138,12 +158,14 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
             &pre_bytes,
             pre_existed,
             &installed_files,
+            &auto_disabled,
         );
         state.save()?;
         return Err(e.context(format!("install of '{id}' failed and was rolled back")));
     }
 
-    let warnings = ctx.warnings.clone();
+    let mut warnings = ctx.warnings.clone();
+    warnings.extend(auto_disable_warnings.iter().cloned());
     let saver: SaverState = ctx.saver.clone().into();
     let installed_files = saver.installed_files.clone();
     drop(ctx);
@@ -160,6 +182,7 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
             &pre_bytes,
             pre_existed,
             &installed_files,
+            &auto_disabled,
         );
         state.save()?;
         let failed: Vec<String> = health
@@ -185,10 +208,14 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
         });
     }
 
+    let mut messages = vec![format!("turned on '{}' ({})", entry.name, id)];
+    for other in &auto_disabled {
+        messages.push(format!("turned off '{other}' (conflicts with '{id}')"));
+    }
     Ok(ActionReport {
         saver: id.to_string(),
         action: "install".into(),
-        messages: vec![format!("turned on '{}' ({})", entry.name, id)],
+        messages,
         warnings,
         health: Some(health),
         rolled_back: false,
@@ -309,12 +336,23 @@ pub fn set_enabled_src(
         });
     }
 
-    // Turning a saver ON must honour the same conflict rule as a fresh install —
-    // otherwise `off A → install B → on A` could leave two mutually-exclusive
-    // savers enabled at once. The check is symmetric: either side may declare it.
+    // Turning a saver ON auto-disables any enabled saver it conflicts with, the
+    // same mutual-exclusion rule a fresh install applies — otherwise
+    // `off A → install B → on A` could leave two mutually-exclusive savers
+    // enabled at once. The check is symmetric: either side may declare it.
+    let mut auto_disabled: Vec<String> = Vec::new();
     if on {
-        if let Some(other) = conflicting_enabled_saver(catalog, entry, &state) {
-            bail!("'{id}' conflicts with '{other}', which is on — turn '{other}' off first");
+        for other in conflicting_enabled_savers(catalog, entry, &state) {
+            disable_saver_in_place(
+                catalog,
+                &other,
+                &mut state,
+                &settings_path,
+                source,
+                &mut warnings,
+            )
+            .with_context(|| format!("auto-disabling '{other}' (conflicts with '{id}')"))?;
+            auto_disabled.push(other);
         }
     }
 
@@ -325,8 +363,7 @@ pub fn set_enabled_src(
         let plugin = plugin_ref(entry);
         let verb = if on { "enable" } else { "disable" };
         snapshot(&settings_path, &format!("pre-{verb}:{id}"), &mut state)?;
-        let args = vec!["plugin".to_string(), verb.to_string(), plugin.clone()];
-        run_claude(&args, false).with_context(|| format!("claude plugin {verb} {plugin}"))?;
+        set_plugin_enabled_via_cli(&settings_path, &plugin, on)?;
         snapshot(&settings_path, &format!("post-{verb}:{id}"), &mut state)?;
         resync_settings_hash(&settings_path, &mut state)?;
     } else {
@@ -377,6 +414,9 @@ pub fn set_enabled_src(
         if on { "on" } else { "off" },
         entry.name
     ));
+    for other in &auto_disabled {
+        messages.push(format!("turned off '{other}' (conflicts with '{id}')"));
+    }
     Ok(ActionReport {
         saver: id.to_string(),
         action: if on { "on".into() } else { "off".into() },
@@ -387,29 +427,77 @@ pub fn set_enabled_src(
     })
 }
 
-/// The id of an installed, **enabled** saver that conflicts with `entry` — in
-/// either direction (`entry.conflictsWith` names it, or its own `conflictsWith`
-/// names `entry`). Shared by `install` and the `on` toggle so a conflict can
-/// never slip in through the fast path.
-fn conflicting_enabled_saver(
+/// The ids of every installed, **enabled** saver that conflicts with `entry` —
+/// in either direction (`entry.conflictsWith` names it, or its own
+/// `conflictsWith` names `entry`). Shared by `install` and the `on` toggle so
+/// mutual exclusion is enforced identically on both paths. Sorted for a stable
+/// order in messages and tests.
+fn conflicting_enabled_savers(catalog: &Catalog, entry: &Entry, state: &PiggyState) -> Vec<String> {
+    let mut out: Vec<String> = state
+        .savers
+        .iter()
+        .filter(|(other_id, other)| {
+            if *other_id == &entry.id || !other.enabled {
+                return false;
+            }
+            let declared_here = entry.conflicts_with.iter().any(|c| c == *other_id);
+            let declared_there = catalog
+                .get(other_id)
+                .map(|oe| oe.conflicts_with.iter().any(|c| c == &entry.id))
+                .unwrap_or(false);
+            declared_here || declared_there
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Turn OFF an installed, enabled saver in place, mutating `state` directly (no
+/// fresh load) so a caller mid-operation keeps a single consistent state.
+/// Plugin savers disable via the `claude` CLI; hook savers have their owned
+/// hooks removed. The binary/plugin stays installed either way. This is the
+/// mutual-exclusion auto-disable used by `install` and the `on` toggle; it does
+/// not itself call `state.save()` — the caller persists.
+fn disable_saver_in_place(
     catalog: &Catalog,
-    entry: &Entry,
-    state: &PiggyState,
-) -> Option<String> {
-    for (other_id, other) in &state.savers {
-        if other_id == &entry.id || !other.enabled {
-            continue;
-        }
-        let declared_here = entry.conflicts_with.iter().any(|c| c == other_id);
-        let declared_there = catalog
-            .get(other_id)
-            .map(|oe| oe.conflicts_with.iter().any(|c| c == &entry.id))
-            .unwrap_or(false);
-        if declared_here || declared_there {
-            return Some(other_id.clone());
-        }
+    id: &str,
+    state: &mut PiggyState,
+    settings_path: &Path,
+    source: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let Some(entry) = catalog.get(id) else {
+        return Ok(());
+    };
+    let Some(saver) = state.savers.get(id).cloned() else {
+        return Ok(());
+    };
+    if !saver.enabled {
+        return Ok(());
     }
-    None
+    if entry.install_type == "claude_plugin" {
+        let plugin = plugin_ref(entry);
+        snapshot(settings_path, &format!("pre-disable:{id}"), state)?;
+        set_plugin_enabled_via_cli(settings_path, &plugin, false)?;
+        snapshot(settings_path, &format!("post-disable:{id}"), state)?;
+        resync_settings_hash(settings_path, state)?;
+    } else {
+        let injected: Map<String, Value> = saver
+            .injected_hooks
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::Array(v.clone())))
+            .collect();
+        let outcome = settings::commit(settings_path, &format!("off:{id}"), state, None, |val| {
+            settings::remove_hooks(val, &injected);
+        })?;
+        warnings.extend(outcome.warnings);
+    }
+    if let Some(s) = state.savers.get_mut(id) {
+        s.enabled = false;
+        s.last_toggle_source = Some(source.to_string());
+    }
+    Ok(())
 }
 
 /// Run a saver's declared health checks (also used by `piggy doctor`).
@@ -493,7 +581,7 @@ pub fn restore_defaults() -> Result<RestoreReport> {
     // Remove Piggy-installed binaries and clear the ledger.
     for saver in state.savers.values() {
         for f in &saver.installed_files {
-            if std::fs::remove_file(f).is_ok() {
+            if remove_path_best_effort(Path::new(f)) {
                 report.files_removed += 1;
             }
         }
@@ -558,8 +646,10 @@ impl From<SaverStateBuilder> for SaverState {
             injected_hooks: b.injected_hooks,
             installed_files: b.installed_files,
             pre_install_backup: b.pre_install_backup,
-            // Freshly installed: enabled as-installed, never explicitly toggled.
+            // Freshly installed: enabled as-installed, never explicitly toggled,
+            // no per-saver options chosen yet.
             last_toggle_source: None,
+            config: BTreeMap::new(),
         }
     }
 }
@@ -572,6 +662,11 @@ impl InstallCtx<'_> {
             "merge_hooks" => self.step_merge_hooks(step, state),
             "claude_cli" => self.step_claude_cli(step, state),
             "require_binary" => self.step_require_binary(step),
+            "ensure_dir_on_path" => self.step_ensure_dir_on_path(step),
+            "require_python" => self.step_require_python(step),
+            "create_venv" => self.step_create_venv(step),
+            "pip_install" => self.step_pip_install(step),
+            "write_launcher" => self.step_write_launcher(step),
             "builtin_enable" => Ok(()), // sweep: state bookkeeping only (recorded on insert)
             other => bail!("unknown install step '{other}' — catalog is newer than Piggy"),
         }
@@ -631,6 +726,27 @@ impl InstallCtx<'_> {
             dest.display(),
             bytes.len()
         ));
+        Ok(())
+    }
+
+    /// Ensure `dir` (default `${PIGGY_BIN}`) is on `PATH` by appending a
+    /// delimited, idempotent block to the user's shell profile. Needed by savers
+    /// whose runtime invokes the binary by bare name (e.g. rtk's command
+    /// rewrite). Reversed by the `remove_dir_from_path` uninstall step.
+    fn step_ensure_dir_on_path(&mut self, step: &Value) -> Result<()> {
+        let dir = step
+            .get("dir")
+            .and_then(Value::as_str)
+            .map(expand_str)
+            .unwrap_or_else(|| config::piggy_bin_dir().to_string_lossy().into_owned());
+        let profile = config::shell_profile_path();
+        let changed = ensure_path_block(&profile, &dir)
+            .with_context(|| format!("adding {dir} to PATH via {}", profile.display()))?;
+        self.warnings.push(if changed {
+            format!("added {dir} to PATH in {}", profile.display())
+        } else {
+            format!("{dir} already on PATH in {}", profile.display())
+        });
         Ok(())
     }
 
@@ -721,6 +837,163 @@ impl InstallCtx<'_> {
         }
         Ok(())
     }
+
+    /// Verify a Python interpreter of at least `minVersion` is available (a
+    /// Python-package saver like Headroom needs it to build its venv). The
+    /// interpreter is resolved via [`config::python_bin`] so tests can point it
+    /// at a shim.
+    fn step_require_python(&mut self, step: &Value) -> Result<()> {
+        let py = config::python_bin();
+        let min = step
+            .get("minVersion")
+            .and_then(Value::as_str)
+            .unwrap_or("3.10");
+        let out = Command::new(&py).arg("--version").output();
+        let ver = match out {
+            Ok(o) if o.status.success() => {
+                // `python --version` prints to stdout on 3.4+, stderr on older.
+                let s = String::from_utf8_lossy(&o.stdout);
+                let s = if s.trim().is_empty() {
+                    String::from_utf8_lossy(&o.stderr).into_owned()
+                } else {
+                    s.into_owned()
+                };
+                s.trim().trim_start_matches("Python").trim().to_string()
+            }
+            _ => {
+                let reason = step
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("required by this saver");
+                bail!(
+                    "Python interpreter `{py}` not found or not runnable ({reason}); \
+                     install Python {min}+ and try again"
+                );
+            }
+        };
+        if !version_at_least(&ver, min) {
+            bail!("Python {min}+ is required but `{py}` reports {ver}");
+        }
+        self.warnings
+            .push(format!("found Python {ver} (need {min}+)"));
+        Ok(())
+    }
+
+    /// Create an isolated virtualenv at `dir` (`python -m venv`). The directory
+    /// is recorded as an installed artifact so rollback / uninstall removes the
+    /// whole tree.
+    fn step_create_venv(&mut self, step: &Value) -> Result<()> {
+        let dir = step
+            .get("dir")
+            .and_then(Value::as_str)
+            .map(expand_path)
+            .ok_or_else(|| anyhow!("create_venv: missing 'dir'"))?;
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let py = config::python_bin();
+        run_cmd(
+            &py,
+            &[
+                "-m".to_string(),
+                "venv".to_string(),
+                dir.to_string_lossy().into_owned(),
+            ],
+        )
+        .with_context(|| format!("creating virtualenv at {}", dir.display()))?;
+        self.saver
+            .installed_files
+            .push(dir.to_string_lossy().into_owned());
+        self.warnings
+            .push(format!("created Python venv at {}", dir.display()));
+        Ok(())
+    }
+
+    /// `pip install` a package (with optional pinned `version` and pip extras
+    /// already in `package`, e.g. `headroom-ai[all]`) into an existing venv.
+    fn step_pip_install(&mut self, step: &Value) -> Result<()> {
+        let venv = step
+            .get("venv")
+            .and_then(Value::as_str)
+            .map(expand_path)
+            .ok_or_else(|| anyhow!("pip_install: missing 'venv'"))?;
+        let package = step
+            .get("package")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("pip_install: missing 'package'"))?;
+        let spec = match step.get("version").and_then(Value::as_str) {
+            Some(v) => format!("{package}=={v}"),
+            None => package.to_string(),
+        };
+        let pip = venv.join("bin").join("pip");
+        run_cmd(
+            &pip.to_string_lossy(),
+            &[
+                "install".to_string(),
+                "--disable-pip-version-check".to_string(),
+                spec.clone(),
+            ],
+        )
+        .with_context(|| format!("pip install {spec}"))?;
+        self.warnings
+            .push(format!("installed {spec} into {}", venv.display()));
+        Ok(())
+    }
+
+    /// Write an executable launcher shim into `${PIGGY_BIN}` that execs
+    /// `<exec> <args...> "$@"`. This is the wrapper-launcher integration (e.g.
+    /// `piggy-claude` → `headroom wrap claude`): it changes nothing global — no
+    /// `ANTHROPIC_BASE_URL`, no daemon — so a session only routes through the
+    /// wrapper when the user launches Claude via this command.
+    fn step_write_launcher(&mut self, step: &Value) -> Result<()> {
+        let name = step
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("write_launcher: missing 'name'"))?;
+        let exec = step
+            .get("exec")
+            .and_then(Value::as_str)
+            .map(expand_str)
+            .ok_or_else(|| anyhow!("write_launcher: missing 'exec'"))?;
+        let args: Vec<String> = step
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let dest = config::piggy_bin_dir().join(name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let quoted_args = args
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            "#!/bin/sh\n# Generated by Piggy — launches Claude Code through the {name} wrapper.\nexec {} {} \"$@\"\n",
+            shell_quote(&exec),
+            quoted_args
+        );
+        std::fs::write(&dest, script.as_bytes())
+            .with_context(|| format!("writing launcher {}", dest.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        }
+        self.saver
+            .installed_files
+            .push(dest.to_string_lossy().into_owned());
+        self.warnings.push(format!(
+            "launch Claude with `{name}` (in {}) to route the session through this saver",
+            config::piggy_bin_dir().display()
+        ));
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +1055,50 @@ fn run_uninstall_step(
             } else {
                 Ok(None)
             }
+        }
+        "delete_dir" => {
+            let dir = step
+                .get("dir")
+                .and_then(Value::as_str)
+                .map(expand_path)
+                .ok_or_else(|| anyhow!("delete_dir: missing 'dir'"))?;
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)
+                    .with_context(|| format!("deleting {}", dir.display()))?;
+                Ok(Some(format!("deleted {}", dir.display())))
+            } else {
+                Ok(None)
+            }
+        }
+        "remove_dir_from_path" => {
+            // Keep the ${PIGGY_BIN} PATH line if another installed saver still
+            // ships something there (rtk's binary, another launcher shim) — only
+            // the last such saver's uninstall removes it, or we'd break the
+            // survivor. (The current saver is still in `state` at this point.)
+            let bin = config::piggy_bin_dir();
+            let others_need_bin = state.savers.iter().any(|(other_id, s)| {
+                other_id != id
+                    && s.installed_files
+                        .iter()
+                        .any(|f| Path::new(f).parent() == Some(bin.as_path()))
+            });
+            if others_need_bin {
+                warnings.push(
+                    "kept the ${PIGGY_BIN} PATH line — another saver still uses it".to_string(),
+                );
+                return Ok(None);
+            }
+            let profile = config::shell_profile_path();
+            let removed = remove_path_block(&profile)
+                .with_context(|| format!("removing Piggy PATH block from {}", profile.display()))?;
+            Ok(if removed {
+                Some(format!(
+                    "removed Piggy PATH line from {}",
+                    profile.display()
+                ))
+            } else {
+                None
+            })
         }
         "claude_cli" => {
             let args = string_args(step)?;
@@ -872,6 +1189,20 @@ fn run_health_checks(entry: &Entry, settings_path: &Path) -> Result<HealthReport
             "builtin" => {
                 report.push("builtin module", true, "ok");
             }
+            "path_configured" => {
+                let profile = config::shell_profile_path();
+                let content = std::fs::read_to_string(&profile).unwrap_or_default();
+                let ok = content.contains(PIGGY_PATH_BEGIN);
+                report.push(
+                    format!("PATH configured in {}", profile.display()),
+                    ok,
+                    if ok {
+                        "Piggy PATH block present"
+                    } else {
+                        "Piggy PATH block not found"
+                    },
+                );
+            }
             other => {
                 report.push(format!("unknown check '{other}'"), false, "unsupported");
             }
@@ -926,6 +1257,7 @@ fn rollback(
     pre_bytes: &[u8],
     pre_existed: bool,
     installed_files: &[String],
+    re_enable: &[String],
 ) {
     // Best-effort plugin uninstall (undoes plugin-cache / marketplace writes the
     // settings restore below cannot reach).
@@ -946,11 +1278,19 @@ fn rollback(
         let _ = std::fs::remove_file(settings_path);
         state.settings_hash = None;
     }
-    // Remove any files we created.
+    // Remove any files (or venv trees) we created.
     for f in installed_files {
-        let _ = std::fs::remove_file(f);
+        remove_path_best_effort(Path::new(f));
     }
     state.savers.remove(id);
+    // Re-mark any saver we auto-disabled for this install: the pre-install
+    // settings bytes were already restored above (re-adding its hooks / plugin
+    // enable), so this only returns the state ledger to a consistent `enabled`.
+    for other in re_enable {
+        if let Some(s) = state.savers.get_mut(other) {
+            s.enabled = true;
+        }
+    }
 }
 
 /// Non-atomic-safe force write used only by rollback (best effort).
@@ -1124,25 +1464,59 @@ fn extract_gz_binary(gz: &[u8], binary: &str, dest: &Path) -> Result<()> {
 /// binary is reported as a clean "needs Claude Code CLI" error unless `ignore`.
 fn run_claude(args: &[String], ignore_failure: bool) -> Result<()> {
     let bin = config::claude_bin();
-    match Command::new(&bin).args(args).output() {
+    let mut cmd = Command::new(&bin);
+    cmd.args(args);
+    match output_bounded(cmd) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             if ignore_failure {
                 Ok(())
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                bail!(
-                    "`{bin} {}` failed (exit {:?}): {}",
-                    args.join(" "),
-                    out.status.code(),
-                    stderr.trim()
-                )
+                let stderr = stderr.trim();
+                let code = out.status.code();
+                let cmd = args.join(" ");
+                if stderr.is_empty() {
+                    bail!("`{bin} {cmd}` failed (exit {code:?})")
+                } else {
+                    // Lead with stderr so the GUI banner, which truncates on ':',
+                    // shows the human-readable reason instead of the raw command.
+                    bail!("{stderr} (from `{bin} {cmd}` exit {code:?})")
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!("this saver needs the Claude Code CLI, but `{bin}` was not found on your PATH")
         }
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            if ignore_failure {
+                Ok(())
+            } else {
+                bail!(
+                    "`{bin} {}` did not finish within {}s and was stopped — it may be downloading; check your network and try again",
+                    args.join(" "),
+                    SUBPROCESS_TIMEOUT.as_secs()
+                )
+            }
+        }
         Err(e) => bail!("could not run `{bin}`: {e}"),
+    }
+}
+
+/// Enable or disable a plugin through the `claude` CLI while tolerating drift.
+/// If Claude's settings already have the plugin in the requested state the CLI
+/// call is skipped. And if the CLI refuses because reality already matches the
+/// request (it reports the plugin "already disabled"/"already enabled"), that
+/// counts as success so the caller can heal Piggy's ledger rather than abort.
+fn set_plugin_enabled_via_cli(settings_path: &Path, plugin: &str, on: bool) -> Result<()> {
+    if plugin_enabled(settings_path, plugin).0 == on {
+        return Ok(());
+    }
+    let verb = if on { "enable" } else { "disable" };
+    let args = vec!["plugin".to_string(), verb.to_string(), plugin.to_string()];
+    match run_claude(&args, false) {
+        Err(e) if plugin_enabled(settings_path, plugin).0 != on => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -1208,6 +1582,201 @@ fn binary_on_path(bin: &str) -> bool {
         .output()
         .map(|_| true)
         .unwrap_or(false)
+}
+
+/// Cap on install subprocesses that hit the network (`claude plugin` runs a git
+/// clone; pip downloads). Without it a stalled clone or an offline network leaves
+/// the whole GUI toggle spinning forever with no way out.
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `Command::output()` but killed after [`SUBPROCESS_TIMEOUT`]. stdin is closed so
+/// anything expecting a TTY fails fast rather than blocking. A timeout surfaces as
+/// an `ErrorKind::TimedOut` io error for the caller to phrase.
+// ponytail: 50ms poll + pipe-drain threads; outputs here are a few lines so the
+// pipe buffer never fills. Swap for the `wait-timeout` crate if that stops holding.
+fn output_bounded(cmd: Command) -> std::io::Result<Output> {
+    output_bounded_with(cmd, SUBPROCESS_TIMEOUT)
+}
+
+fn output_bounded_with(mut cmd: Command, timeout: Duration) -> std::io::Result<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let out_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = out.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let err_h = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(s) = err.as_mut() {
+            let _ = s.read_to_end(&mut b);
+        }
+        b
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let stdout = out_h.join().unwrap_or_default();
+            let stderr = err_h.join().unwrap_or_default();
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("timed out after {}s", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run an arbitrary command to completion, mapping a non-zero exit or a missing
+/// binary to a clean error. Used by the venv/pip install steps.
+fn run_cmd(prog: &str, args: &[String]) -> Result<()> {
+    let mut cmd = Command::new(prog);
+    cmd.args(args);
+    match output_bounded(cmd) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "`{prog} {}` failed (exit {:?}): {}",
+                args.join(" "),
+                out.status.code(),
+                stderr.trim()
+            )
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("`{prog}` was not found"),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => bail!(
+            "`{prog} {}` did not finish within {}s and was stopped — check your network and try again",
+            args.join(" "),
+            SUBPROCESS_TIMEOUT.as_secs()
+        ),
+        Err(e) => bail!("could not run `{prog}`: {e}"),
+    }
+}
+
+/// Single-quote a string for safe embedding in the generated `/bin/sh` launcher.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Compare a `python --version` string (`"3.12.0"`) against a `major.minor`
+/// minimum (`"3.10"`), on major-then-minor only.
+fn version_at_least(have: &str, min: &str) -> bool {
+    fn parse(s: &str) -> (u32, u32) {
+        let mut it = s.split(['.', ' ']).filter(|p| !p.is_empty());
+        let maj = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        (maj, minor)
+    }
+    parse(have) >= parse(min)
+}
+
+/// Remove a path whether it is a file or a directory tree; returns whether
+/// anything was removed. Used for artifact cleanup (a saver's `installed_files`
+/// can include a venv directory as well as plain files).
+fn remove_path_best_effort(p: &Path) -> bool {
+    if p.is_dir() {
+        std::fs::remove_dir_all(p).is_ok()
+    } else {
+        std::fs::remove_file(p).is_ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shell-profile PATH management
+// ---------------------------------------------------------------------------
+
+/// Opening marker of Piggy's managed `PATH` block in the shell profile.
+const PIGGY_PATH_BEGIN: &str = "# >>> piggy (managed PATH) >>>";
+/// Closing marker of Piggy's managed `PATH` block.
+const PIGGY_PATH_END: &str = "# <<< piggy (managed PATH) <<<";
+
+/// Ensure `dir` is on `PATH` by appending a delimited block to `profile`.
+///
+/// Idempotent: if the block is already present it makes no change and returns
+/// `false`. Returns `true` when it appended the block. The block is bounded by
+/// [`PIGGY_PATH_BEGIN`]/[`PIGGY_PATH_END`] so [`remove_path_block`] can strip it
+/// back out on uninstall without disturbing the user's own lines.
+fn ensure_path_block(profile: &Path, dir: &str) -> Result<bool> {
+    let existing = std::fs::read_to_string(profile).unwrap_or_default();
+    if existing.contains(PIGGY_PATH_BEGIN) {
+        return Ok(false);
+    }
+    let block = format!("{PIGGY_PATH_BEGIN}\nexport PATH=\"{dir}:$PATH\"\n{PIGGY_PATH_END}\n");
+    let mut updated = existing;
+    // Separate our block from prior content with exactly one blank line.
+    if !updated.is_empty() {
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push('\n');
+    }
+    updated.push_str(&block);
+    write_file_atomic(profile, updated.as_bytes())?;
+    Ok(true)
+}
+
+/// Remove Piggy's managed `PATH` block (and the blank-line separator it added)
+/// from `profile`. Returns `true` if a block was found and removed.
+fn remove_path_block(profile: &Path) -> Result<bool> {
+    let content = match std::fs::read_to_string(profile) {
+        Ok(c) => c,
+        Err(_) => return Ok(false),
+    };
+    let Some(mut start) = content.find(PIGGY_PATH_BEGIN) else {
+        return Ok(false);
+    };
+    let Some(end_rel) = content[start..].find(PIGGY_PATH_END) else {
+        return Ok(false);
+    };
+    let mut end = start + end_rel + PIGGY_PATH_END.len();
+    // Consume the trailing newline after the closing marker, if any.
+    if content[end..].starts_with('\n') {
+        end += 1;
+    }
+    // Drop the single blank-line separator we inserted before the block,
+    // leaving the newline that terminates the user's own last line.
+    if content[..start].ends_with("\n\n") {
+        start -= 1;
+    }
+    let mut updated = String::with_capacity(content.len());
+    updated.push_str(&content[..start]);
+    updated.push_str(&content[end..]);
+    write_file_atomic(profile, updated.as_bytes())?;
+    Ok(true)
+}
+
+/// Atomic write via a sibling temp file + rename, creating parent dirs as
+/// needed. Used for the shell profile (not `settings.json`, which has its own
+/// backup-and-commit path in [`crate::settings`]).
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("no parent dir for {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "profile".to_string());
+    let tmp = parent.join(format!(".{name}.piggy-tmp"));
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+    Ok(())
 }
 
 /// Expand `${PIGGY_BIN}`, `${PIGGY_HOME}`, and a leading `~` in a path string.
@@ -1287,5 +1856,99 @@ fn arch_key() -> String {
         ("linux", "x86_64") => "linux-x86_64".into(),
         ("linux", "aarch64") => "linux-aarch64".into(),
         (os, arch) => format!("{os}-{arch}"),
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn output_bounded_kills_a_hung_child_and_returns_fast() {
+        // `sleep 600` would block the install forever without the cap. Bound it low
+        // so the test is quick, then assert it timed out well under the sleep.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("600");
+        let start = Instant::now();
+        let err = output_bounded_with(cmd, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "should stop promptly"
+        );
+    }
+
+    #[test]
+    fn output_bounded_returns_output_for_a_fast_command() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hi");
+        let out = output_bounded_with(cmd, Duration::from_secs(5)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+}
+
+#[cfg(test)]
+mod path_block_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_profile(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("piggy-pathtest-{name}-{}", std::process::id()));
+        let _ = fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn appends_block_to_existing_profile_then_removes_it_cleanly() {
+        let profile = tmp_profile("existing");
+        fs::write(&profile, "export FOO=bar\n").unwrap();
+
+        assert!(ensure_path_block(&profile, "/home/x/.piggy/bin").unwrap());
+        let after = fs::read_to_string(&profile).unwrap();
+        assert!(after.contains(PIGGY_PATH_BEGIN));
+        assert!(after.contains("export PATH=\"/home/x/.piggy/bin:$PATH\""));
+        // User's own line is preserved, separated by exactly one blank line.
+        assert_eq!(after, format!("export FOO=bar\n\n{PIGGY_PATH_BEGIN}\nexport PATH=\"/home/x/.piggy/bin:$PATH\"\n{PIGGY_PATH_END}\n"));
+
+        assert!(remove_path_block(&profile).unwrap());
+        // Byte-identical restore of the user's original content.
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "export FOO=bar\n");
+        let _ = fs::remove_file(&profile);
+    }
+
+    #[test]
+    fn ensure_is_idempotent() {
+        let profile = tmp_profile("idem");
+        assert!(ensure_path_block(&profile, "/p/bin").unwrap());
+        // Second call must not append a duplicate block.
+        assert!(!ensure_path_block(&profile, "/p/bin").unwrap());
+        let content = fs::read_to_string(&profile).unwrap();
+        assert_eq!(content.matches(PIGGY_PATH_BEGIN).count(), 1);
+        let _ = fs::remove_file(&profile);
+    }
+
+    #[test]
+    fn remove_on_missing_or_unmanaged_profile_is_noop() {
+        let missing = tmp_profile("missing");
+        assert!(!remove_path_block(&missing).unwrap());
+
+        let unmanaged = tmp_profile("unmanaged");
+        fs::write(&unmanaged, "export FOO=bar\n").unwrap();
+        assert!(!remove_path_block(&unmanaged).unwrap());
+        assert_eq!(fs::read_to_string(&unmanaged).unwrap(), "export FOO=bar\n");
+        let _ = fs::remove_file(&unmanaged);
+    }
+
+    #[test]
+    fn create_from_absent_profile() {
+        let profile = tmp_profile("absent");
+        assert!(ensure_path_block(&profile, "/p/bin").unwrap());
+        let content = fs::read_to_string(&profile).unwrap();
+        assert!(content.starts_with(PIGGY_PATH_BEGIN));
+        assert!(remove_path_block(&profile).unwrap());
+        assert_eq!(fs::read_to_string(&profile).unwrap(), "");
+        let _ = fs::remove_file(&profile);
     }
 }

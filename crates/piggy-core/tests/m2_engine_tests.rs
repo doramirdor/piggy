@@ -43,9 +43,14 @@ impl Sandbox {
         std::env::set_var("PIGGY_CLAUDE_DIR", dir.path().join("claude"));
         std::env::set_var("PIGGY_CLAUDE_JSON", dir.path().join("claude.json"));
         std::env::set_var("PIGGY_CLAUDE_PROJECTS", dir.path().join("projects"));
+        // Sandbox the shell profile too: the `ensure_dir_on_path` install step
+        // appends a PATH line, and without this override it would edit the real
+        // `~/.zshrc` during `cargo test`.
+        std::env::set_var("PIGGY_SHELL_PROFILE", dir.path().join("zshrc"));
         // Optional vars off by default; tests opt in.
         std::env::remove_var("PIGGY_CLAUDE_BIN");
         std::env::remove_var("PIGGY_ASSET_CACHE_DIR");
+        std::env::remove_var("PIGGY_PYTHON_BIN");
         std::fs::create_dir_all(dir.path().join("claude")).unwrap();
         Sandbox { _guard: guard, dir }
     }
@@ -89,6 +94,18 @@ impl Sandbox {
         let shim =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shims/claude-shim.sh");
         std::env::set_var("PIGGY_CLAUDE_BIN", shim);
+    }
+
+    /// Point PIGGY_PYTHON_BIN at the fake `python3` shim (fakes `-m venv` + pip,
+    /// no network) so venv-based savers like Headroom install offline.
+    fn use_python_shim(&self) {
+        let shim =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shims/python-shim.sh");
+        std::env::set_var("PIGGY_PYTHON_BIN", shim);
+    }
+
+    fn piggy_home(&self) -> PathBuf {
+        self.dir.path().join("piggy")
     }
 
     fn shim_log(&self) -> Vec<String> {
@@ -440,16 +457,161 @@ fn ponytail_install_uninstall_runs_full_step_set() {
 }
 
 #[test]
-fn conflicting_saver_is_refused() {
+fn conflicting_saver_is_auto_disabled_on_install() {
     let sb = Sandbox::new();
     sb.seed_settings_from_fixture("minimal.json");
     sb.use_shim();
     let catalog = Catalog::embedded();
 
     engine::install(&catalog, "caveman").unwrap();
-    // ponytail conflictsWith caveman.
-    let err = engine::install(&catalog, "ponytail").unwrap_err();
-    assert!(err.to_string().contains("conflicts with"));
+    assert!(PiggyState::load().unwrap().savers["caveman"].enabled);
+
+    // ponytail conflictsWith caveman: installing it auto-disables caveman
+    // rather than refusing, so the newly-turned-on saver cleanly wins.
+    let report = engine::install(&catalog, "ponytail").unwrap();
+    assert!(!report.rolled_back);
+    assert!(
+        report
+            .messages
+            .iter()
+            .any(|m| m.contains("turned off") && m.contains("caveman")),
+        "expected an auto-disable message, got {:?}",
+        report.messages
+    );
+
+    let state = PiggyState::load().unwrap();
+    assert!(state.savers["ponytail"].enabled, "ponytail is on");
+    assert!(
+        !state.savers["caveman"].enabled,
+        "caveman auto-disabled by the conflicting install"
+    );
+    // The plugin stays installed (only disabled) — auto-disable is a toggle-off,
+    // not an uninstall.
+    assert!(state.is_installed("caveman"));
+
+    let disk: Value = serde_json::from_slice(&sb.read_settings()).unwrap();
+    assert_eq!(disk["enabledPlugins"]["ponytail@ponytail"], true);
+    assert_eq!(disk["enabledPlugins"]["caveman@caveman"], false);
+}
+
+#[test]
+fn conflicting_saver_is_auto_disabled_on_toggle_on() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_shim();
+    let catalog = Catalog::embedded();
+
+    // Install both, but leave caveman off and ponytail on: turning caveman back
+    // on must auto-disable ponytail (the reverse direction).
+    engine::install(&catalog, "caveman").unwrap();
+    engine::install(&catalog, "ponytail").unwrap(); // auto-disables caveman
+    engine::set_enabled(&catalog, "caveman", true).unwrap(); // auto-disables ponytail
+
+    let state = PiggyState::load().unwrap();
+    assert!(state.savers["caveman"].enabled);
+    assert!(!state.savers["ponytail"].enabled);
+}
+
+// ---------------------------------------------------------------------------
+// Headroom: venv + wrapper-launcher install (the proxy saver, wrapper model)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn headroom_installs_venv_and_launcher_then_uninstalls_clean() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_python_shim();
+    let catalog = Catalog::embedded();
+
+    let report = engine::install(&catalog, "headroom").unwrap();
+    assert!(!report.rolled_back, "install succeeded: {report:?}");
+
+    let venv = sb.piggy_home().join("venvs/headroom");
+    let launcher = sb.piggy_bin().join("piggy-claude");
+    assert!(venv.join("bin/headroom").exists(), "venv headroom present");
+    assert!(launcher.exists(), "launcher written");
+
+    // The launcher execs the venv headroom binary with `wrap claude` — no global
+    // ANTHROPIC_BASE_URL, no daemon: compression is scoped to this command.
+    let script = std::fs::read_to_string(&launcher).unwrap();
+    assert!(script.contains("venvs/headroom/bin/headroom"));
+    assert!(script.contains("wrap") && script.contains("claude"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&launcher).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "launcher is executable");
+    }
+
+    // Health check passes (fake `headroom --version` + PATH block present).
+    let health = engine::health_check(&catalog, "headroom").unwrap();
+    assert!(health.ok(), "health: {:?}", health.checks);
+
+    let state = PiggyState::load().unwrap();
+    assert!(state.savers["headroom"].enabled);
+    assert!(
+        state.savers["headroom"]
+            .installed_files
+            .iter()
+            .any(|f| f.ends_with("venvs/headroom")),
+        "venv tracked as an installed artifact for cleanup"
+    );
+
+    // Uninstall removes the venv tree, the launcher, and (last consumer) the
+    // PATH line.
+    engine::uninstall(&catalog, "headroom").unwrap();
+    assert!(!venv.exists(), "venv tree removed");
+    assert!(!launcher.exists(), "launcher removed");
+    assert!(!PiggyState::load().unwrap().is_installed("headroom"));
+    let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap_or_default();
+    assert!(
+        !profile.contains("piggy (managed PATH)"),
+        "PATH line removed when the last ${{PIGGY_BIN}} consumer is gone"
+    );
+}
+
+#[test]
+fn headroom_auto_disables_rtk_and_shares_the_path_line() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_fake_rtk_asset(0);
+    sb.use_python_shim();
+    let catalog = Catalog::embedded();
+
+    engine::install(&catalog, "rtk").unwrap();
+    assert!(PiggyState::load().unwrap().savers["rtk"].enabled);
+
+    // Headroom conflictsWith rtk (it wraps rtk internally): installing it
+    // auto-disables rtk rather than double-compressing.
+    let report = engine::install(&catalog, "headroom").unwrap();
+    assert!(
+        report
+            .messages
+            .iter()
+            .any(|m| m.contains("turned off") && m.contains("rtk")),
+        "expected rtk auto-disable: {:?}",
+        report.messages
+    );
+    let state = PiggyState::load().unwrap();
+    assert!(state.savers["headroom"].enabled);
+    assert!(!state.savers["rtk"].enabled, "rtk auto-disabled");
+    assert!(state.is_installed("rtk"), "rtk kept installed (just off)");
+
+    // Uninstalling headroom KEEPS the shared PATH line — rtk still needs it.
+    engine::uninstall(&catalog, "headroom").unwrap();
+    let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap();
+    assert!(
+        profile.contains("piggy (managed PATH)"),
+        "PATH line kept while rtk remains"
+    );
+
+    // Uninstalling rtk (now the last consumer) finally removes it.
+    engine::uninstall(&catalog, "rtk").unwrap();
+    let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap_or_default();
+    assert!(
+        !profile.contains("piggy (managed PATH)"),
+        "PATH line removed after the last consumer"
+    );
 }
 
 #[test]
@@ -465,6 +627,111 @@ fn failed_plugin_install_rolls_back() {
     std::env::remove_var("PIGGY_SHIM_FAIL");
     assert!(err.to_string().contains("rolled back"));
     assert!(!PiggyState::load().unwrap().is_installed("caveman"));
+}
+
+/// State drift on the "turn everything off" path: Claude already has the plugin
+/// disabled in settings.json (someone disabled it outside Piggy) while Piggy's
+/// ledger still says it is on. Turning it off must heal the ledger without
+/// re-issuing a `claude plugin disable` the CLI would reject as "already
+/// disabled".
+#[test]
+fn toggle_off_heals_ledger_when_plugin_already_disabled_in_settings() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_shim();
+    let catalog = Catalog::embedded();
+
+    engine::install(&catalog, "caveman").unwrap();
+    assert!(PiggyState::load().unwrap().savers["caveman"].enabled);
+
+    // Someone disabled the plugin in Claude's settings, bypassing Piggy: the
+    // ledger still thinks it is on.
+    let mut disk: Value = serde_json::from_slice(&sb.read_settings()).unwrap();
+    disk["enabledPlugins"]["caveman@caveman"] = json!(false);
+    sb.seed_settings_bytes(
+        format!("{}\n", serde_json::to_string_pretty(&disk).unwrap()).as_bytes(),
+    );
+
+    let disable_line = "plugin disable caveman@caveman";
+    let before = sb.shim_log().iter().filter(|l| *l == disable_line).count();
+
+    // The master-off path calls set_enabled(.., false); it should succeed by
+    // healing the ledger rather than aborting on the CLI's "already disabled".
+    engine::set_enabled(&catalog, "caveman", false).unwrap();
+
+    assert!(
+        !PiggyState::load().unwrap().savers["caveman"].enabled,
+        "ledger healed to disabled"
+    );
+    let after = sb.shim_log().iter().filter(|l| *l == disable_line).count();
+    assert_eq!(
+        after, before,
+        "no redundant `claude plugin disable` was issued"
+    );
+}
+
+/// The symmetric drift heal on the way back on: the plugin is already enabled in
+/// Claude's settings while Piggy's ledger has it off. Turning it on heals the
+/// ledger without a redundant `claude plugin enable`.
+#[test]
+fn toggle_on_heals_ledger_when_plugin_already_enabled_in_settings() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_shim();
+    let catalog = Catalog::embedded();
+
+    engine::install(&catalog, "caveman").unwrap();
+    engine::set_enabled(&catalog, "caveman", false).unwrap();
+    assert!(!PiggyState::load().unwrap().savers["caveman"].enabled);
+
+    // Someone re-enabled the plugin in Claude's settings, bypassing Piggy: the
+    // ledger still thinks it is off.
+    let mut disk: Value = serde_json::from_slice(&sb.read_settings()).unwrap();
+    disk["enabledPlugins"]["caveman@caveman"] = json!(true);
+    sb.seed_settings_bytes(
+        format!("{}\n", serde_json::to_string_pretty(&disk).unwrap()).as_bytes(),
+    );
+
+    let enable_line = "plugin enable caveman@caveman";
+    let before = sb.shim_log().iter().filter(|l| *l == enable_line).count();
+
+    engine::set_enabled(&catalog, "caveman", true).unwrap();
+
+    assert!(
+        PiggyState::load().unwrap().savers["caveman"].enabled,
+        "ledger healed to enabled"
+    );
+    let after = sb.shim_log().iter().filter(|l| *l == enable_line).count();
+    assert_eq!(
+        after, before,
+        "no redundant `claude plugin enable` was issued"
+    );
+}
+
+/// A genuine `claude plugin disable` failure — one that leaves reality NOT
+/// matching the request — must still propagate as an error, and must not falsely
+/// heal Piggy's ledger to disabled.
+#[test]
+fn genuine_plugin_disable_failure_propagates_and_keeps_ledger() {
+    let sb = Sandbox::new();
+    sb.seed_settings_from_fixture("minimal.json");
+    sb.use_shim();
+    let catalog = Catalog::embedded();
+
+    engine::install(&catalog, "caveman").unwrap();
+    assert!(PiggyState::load().unwrap().savers["caveman"].enabled);
+
+    // Settings still show the plugin enabled (normal state), so the drift-tolerant
+    // helper actually runs the CLI — which we force to fail with no side effects.
+    std::env::set_var("PIGGY_SHIM_FAIL", "plugin disable caveman@caveman");
+    let res = engine::set_enabled(&catalog, "caveman", false);
+    std::env::remove_var("PIGGY_SHIM_FAIL");
+
+    assert!(res.is_err(), "the CLI failure propagates");
+    assert!(
+        PiggyState::load().unwrap().savers["caveman"].enabled,
+        "ledger not falsely healed to disabled on a real failure"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -601,11 +868,11 @@ fn prune_keeps_an_installed_savers_pre_install_backup() {
     );
 }
 
-/// Turning a saver ON via the fast toggle must honour `conflictsWith`, just like
-/// a fresh install — otherwise `off A → install B → on A` leaves two
-/// mutually-exclusive savers enabled at once.
+/// Turning a saver ON via the fast toggle must honour `conflictsWith` the same
+/// way a fresh install does — auto-disabling the conflicting saver — otherwise
+/// `off A → install B → on A` leaves two mutually-exclusive savers enabled.
 #[test]
-fn toggle_on_refuses_a_conflicting_saver() {
+fn toggle_on_auto_disables_a_conflicting_saver() {
     let sb = Sandbox::new();
     sb.seed_settings_from_fixture("minimal.json");
     sb.use_shim();
@@ -614,17 +881,23 @@ fn toggle_on_refuses_a_conflicting_saver() {
     // caveman conflictsWith ponytail (and vice versa).
     engine::install(&catalog, "caveman").unwrap();
     engine::set_enabled(&catalog, "caveman", false).unwrap(); // off, still installed
-    engine::install(&catalog, "ponytail").unwrap(); // allowed — caveman is off
+    engine::install(&catalog, "ponytail").unwrap(); // caveman already off — no conflict
 
-    // Now `on caveman` must be refused: ponytail is on and conflicts.
-    let err = engine::set_enabled(&catalog, "caveman", true).unwrap_err();
+    // Now `on caveman` auto-disables ponytail (it is on and conflicts).
+    let report = engine::set_enabled(&catalog, "caveman", true).unwrap();
     assert!(
-        err.to_string().contains("conflicts with"),
-        "toggle-on ignored conflictsWith: {err}"
+        report
+            .messages
+            .iter()
+            .any(|m| m.contains("turned off") && m.contains("ponytail")),
+        "toggle-on ignored conflictsWith: {:?}",
+        report.messages
     );
+    let state = PiggyState::load().unwrap();
+    assert!(state.savers["caveman"].enabled, "caveman is on");
     assert!(
-        !PiggyState::load().unwrap().savers["caveman"].enabled,
-        "caveman stayed off after the refused toggle"
+        !state.savers["ponytail"].enabled,
+        "ponytail auto-disabled by the conflicting toggle-on"
     );
 }
 
@@ -656,6 +929,9 @@ fn any_backup_contains(dir: &Path, needle: &[u8]) -> bool {
 fn seed_session_with_tools(store: &mut Store, id: &str, last_ts: &str, tools: &[(&str, u64)]) {
     let parse = SessionParse {
         session_id: id.to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
         project_path: Some("/proj".into()),
         git_branch: None,
         first_ts: Some(last_ts.to_string()),

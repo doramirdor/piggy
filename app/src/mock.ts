@@ -5,6 +5,7 @@
 
 import { MOCK_MODE } from "./ipc";
 import type {
+  ConfigOption,
   DiscoverDto,
   Doctor,
   Environment,
@@ -15,9 +16,11 @@ import type {
   SaversState,
   Settings,
   ShareCardData,
+  SourcesOverview,
   StatsOverview,
   SweepItem,
   SweepReport,
+  UsageSeries,
 } from "./types";
 
 const EMPTY = MOCK_MODE === "empty";
@@ -47,6 +50,7 @@ function populatedSavers(): SaverRow[] {
       license: "MIT",
       licenseNote: null,
       ordering: 5,
+      configurable: false,
       badge: { kind: "measured", delta: -0.09, n: 18 },
     },
     {
@@ -56,7 +60,7 @@ function populatedSavers(): SaverRow[] {
       description: "Compresses command output (git, tests, builds) before Claude sees it.",
       installType: "binary+hook",
       status: "curated_v1",
-      defaultOn: true,
+      defaultOn: false,
       installed: true,
       enabled: true,
       installable: true,
@@ -67,36 +71,83 @@ function populatedSavers(): SaverRow[] {
       license: "Apache-2.0",
       licenseNote: null,
       ordering: 10,
+      configurable: false,
       badge: { kind: "measured", delta: -0.22, n: 41 },
+    },
+    {
+      id: "token-optimizer",
+      name: "Token Optimizer",
+      plainLabel: "Smart file re-reads",
+      description: "Sends Claude only what changed in files it already saw.",
+      installType: "claude_plugin",
+      status: "curated_v1",
+      defaultOn: false,
+      installed: false,
+      enabled: false,
+      installable: true,
+      behaviorChanging: false,
+      warning: null,
+      risk: "low",
+      claimedSavings: "~18% overall (author, 684-session counterfactual)",
+      license: "PolyForm-Noncommercial-1.0.0",
+      licenseNote:
+        "Source-available, NOT open source. Free for individuals and small teams (<5 people or <$20k/mo).",
+      ordering: 30,
+      configurable: false,
+      badge: { kind: "measuring", delta: null, n: 0 },
+    },
+    {
+      id: "headroom",
+      name: "Headroom",
+      plainLabel: "Compress everything (Headroom)",
+      description: "Piggy's default compressor. Wraps terminal shrinking and more in one proxy.",
+      installType: "binary+proxy",
+      status: "curated_v1",
+      defaultOn: true,
+      installed: true,
+      // Off initially so rtk can be on - turning the master on flips this and
+      // auto-disables the conflicting RTK.
+      enabled: false,
+      installable: true,
+      behaviorChanging: false,
+      warning: null,
+      risk: "low",
+      claimedSavings: "~80% on shell output, plus prompt compression",
+      license: "MIT",
+      licenseNote: null,
+      ordering: 40,
+      configurable: false,
+      badge: { kind: "measuring", delta: null, n: 0 },
     },
     {
       id: "caveman",
       name: "Caveman",
       plainLabel: "Terse replies",
-      description: "Claude answers in short caveman speak — fewer words, same meaning.",
+      description: "Claude answers in short caveman speak - fewer words, same meaning.",
       installType: "claude_plugin",
       status: "curated_v1",
-      defaultOn: false,
+      defaultOn: true,
       installed: true,
       enabled: true,
       installable: true,
       behaviorChanging: true,
       warning:
-        "Independent JetBrains A/B test measured ~8.5% real-world savings vs the 65% claim — no quality loss. Modest but real.",
+        "Independent JetBrains A/B test measured ~8.5% real-world savings vs the 65% claim - no quality loss. Modest but real.",
       risk: "low",
       claimedSavings: "65% fewer output tokens (author, chat-only benchmark)",
       license: "MIT",
       licenseNote: null,
       ordering: 50,
+      configurable: true,
       // Estimated: enough observational history to show a number, but no live
-      // holdout yet — the gray-blue "≈ −X% estimated" badge.
+      // holdout yet - the gray-blue "≈ −X% estimated" badge.
       badge: { kind: "estimated", delta: -0.085, n: 15 },
     },
     {
       id: "ponytail",
       name: "Ponytail",
       plainLabel: "Write less code",
-      description: "Nudges Claude to build only what you asked for — no gold-plating.",
+      description: "Nudges Claude to build only what you asked for - no gold-plating.",
       installType: "claude_plugin",
       status: "curated_v1",
       defaultOn: false,
@@ -111,7 +162,8 @@ function populatedSavers(): SaverRow[] {
       license: "MIT",
       licenseNote: null,
       ordering: 60,
-      badge: { kind: "measuring", delta: null, n: 0 },
+      configurable: false,
+      badge: { kind: "measuring", delta: null, n: 4 },
     },
   ];
 }
@@ -127,13 +179,55 @@ function emptySavers(): SaverRow[] {
 
 let savers: SaverRow[] = EMPTY ? emptySavers() : populatedSavers();
 
-function masterOn(): boolean {
-  const defaults = savers.filter((s) => s.defaultOn);
-  return defaults.length > 0 && defaults.every((s) => s.enabled);
+// Mutual-exclusion pairs, mirroring the real catalog's `conflictsWith`. Turning
+// one on auto-disables the other (they can't both own the same channel).
+const CONFLICTS: Record<string, string[]> = {
+  headroom: ["rtk"],
+  rtk: ["headroom"],
+};
+
+function friendlyName(id: string): string {
+  const s = savers.find((x) => x.id === id);
+  return s?.name ?? id;
 }
 
-function saversState(): SaversState {
-  return { masterOn: masterOn(), savers: savers.map((s) => ({ ...s })) };
+/** Disable any enabled saver that conflicts with `enabledId`; return their ids. */
+function applyConflicts(enabledId: string): string[] {
+  const conflictIds = new Set<string>([
+    ...(CONFLICTS[enabledId] ?? []),
+    ...savers.filter((s) => (CONFLICTS[s.id] ?? []).includes(enabledId)).map((s) => s.id),
+  ]);
+  const turnedOff: string[] = [];
+  savers = savers.map((s) => {
+    if (s.id !== enabledId && conflictIds.has(s.id) && s.enabled) {
+      turnedOff.push(s.id);
+      return { ...s, enabled: false };
+    }
+    return s;
+  });
+  return turnedOff;
+}
+
+/** The plain-language heads-up for savers auto-disabled in favor of `replacerId`. */
+function conflictNotice(turnedOff: string[], replacerId: string): string | undefined {
+  if (turnedOff.length === 0) return undefined;
+  return turnedOff
+    .map(
+      (id) => `${friendlyName(id)} turned off - ${friendlyName(replacerId)} does the same job and is now on.`,
+    )
+    .join(" ");
+}
+
+// The master switch is a system-level flag, independent of individual savers -
+// disabling any one saver leaves Piggy ON. Seeded from "is anything running" so
+// the demo opens in a sensible state; only master_toggle writes it thereafter.
+let masterOnFlag = savers.some((s) => s.enabled);
+function masterOn(): boolean {
+  return masterOnFlag;
+}
+
+function saversState(notice?: string): SaversState {
+  return { masterOn: masterOn(), savers: savers.map((s) => ({ ...s })), notice: notice ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +299,7 @@ function initialSweepItems(): SweepItem[] {
       estTokens: 0,
       estimated: true,
       recommendDisable: false,
-      reason: "hook — fires on events, not usage-measurable and costs no context tokens",
+      reason: "hook - fires on events, not usage-measurable and costs no context tokens",
     },
   ];
 }
@@ -273,6 +367,95 @@ function statsOverview(period: Period): StatsOverview {
   };
 }
 
+function sourcesOverview(period: Period): SourcesOverview {
+  if (EMPTY) {
+    return {
+      period,
+      cells: [
+        { source: "claude-code", interface: "gui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: true },
+        { source: "claude-code", interface: "tui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: true },
+        { source: "codex", interface: "gui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: false },
+        { source: "codex", interface: "tui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: false },
+      ],
+      unknownTokens: 0,
+      unknownSessions: 0,
+    };
+  }
+  const scale = { today: 0.12, week: 1, month: 4.2, all: 11 }[period];
+  const t = (n: number) => Math.round(n * scale);
+  return {
+    period,
+    cells: [
+      { source: "claude-code", interface: "gui", sessions: t(19), totalTokens: t(1_080_000), costUsdEst: Math.round(2540 * scale) / 100, toolPresent: true },
+      { source: "claude-code", interface: "tui", sessions: t(8), totalTokens: t(410_000), costUsdEst: Math.round(980 * scale) / 100, toolPresent: true },
+      { source: "codex", interface: "gui", sessions: t(2), totalTokens: t(90_000), costUsdEst: Math.round(160 * scale) / 100, toolPresent: true },
+      { source: "codex", interface: "tui", sessions: t(2), totalTokens: t(180_000), costUsdEst: Math.round(320 * scale) / 100, toolPresent: true },
+    ],
+    unknownTokens: 0,
+    unknownSessions: 0,
+  };
+}
+
+function usageSeries(period: Period): UsageSeries {
+  const days = { today: 1, week: 7, month: 30, all: 120 }[period];
+  const today = new Date();
+  const points = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const iso = d.toISOString().slice(0, 10);
+    // Weekends quiet, a couple of true zero days for gap realism; otherwise a
+    // deterministic weekday-shaped ramp so the chart reads like real work.
+    const dow = d.getDay();
+    const idle = EMPTY || dow === 0 || i === 4 || i === 11;
+    if (idle) {
+      points.push({ date: iso, totalTokens: 0, input: 0, output: 0, cacheWrite: 0, cacheRead: 0, costUsdEst: 0, sessions: 0 });
+      continue;
+    }
+    const wobble = 0.6 + ((i * 37) % 100) / 125; // 0.6..1.4, stable per day
+    const base = dow === 6 ? 0.45 : 1;
+    const input = Math.round(180_000 * base * wobble);
+    const output = Math.round(70_000 * base * wobble);
+    const cacheWrite = Math.round(120_000 * base * wobble);
+    const cacheRead = Math.round(210_000 * base * wobble);
+    points.push({
+      date: iso,
+      totalTokens: input + output + cacheWrite + cacheRead,
+      input,
+      output,
+      cacheWrite,
+      cacheRead,
+      costUsdEst: Math.round((input + output + cacheWrite + cacheRead) * 0.0000075 * 100) / 100,
+      sessions: Math.max(1, Math.round(4 * base * wobble)),
+    });
+  }
+  return { period, periodLabel: periodLabel(period), points };
+}
+
+// Per-saver options (Caveman's intensity), mutable so the mock feels live.
+let cavemanMode = "full";
+
+function cavemanConfig(): ConfigOption[] {
+  return [
+    {
+      key: "defaultMode",
+      label: "Intensity",
+      description: "How compressed Claude's replies are. Applies from the next session.",
+      choices: [
+        { value: "lite", label: "Lite", description: "Trims filler, keeps normal sentences" },
+        { value: "full", label: "Full", description: "Classic caveman: drops articles, fragments OK" },
+        { value: "ultra", label: "Ultra", description: "Maximum compression, telegram style" },
+      ],
+      default: "full",
+      current: cavemanMode,
+    },
+  ];
+}
+
+function saverConfig(id: string): ConfigOption[] {
+  return id === "caveman" ? cavemanConfig() : [];
+}
+
 function shareCardData(period: Period): ShareCardData {
   if (EMPTY) {
     return {
@@ -332,7 +515,7 @@ function discover(): DiscoverDto {
       licenseNote: null,
       exclusionReason:
         "No documented uninstall path (violates Piggy's reversibility principle); npm postinstall auto-edits settings.json without opt-in; self-documented settings.json corruption bug; releases frozen ~8 months.",
-      note: "Listed for transparency — not installable.",
+      note: "Listed for transparency - not installable.",
       repoUrl: null,
       risk: "high",
     },
@@ -345,7 +528,7 @@ function discover(): DiscoverDto {
       licenseNote:
         "Source-available, NOT open source. Free for individuals and small teams. Piggy shows this label before install.",
       exclusionReason: null,
-      note: "Coming in a later Piggy update — it needs a license-acknowledge step we haven't built yet.",
+      note: "Coming in a later Piggy update - it needs a license-acknowledge step we haven't built yet.",
       repoUrl: "https://github.com/alexgreensh/token-optimizer",
       risk: "low",
     },
@@ -357,8 +540,21 @@ function discover(): DiscoverDto {
       license: "Apache-2.0",
       licenseNote: null,
       exclusionReason: null,
-      note: "Planned for a future version of Piggy.",
+      note: "Piggy's intended default compressor (turns on ahead of RTK), but the proxy install engine isn't built yet - planned for a future version.",
       repoUrl: null,
+      risk: "medium",
+    },
+    {
+      id: "nadirclaw",
+      name: "NadirClaw",
+      description: "Routes simple prompts to cheaper/local models, hard ones to Claude",
+      claimedSavings: "40–70% by routing to cheaper models (author)",
+      license: "PolyForm-Noncommercial-1.0.0",
+      licenseNote:
+        "Source-available, NOT open source. Free for noncommercial use; commercial use needs a license. Piggy shows this label before install.",
+      exclusionReason: null,
+      note: "Router/proxy - conflicts with Headroom (both own ANTHROPIC_BASE_URL). Needs the same proxy install engine, planned for a future version.",
+      repoUrl: "https://github.com/NadirRouter/NadirClaw",
       risk: "medium",
     },
   ];
@@ -388,9 +584,9 @@ function doctor(): Doctor {
 }
 
 function environment(): Environment {
-  if (NO_CLAUDE) return { claudeInstalled: false, hasData: false, sessions: 0 };
-  if (EMPTY) return { claudeInstalled: true, hasData: false, sessions: 0 };
-  return { claudeInstalled: true, hasData: true, sessions: 143 };
+  if (NO_CLAUDE) return { claudeInstalled: false, codexInstalled: false, hasData: false, sessions: 0 };
+  if (EMPTY) return { claudeInstalled: true, codexInstalled: false, hasData: false, sessions: 0 };
+  return { claudeInstalled: true, codexInstalled: true, hasData: true, sessions: 143 };
 }
 
 // ---------------------------------------------------------------------------
@@ -405,22 +601,51 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return environment();
       case "stats_overview":
         return statsOverview((a.period as Period) ?? "week");
+      case "sources_overview":
+        return sourcesOverview((a.period as Period) ?? "week");
+      case "usage_series":
+        return usageSeries((a.period as Period) ?? "week");
       case "savers_list":
         return saversState();
+      case "saver_config_get":
+        return saverConfig(a.id as string);
+      case "saver_config_set": {
+        if (a.id === "caveman" && a.key === "defaultMode") {
+          cavemanMode = a.value as string;
+        }
+        return saverConfig(a.id as string);
+      }
       case "saver_toggle": {
         const id = a.id as string;
         const on = a.on as boolean;
         savers = savers.map((s) =>
           s.id === id ? { ...s, installed: on ? true : s.installed, enabled: on } : s,
         );
-        return saversState();
+        const notice = on ? conflictNotice(applyConflicts(id), id) : undefined;
+        return saversState(notice);
       }
       case "master_toggle": {
         const on = a.on as boolean;
-        savers = savers.map((s) =>
-          s.defaultOn ? { ...s, installed: on ? true : s.installed, enabled: on } : s,
-        );
-        return saversState();
+        masterOnFlag = on;
+        if (!on) {
+          // Turning the master off pauses every enabled saver (matches the real
+          // backend), so nothing conflicts and there's no notice.
+          savers = savers.map((s) => ({ ...s, enabled: false }));
+          return saversState();
+        }
+        // Enable the curated default-on set in order; each may auto-disable a
+        // conflicting saver (e.g. Headroom replaces Shrink terminal noise).
+        const turnedOff: string[] = [];
+        let replacer = "";
+        for (const d of savers.filter((s) => s.defaultOn)) {
+          savers = savers.map((s) =>
+            s.id === d.id ? { ...s, installed: true, enabled: true } : s,
+          );
+          const off = applyConflicts(d.id);
+          if (off.length > 0) replacer = d.id;
+          turnedOff.push(...off);
+        }
+        return saversState(replacer ? conflictNotice(turnedOff, replacer) : undefined);
       }
       case "sweep_report":
         return sweepReport();
@@ -472,5 +697,9 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         throw { title: "Unknown command", detail: cmd, rolledBack: false };
     }
   })();
+  // Mimic real IPC latency so busy/progress states are visible in mock mode.
+  if (cmd === "saver_toggle" || cmd === "master_toggle") {
+    await new Promise((r) => setTimeout(r, 700));
+  }
   return out as T;
 }

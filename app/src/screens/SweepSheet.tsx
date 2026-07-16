@@ -63,7 +63,7 @@ export function SweepSheet({ onClose }: { onClose: () => void }) {
           <div style={{ fontSize: 11, color: "var(--text-2)", marginBottom: 8, whiteSpace: "normal", lineHeight: 1.4 }}>
             {recommended.length > 0
               ? `${recommended.length} add-on${recommended.length === 1 ? "" : "s"} you never use cost ~${formatTokens(report.estRecoverableTokens)} tokens per request. Token costs are estimated.`
-              : "Everything here is in use — nothing to sweep."}
+              : "Everything here is in use - nothing to sweep."}
           </div>
         )}
 
@@ -93,7 +93,7 @@ export function SweepSheet({ onClose }: { onClose: () => void }) {
         {inUse.length > 0 && (
           <>
             <div className="sect" style={{ paddingLeft: 4 }}>
-              In use — kept
+              In use - kept
             </div>
             <div className="attr">
               {inUse.map((i) => (

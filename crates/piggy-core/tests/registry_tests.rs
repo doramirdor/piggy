@@ -15,15 +15,18 @@ fn embedded_catalog_parses_and_has_v1_savers() {
 #[test]
 fn v1_savers_are_installable_and_deferred_ones_are_not() {
     let c = Catalog::embedded();
-    // Curated v1 savers use only known step kinds.
-    for id in ["rtk", "caveman", "ponytail", "sweep"] {
+    // Curated v1 savers use only known step kinds. Headroom is installable now
+    // that it ships venv+wrapper steps (require_python / create_venv /
+    // pip_install / write_launcher). token-optimizer is a claude_plugin saver
+    // wired with require_binary + marketplace add/install.
+    for id in ["rtk", "caveman", "ponytail", "sweep", "headroom", "token-optimizer"] {
         assert!(
             c.get(id).unwrap().installable().is_ok(),
             "{id} should be installable"
         );
     }
     // Deferred entries carry placeholder steps (todo_v1_1 / todo_v2) → refused.
-    for id in ["cto", "context-mode", "headroom"] {
+    for id in ["cto", "context-mode", "nadirclaw"] {
         assert!(
             c.get(id).unwrap().installable().is_err(),
             "{id} should be refused (catalog newer than app / deferred)"
@@ -76,7 +79,7 @@ fn rtk_asset_names_are_the_real_release_filenames() {
 #[test]
 fn every_v1_step_kind_is_known() {
     let c = Catalog::embedded();
-    for id in ["rtk", "caveman", "ponytail", "sweep"] {
+    for id in ["rtk", "caveman", "ponytail", "sweep", "headroom", "token-optimizer"] {
         let e = c.get(id).unwrap();
         for kind in e.install.kinds().iter().chain(e.uninstall.kinds().iter()) {
             assert!(

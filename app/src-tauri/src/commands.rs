@@ -6,8 +6,9 @@ use serde::Deserialize;
 use tauri::AppHandle;
 
 use crate::backend::{
-    self, ApiError, AppPrefs, DiscoverDto, DoctorDto, Environment, ReindexDto, RestoreDto,
-    SaversState, ShareCardData, StatsOverview, SweepReportDto,
+    self, ApiError, AppPrefs, ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ReindexDto,
+    RestoreDto, SaversState, ShareCardData, SourcesOverview, StatsOverview, SweepReportDto,
+    UsageSeries,
 };
 
 /// Run blocking `piggy-core` work off the main thread, flattening the join error.
@@ -33,8 +34,32 @@ pub async fn stats_overview(period: String) -> Result<StatsOverview, ApiError> {
 }
 
 #[tauri::command]
+pub async fn sources_overview(period: String) -> Result<SourcesOverview, ApiError> {
+    run(move || backend::sources_overview(period)).await
+}
+
+#[tauri::command]
+pub async fn usage_series(period: String) -> Result<UsageSeries, ApiError> {
+    run(move || backend::usage_series(period)).await
+}
+
+#[tauri::command]
 pub async fn savers_list() -> Result<SaversState, ApiError> {
     run(backend::savers_list).await
+}
+
+#[tauri::command]
+pub async fn saver_config_get(id: String) -> Result<Vec<ConfigOptionDto>, ApiError> {
+    run(move || backend::saver_config_get(id)).await
+}
+
+#[tauri::command]
+pub async fn saver_config_set(
+    id: String,
+    key: String,
+    value: String,
+) -> Result<Vec<ConfigOptionDto>, ApiError> {
+    run(move || backend::saver_config_set(id, key, value)).await
 }
 
 #[tauri::command]

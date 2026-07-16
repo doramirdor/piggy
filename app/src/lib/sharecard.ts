@@ -45,7 +45,7 @@ export function shareCardText(d: ShareCardData): ShareCardText {
       week,
       kicker: "My savers banked",
       big: `${formatTokens(d.tokensSaved)} tokens`,
-      sub: `this ${periodWord(d.period)} — my Claude plan lasts ${mult}`,
+      sub: `this ${periodWord(d.period)} - my Claude plan lasts ${mult}`,
       proof: "measured with holdout sessions, not vibes",
       url: URL,
     };
@@ -58,8 +58,8 @@ export function shareCardText(d: ShareCardData): ShareCardText {
       week,
       kicker: "My savers banked (estimated)",
       big: `~${formatTokens(d.tokensSaved)} tokens`,
-      sub: `this ${periodWord(d.period)} — plan lasts about ${mult}`,
-      proof: "estimated from my usage history — holdout measurement in progress",
+      sub: `this ${periodWord(d.period)} - plan lasts about ${mult}`,
+      proof: "estimated from my usage history - holdout measurement in progress",
       url: URL,
     };
   }
@@ -70,7 +70,7 @@ export function shareCardText(d: ShareCardData): ShareCardText {
     kicker: "My savers are warming up",
     big: "Still measuring",
     sub: "Piggy needs a few more sessions before it can prove the savings",
-    proof: "no holdout data yet — nothing to fake",
+    proof: "no holdout data yet - nothing to fake",
     url: URL,
   };
 }

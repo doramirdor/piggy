@@ -9,7 +9,7 @@ import {
 import type { Period, ShareCardData } from "../types";
 
 /** The share sheet: a live canvas preview of the card + Copy / Save actions.
- *  Sharing is gated on measured data — when still measuring, the buttons are
+ *  Sharing is gated on measured data - when still measuring, the buttons are
  *  disabled with a "still measuring" tooltip (docs/m4-spec.md §"Share card"). */
 export function ShareSheet({ period, onClose }: { period: Period; onClose: () => void }) {
   const [data, setData] = useState<ShareCardData | null>(null);
@@ -44,7 +44,7 @@ export function ShareSheet({ period, onClose }: { period: Period; onClose: () =>
       } else {
         // WKWebView without image clipboard support → save-and-reveal fallback.
         const res = await api.saveShareCard(canvasToPngBase64(canvas));
-        setStatus(`Clipboard unavailable — saved to ${res.path}`);
+        setStatus(`Clipboard unavailable - saved to ${res.path}`);
       }
     } catch (e) {
       showError(e);
@@ -86,12 +86,12 @@ export function ShareSheet({ period, onClose }: { period: Period; onClose: () =>
         )}
 
         <div className="sactions">
-          <div className="tooltip-wrap" title={shareable ? "" : "Still measuring — no holdout data yet"}>
+          <div className="tooltip-wrap" title={shareable ? "" : "Still measuring - no holdout data yet"}>
             <button className="btn wide" disabled={!shareable || busy} onClick={copy}>
               Copy PNG
             </button>
           </div>
-          <div className="tooltip-wrap" title={shareable ? "" : "Still measuring — no holdout data yet"}>
+          <div className="tooltip-wrap" title={shareable ? "" : "Still measuring - no holdout data yet"}>
             <button className="btn wide green" disabled={!shareable || busy} onClick={save}>
               Save
             </button>

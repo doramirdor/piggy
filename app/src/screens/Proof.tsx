@@ -29,7 +29,7 @@ export function Proof() {
       <div className="head">
         <div>
           <h1>Proof</h1>
-          <div className="sub">Holdout sessions show what Piggy really saved — measured, not vibes.</div>
+          <div className="sub">Holdout sessions show what Piggy really saved - measured, not vibes.</div>
         </div>
         <button className="btn primary" onClick={() => setShareOpen(true)}>
           Share
@@ -66,7 +66,7 @@ export function Proof() {
             ? `measured against ${h!.nHoldout} holdout sessions`
             : estimated
               ? "estimated vs your history · holdout measurement in progress"
-              : `${h?.nHoldout ?? 0} of 10 holdout sessions so far — no number faked`}
+              : `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`}
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>
@@ -98,7 +98,7 @@ export function Proof() {
           const hasDelta = v.tone === "measured" || v.tone === "estimated";
           return (
             <div className="arow" key={s.id}>
-              <div className="aname">{s.plainLabel ?? s.name}</div>
+              <div className="aname">{s.name}</div>
               {hasDelta ? (
                 <span className={`adelta${v.tone === "estimated" ? " est" : ""}`}>
                   {v.text.replace(/ (measured|estimated)$/, "")}

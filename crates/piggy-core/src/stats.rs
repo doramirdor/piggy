@@ -76,6 +76,26 @@ pub struct GroupRow {
     pub totals: Totals,
 }
 
+/// One calendar day's aggregates, keyed by the UTC date of each session's
+/// last activity (`ended_at`). Backs the day-over-day usage series.
+#[derive(Debug, Clone)]
+pub struct DailyRow {
+    /// `YYYY-MM-DD`, UTC (matching the UTC windows the rest of this module uses).
+    pub date: String,
+    pub totals: Totals,
+}
+
+/// One `(source, interface)` slice of the window — e.g. Claude Code sessions
+/// run from the desktop app vs the terminal, or Codex ditto.
+#[derive(Debug, Clone)]
+pub struct SourceRow {
+    /// `"claude-code"` | `"codex"` (see [`crate::sources::SourceKind`]).
+    pub source: String,
+    /// `"gui"` | `"tui"` | `"unknown"` (see [`crate::sources::Interface`]).
+    pub interface: String,
+    pub totals: Totals,
+}
+
 const AGG_COLS: &str = "COUNT(DISTINCT s.session_id),
      COALESCE(SUM(sm.input_tokens),0),
      COALESCE(SUM(sm.output_tokens),0),
@@ -147,6 +167,94 @@ impl Store {
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Breakdown grouped by `(source, interface)` — which tool and surface the
+    /// tokens came from. Largest first, so the UI's card order is stable.
+    pub fn by_source(&self, period: Period) -> Result<Vec<SourceRow>> {
+        let cutoff = period.cutoff();
+        let sql = format!(
+            "SELECT s.source, s.interface, {AGG_COLS}
+             FROM sessions s JOIN session_models sm ON sm.session_id = s.session_id
+             WHERE (?1 IS NULL OR s.ended_at >= ?1)
+             GROUP BY s.source, s.interface
+             ORDER BY COALESCE(SUM(sm.input_tokens+sm.output_tokens+
+                 sm.cache_creation_tokens+sm.cache_read_tokens),0) DESC,
+                 s.source ASC, s.interface ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok(SourceRow {
+                source: r.get(0)?,
+                interface: r.get(1)?,
+                totals: row_to_totals(r, 2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Per-day totals across the window, **oldest day first**, with zero-filled
+    /// gaps so callers get a continuous day-over-day series (a day with no
+    /// sessions is a real `0` bar, not a hole). Days are UTC calendar days of
+    /// `ended_at`.
+    ///
+    /// * `Today` yields a single day (today).
+    /// * `Week` / `Month` yield the last 7 / 30 calendar days including today.
+    /// * `All` spans from the first session with a timestamp through today,
+    ///   clamped to the most recent 120 days so the series stays bounded (it is
+    ///   a chart window, not an all-time total).
+    ///
+    /// Sessions with a NULL `ended_at` can't be placed on a day and are omitted,
+    /// so the summed series can under-count vs [`Self::totals`] by those rows.
+    pub fn daily_series(&self, period: Period) -> Result<Vec<DailyRow>> {
+        use std::collections::BTreeMap;
+        // Group every dated session by its UTC calendar day. Cheap: one pass,
+        // same shape as `totals`, and the caller-visible window is applied in
+        // Rust below (so `All`'s clamp and the zero-fill share one code path).
+        let sql = format!(
+            "SELECT substr(s.ended_at, 1, 10) AS d, {AGG_COLS}
+             FROM sessions s JOIN session_models sm ON sm.session_id = s.session_id
+             WHERE s.ended_at IS NOT NULL
+             GROUP BY d"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, row_to_totals(r, 1)?)))?;
+        let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
+        for row in rows {
+            let (d, t) = row?;
+            by_day.insert(d, t);
+        }
+
+        const MAX_ALL_DAYS: i64 = 120;
+        let today = chrono::Utc::now().date_naive();
+        let earliest = by_day
+            .keys()
+            .next()
+            .and_then(|k| chrono::NaiveDate::parse_from_str(k, "%Y-%m-%d").ok())
+            .unwrap_or(today)
+            .min(today);
+        let start = match period {
+            Period::Today => today,
+            Period::Week => today - chrono::Duration::days(6),
+            Period::Month => today - chrono::Duration::days(29),
+            Period::All => earliest.max(today - chrono::Duration::days(MAX_ALL_DAYS - 1)),
+        };
+
+        let mut out = Vec::new();
+        let mut d = start;
+        while d <= today {
+            let key = d.format("%Y-%m-%d").to_string();
+            out.push(DailyRow {
+                date: key.clone(),
+                totals: by_day.get(&key).cloned().unwrap_or_default(),
+            });
+            d += chrono::Duration::days(1);
         }
         Ok(out)
     }

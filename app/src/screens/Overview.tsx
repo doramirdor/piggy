@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { api } from "../ipc";
 import { StreamBars } from "../components/StreamBars";
+import { SourceGrid } from "../components/SourceGrid";
 import { SaverIcon } from "../components/SaverIcon";
 import { badgeView } from "../lib/badge";
 import { formatTokens, commafy } from "../lib/format";
 import { SweepSheet } from "./SweepSheet";
 import type { SaverRow, SweepReport } from "../types";
 
-/** Time-of-day greeting (no name — Piggy doesn't know it and won't invent one). */
+/** Time-of-day greeting (no name - Piggy doesn't know it and won't invent one). */
 function greeting(): string {
   const h = new Date().getHours();
   if (h < 12) return "Good morning";
@@ -29,11 +30,11 @@ function ProofRow({ saver }: { saver: SaverRow }) {
     <div className="feed-row">
       <SaverIcon id={saver.id} size={32} />
       <div>
-        <b>{saver.plainLabel ?? saver.name}</b>
+        <b>{saver.name}</b>
         <small>{detail}</small>
       </div>
       <em className={estimated ? "est" : ""}>
-        {delta != null ? `${delta > 0 ? "+" : "−"}${Math.round(Math.abs(delta) * 100)}%` : "—"}
+        {delta != null ? `${delta > 0 ? "+" : "−"}${Math.round(Math.abs(delta) * 100)}%` : "-"}
       </em>
     </div>
   );
@@ -41,7 +42,9 @@ function ProofRow({ saver }: { saver: SaverRow }) {
 
 export function Overview() {
   const stats = useStore((s) => s.stats);
+  const sources = useStore((s) => s.sources);
   const savers = useStore((s) => s.savers);
+  const setTab = useStore((s) => s.setTab);
   const showError = useStore((s) => s.showError);
 
   const [sweep, setSweep] = useState<SweepReport | null>(null);
@@ -51,9 +54,14 @@ export function Overview() {
     api.sweepReport().then(setSweep).catch((e) => showError(e));
   }, [showError, sweepOpen]);
 
+  // Live gate: a saving figure is only shown when at least one saver is
+  // actually enabled right now. When Piggy is off nothing is being saved, so the
+  // dashboard shows the honest "off" state instead of a stale historical number.
+  const live = (savers?.savers ?? []).some((s) => s.enabled);
+  const off = savers != null && !live;
   const h = stats?.headline;
-  const measured = h && h.label === "measured" && h.value != null;
-  const estimated = h && h.label === "estimated" && h.value != null;
+  const measured = live && h && h.label === "measured" && h.value != null;
+  const estimated = live && h && h.label === "estimated" && h.value != null;
   const mult = measured || estimated ? h!.value! : null;
 
   // Savings derived from the multiplier: to do the work you did (totalTokens,
@@ -78,7 +86,7 @@ export function Overview() {
           <div className="sub">
             {stats
               ? `Piggy saw ${commafy(stats.totalTokens)} tokens across ${stats.sessions} sessions ${stats.periodLabel.toLowerCase()}.`
-              : "Reading your Claude Code history…"}
+              : "Reading your session history…"}
           </div>
         </div>
         {stats && (
@@ -94,10 +102,10 @@ export function Overview() {
         )}
       </div>
 
-      <div className="hero">
+      <div className={`hero ${off ? "off" : ""}`}>
         <div className="hero-top">
           <div>
-            <div className="eyebrow">Your Claude plan lasts</div>
+            <div className="eyebrow">{off ? "Savings are live only" : "Your Claude plan lasts"}</div>
             {measured ? (
               <div className="big">
                 <em>{h!.value!.toFixed(1)}×</em> longer
@@ -106,44 +114,72 @@ export function Overview() {
               <div className="big">
                 <em>~{h!.value!.toFixed(1)}×</em> longer
               </div>
+            ) : off ? (
+              <div className="big measuring">Piggy is off</div>
             ) : (
               <div className="big measuring">measuring…</div>
             )}
           </div>
           {savedPct != null && <span className="delta">saved {savedPct}%</span>}
+          {off && (
+            <button className="btn" onClick={() => setTab("savers")}>
+              Turn on
+            </button>
+          )}
         </div>
         <div className="sub">
           {measured
             ? `measured against ${h!.nHoldout} holdout sessions · ${stats!.periodLabel.toLowerCase()}`
             : estimated
               ? "estimated vs your history · holdout measurement in progress"
-              : `${h?.nHoldout ?? 0} of 10 holdout sessions so far — no number faked`}
+              : off
+                ? "No savers are on, so nothing is saving right now. Turn one on to start banking tokens."
+                : `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`}
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>
 
-      <div className="metric-grid">
-        <div className="metric">
-          <small>Tokens saved</small>
-          <strong>{savedTokens != null ? formatTokens(savedTokens) : "—"}</strong>
-          <p>
-            {savedPct != null ? (
-              <>
-                {savedPct}% of what you'd have spent · <span className="meas">measured</span>
-              </>
-            ) : (
-              "measuring your first holdout"
-            )}
-          </p>
+      {live && (
+        <div className="metric-grid">
+          <div className="metric">
+            <small>Tokens saved</small>
+            <strong>{savedTokens != null ? formatTokens(savedTokens) : "-"}</strong>
+            <p>
+              {savedPct != null ? (
+                <>
+                  {savedPct}% of what you'd have spent ·{" "}
+                  {measured ? (
+                    <span className="meas">measured</span>
+                  ) : (
+                    <span className="est">estimated</span>
+                  )}
+                </>
+              ) : (
+                "measuring your first holdout"
+              )}
+            </p>
+          </div>
+          <div className="metric">
+            <small>Money avoided</small>
+            <strong>{moneyAvoided != null ? `$${moneyAvoided.toFixed(2)}` : "-"}</strong>
+            <p>
+              <span className="est">estimated</span> from your plan pricing
+            </p>
+          </div>
         </div>
-        <div className="metric">
-          <small>Money avoided</small>
-          <strong>{moneyAvoided != null ? `$${moneyAvoided.toFixed(2)}` : "—"}</strong>
-          <p>
-            <span className="est">estimated</span> from your plan pricing
-          </p>
-        </div>
-      </div>
+      )}
+
+      {sources && (
+        <>
+          <div className="sect">
+            Across your tools
+            <span className="sect-sub">
+              measured from each tool's own session logs · {stats?.periodLabel.toLowerCase()}
+            </span>
+          </div>
+          <SourceGrid sources={sources} />
+        </>
+      )}
 
       {recommended.length > 0 && sweep && (
         <div className="hint">
@@ -169,7 +205,7 @@ export function Overview() {
         </div>
       ) : (
         <div className="foot-note" style={{ marginTop: 0 }}>
-          No measured savings yet — Piggy is still gathering honest holdout data. Turn on a saver
+          No measured savings yet - Piggy is still gathering honest holdout data. Turn on a saver
           in the Savers tab to get started.
         </div>
       )}

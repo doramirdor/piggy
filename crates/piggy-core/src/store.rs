@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::parser::SessionParse;
 use crate::pricing::Pricing;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// How a session's saver assignment came to be, stored in `session_savers.source`.
 /// `rotation`/`holdout` are Piggy's A/B scheduler; `manual` is a user toggle;
@@ -54,7 +54,12 @@ impl Store {
         std::fs::create_dir_all(home)?;
         let conn = Connection::open(home.join("piggy.db"))?;
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
+            // busy_timeout lets a concurrent open wait for the background
+            // indexer's write lock instead of failing instantly with
+            // SQLITE_BUSY — otherwise a command-thread open during a heavy
+            // reindex errors out and the UI misreads it as "no sessions yet".
+            "PRAGMA busy_timeout=5000;
+             PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA foreign_keys=ON;",
         )?;
@@ -78,7 +83,10 @@ impl Store {
                 n_msgs       INTEGER NOT NULL DEFAULT 0,
                 n_user_msgs  INTEGER NOT NULL DEFAULT 0,
                 parse_errors INTEGER NOT NULL DEFAULT 0,
-                indexed_at   TEXT NOT NULL
+                indexed_at   TEXT NOT NULL,
+                source       TEXT NOT NULL DEFAULT 'claude-code',
+                interface    TEXT NOT NULL DEFAULT 'unknown',
+                client       TEXT
             );
             CREATE TABLE IF NOT EXISTS session_models (
                 session_id               TEXT NOT NULL,
@@ -120,13 +128,41 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
             CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
             CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);
-            CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);",
+            CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);
+            CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);",
+        )?;
+        // v3 → v4: sessions grew source/interface/client (multi-tool
+        // observability). ALTERs run before the index that uses the columns;
+        // pre-existing rows are Claude Code by construction (the only source
+        // v3 indexed), with an unknown surface until their next re-index.
+        if !self.column_exists("sessions", "source")? {
+            self.conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'claude-code';
+                 ALTER TABLE sessions ADD COLUMN interface TEXT NOT NULL DEFAULT 'unknown';
+                 ALTER TABLE sessions ADD COLUMN client TEXT;",
+            )?;
+        }
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source, interface);",
         )?;
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Whether `table` already has a column named `col` (SQLite pragma probe,
+    /// used for additive migrations).
+    fn column_exists(&self, table: &str, col: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for n in names {
+            if n? == col {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The `(size, mtime_ns)` last recorded for `path`, if any. Used to skip
@@ -159,8 +195,9 @@ impl Store {
         tx.execute(
             "INSERT OR REPLACE INTO sessions
              (session_id, project, git_branch, started_at, ended_at,
-              n_msgs, n_user_msgs, parse_errors, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              n_msgs, n_user_msgs, parse_errors, indexed_at,
+              source, interface, client)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 parse.session_id,
                 parse.project_path,
@@ -171,6 +208,9 @@ impl Store {
                 parse.n_user_msgs,
                 parse.parse_errors,
                 indexed_at,
+                parse.source,
+                parse.interface,
+                parse.client,
             ],
         )?;
         tx.execute(

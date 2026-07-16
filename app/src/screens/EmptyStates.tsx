@@ -3,15 +3,15 @@ import { api } from "../ipc";
 import { useStore } from "../store";
 import { PiggyMark } from "../components/PiggyMark";
 
-/** Shown when Claude Code isn't installed — friendly setup card. */
+/** Shown when Claude Code isn't installed - friendly setup card. */
 export function NoClaude() {
   return (
     <div className="empty">
       <PiggyMark size={56} className="mark" />
-      <div className="etitle">Piggy needs Claude Code</div>
+      <div className="etitle">Piggy needs Claude Code or Codex</div>
       <div className="ebody">
-        Piggy makes your Claude Code plan last longer by measuring and turning on token savers.
-        Install Claude Code first, then reopen Piggy.
+        Piggy makes your coding-agent plan last longer by measuring token use and turning on
+        savers. Install Claude Code (or Codex), then reopen Piggy.
       </div>
       <button className="btn primary" onClick={() => void api.openExternal("https://claude.com/claude-code")}>
         How to install Claude Code
@@ -57,7 +57,7 @@ export function FirstRun() {
       <div className="ebody">
         {checking
           ? "Adding up the tokens you've already spent. This only takes a moment."
-          : "Run a Claude Code session, then Piggy will start counting your savings."}
+          : "Run a Claude Code (or Codex) session, then Piggy will start counting your savings."}
       </div>
       {!checking && (
         <button className="btn primary" onClick={refresh}>

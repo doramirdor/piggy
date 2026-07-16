@@ -575,7 +575,20 @@ pub fn attribute(
     seed: u64,
 ) -> Result<SaverAttribution> {
     let rate_map = store.session_rate_map(pricing)?;
-    let rows = store.saver_group_rows(saver_id, &rate_map)?;
+    attribute_with_map(store, &rate_map, saver_id, seed)
+}
+
+/// Like [`attribute`] but reuses a prebuilt `rate_map`. Building the per-session
+/// rate map is a full-table scan; a dashboard refresh attributes every curated
+/// saver *and* the headline, so callers build the map once and pass it here to
+/// avoid ~one full scan per saver.
+pub fn attribute_with_map(
+    store: &Store,
+    rate_map: &std::collections::HashMap<String, SessionRates>,
+    saver_id: &str,
+    seed: u64,
+) -> Result<SaverAttribution> {
+    let rows = store.saver_group_rows(saver_id, rate_map)?;
 
     let on: Vec<SessionRates> = rows
         .iter()
@@ -640,7 +653,16 @@ pub fn attribute(
 /// Compute the dashboard headline (full-on vs holdout, else vs pre-install).
 pub fn headline(store: &Store, pricing: &Pricing, seed: u64) -> Result<Headline> {
     let rate_map = store.session_rate_map(pricing)?;
-    let classified = store.classified_sessions(&rate_map)?;
+    headline_with_map(store, &rate_map, seed)
+}
+
+/// Like [`headline`] but reuses a prebuilt `rate_map` (see [`attribute_with_map`]).
+pub fn headline_with_map(
+    store: &Store,
+    rate_map: &std::collections::HashMap<String, SessionRates>,
+    seed: u64,
+) -> Result<Headline> {
+    let classified = store.classified_sessions(rate_map)?;
 
     let full_on: Vec<SessionRates> = classified
         .iter()

@@ -1,4 +1,4 @@
-// Shared payload types — mirror the `#[derive(Serialize)]` structs in
+// Shared payload types - mirror the `#[derive(Serialize)]` structs in
 // app/src-tauri/src/backend.rs (all camelCase over the IPC boundary).
 
 export type Period = "today" | "week" | "month" | "all";
@@ -32,6 +32,58 @@ export interface StatsOverview {
   headline: Headline;
 }
 
+/** One (tool, surface) cell of the observability grid. */
+export interface SourceCell {
+  source: "claude-code" | "codex";
+  interface: "gui" | "tui";
+  sessions: number;
+  totalTokens: number;
+  costUsdEst: number;
+  toolPresent: boolean;
+}
+
+export interface SourcesOverview {
+  period: Period;
+  cells: SourceCell[];
+  unknownTokens: number;
+  unknownSessions: number;
+}
+
+/** One UTC calendar day of usage (day-over-day analytics series). */
+export interface DailyPoint {
+  date: string; // YYYY-MM-DD (UTC)
+  totalTokens: number;
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+  costUsdEst: number;
+  sessions: number;
+}
+
+export interface UsageSeries {
+  period: Period;
+  periodLabel: string;
+  /** Oldest day first, zero-filled so the series is continuous. */
+  points: DailyPoint[];
+}
+
+export interface ConfigChoice {
+  value: string;
+  label: string;
+  description: string;
+}
+
+/** One user-tunable saver option, resolved to its current value. */
+export interface ConfigOption {
+  key: string;
+  label: string;
+  description: string;
+  choices: ConfigChoice[];
+  default: string;
+  current: string;
+}
+
 export interface Badge {
   kind: BadgeKind;
   delta: number | null;
@@ -57,11 +109,16 @@ export interface SaverRow {
   licenseNote: string | null;
   ordering: number;
   badge: Badge;
+  /** True when the saver exposes user-tunable options (shows Configure). */
+  configurable: boolean;
 }
 
 export interface SaversState {
   masterOn: boolean;
   savers: SaverRow[];
+  /** A one-line heads-up from the last mutation (e.g. a conflicting saver was
+   * auto-disabled). Absent on plain reads. */
+  notice?: string | null;
 }
 
 export interface SweepItem {
@@ -140,6 +197,7 @@ export interface Doctor {
 
 export interface Environment {
   claudeInstalled: boolean;
+  codexInstalled: boolean;
   hasData: boolean;
   sessions: number;
 }

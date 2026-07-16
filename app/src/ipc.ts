@@ -6,6 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  ConfigOption,
   DiscoverDto,
   Doctor,
   Environment,
@@ -15,11 +16,13 @@ import type {
   SaversState,
   Settings,
   ShareCardData,
+  SourcesOverview,
   StatsOverview,
   SweepReport,
+  UsageSeries,
 } from "./types";
 
-/** "1" | "empty" | undefined — set by `dev:mock` / `VITE_MOCK=… vite build`. */
+/** "1" | "empty" | undefined - set by `dev:mock` / `VITE_MOCK=… vite build`. */
 export const MOCK_MODE: string | undefined = import.meta.env.VITE_MOCK;
 export const IS_MOCK = Boolean(MOCK_MODE);
 
@@ -34,7 +37,12 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
 export const api = {
   environment: () => call<Environment>("environment"),
   statsOverview: (period: Period) => call<StatsOverview>("stats_overview", { period }),
+  sourcesOverview: (period: Period) => call<SourcesOverview>("sources_overview", { period }),
+  usageSeries: (period: Period) => call<UsageSeries>("usage_series", { period }),
   saversList: () => call<SaversState>("savers_list"),
+  saverConfigGet: (id: string) => call<ConfigOption[]>("saver_config_get", { id }),
+  saverConfigSet: (id: string, key: string, value: string) =>
+    call<ConfigOption[]>("saver_config_set", { id, key, value }),
   saverToggle: (id: string, on: boolean) => call<SaversState>("saver_toggle", { id, on }),
   masterToggle: (on: boolean) => call<SaversState>("master_toggle", { on }),
   sweepReport: () => call<SweepReport>("sweep_report"),

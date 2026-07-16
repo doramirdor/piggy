@@ -18,7 +18,7 @@ describe("shareCardText", () => {
     expect(t.week).toBe("Jul 6 – Jul 12");
     expect(t.kicker).toBe("My savers banked");
     expect(t.big).toBe("1.2M tokens");
-    expect(t.sub).toBe("this week — my Claude plan lasts 1.7× longer");
+    expect(t.sub).toBe("this week - my Claude plan lasts 1.7× longer");
     expect(t.proof).toBe("measured with holdout sessions, not vibes");
     expect(t.url).toBe("piggy.app");
   });
@@ -37,7 +37,7 @@ describe("shareCardText", () => {
     });
     expect(t.kicker).toContain("estimated");
     expect(t.big).toBe("~800k tokens");
-    expect(t.proof).toBe("estimated from my usage history — holdout measurement in progress");
+    expect(t.proof).toBe("estimated from my usage history - holdout measurement in progress");
   });
 
   it("never fabricates numbers when there is not enough data", () => {
@@ -49,12 +49,12 @@ describe("shareCardText", () => {
       shareable: false,
     });
     expect(t.big).toBe("Still measuring");
-    expect(t.proof).toBe("no holdout data yet — nothing to fake");
+    expect(t.proof).toBe("no holdout data yet - nothing to fake");
     expect(t.sub).not.toMatch(/\d/);
   });
 
   it("does not claim a multiplier that is missing even when measured", () => {
     const t = shareCardText({ ...base, multiplier: null });
-    expect(t.sub).toBe("this week — my Claude plan lasts longer");
+    expect(t.sub).toBe("this week - my Claude plan lasts longer");
   });
 });
