@@ -5,9 +5,10 @@
 //! On any create/modify we run an incremental index so the DB stays current.
 //!
 //! The watcher is exposed as a [`SessionWatcher`] the GUI can drive, plus the
-//! `piggy watch` CLI. It uses a **poll** watcher (deterministic across
-//! platforms, and reliable for tests) with a configurable interval; events are
-//! debounced so a streaming write burst collapses into one index pass.
+//! `piggy watch` CLI. Production uses the platform's native kernel-push watcher
+//! (FSEvents on macOS) for near-zero idle CPU; tests opt into a deterministic
+//! poll backend via [`WatchBackend::Poll`]. Events are debounced so a streaming
+//! write burst collapses into one index pass.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -24,10 +25,25 @@ use crate::state::PiggyState;
 use crate::store::Store;
 use crate::tagging::snapshot_new_session;
 
-/// Default poll interval for the production watcher.
+/// Default poll interval for the poll backend (tests, CLI fallback).
 pub const DEFAULT_POLL: Duration = Duration::from_secs(2);
 /// After the first event, wait this long for the burst to settle before acting.
 const SETTLE: Duration = Duration::from_millis(120);
+
+/// Which OS mechanism backs the watcher.
+///
+/// Production uses [`WatchBackend::Native`] — the platform's kernel-push watcher
+/// (FSEvents on macOS), which does no work while idle. [`WatchBackend::Poll`]
+/// re-`stat`s every watched path each interval, so its CPU cost is O(paths)
+/// *forever*; on a large Claude history (10k+ session files) that is a steady
+/// slice of a core even with nothing happening. Poll is therefore test-only,
+/// where a fixed interval buys deterministic, cross-platform timing.
+pub enum WatchBackend {
+    /// Kernel-push notifications (FSEvents/inotify/…). Near-zero idle cost.
+    Native,
+    /// Fixed-interval polling. Deterministic, but O(paths) CPU every tick.
+    Poll(Duration),
+}
 
 /// What a [`SessionWatcher::tick`] did for one session file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +59,7 @@ pub struct WatchEvent {
 /// Codex sessions). Owns its own [`Store`] handle.
 pub struct SessionWatcher {
     // Field order matters for drop: the watcher must drop before the receiver.
-    _watcher: PollWatcher,
+    _watcher: Box<dyn Watcher + Send>,
     rx: Receiver<notify::Result<notify::Event>>,
     roots: Vec<SourceRoot>,
     store: Store,
@@ -51,40 +67,67 @@ pub struct SessionWatcher {
 
 impl SessionWatcher {
     /// Watch `projects_dir` (Claude Code logs), persisting into the DB under
-    /// `home`. Uses [`DEFAULT_POLL`].
+    /// `home`. Production constructor: uses the native kernel-push backend.
     pub fn new(projects_dir: PathBuf, home: &Path) -> Result<Self> {
-        Self::with_poll_interval(projects_dir, home, DEFAULT_POLL)
+        Self::for_single_root(projects_dir, home, WatchBackend::Native)
     }
 
-    /// Watch a Claude Code projects dir with an explicit poll interval (tests
-    /// use a short one).
+    /// Watch a Claude Code projects dir with an explicit poll interval. Test-only:
+    /// polling gives deterministic, cross-platform timing at the cost of steady
+    /// CPU, which production avoids via [`WatchBackend::Native`].
     pub fn with_poll_interval(
         projects_dir: PathBuf,
         home: &Path,
         interval: Duration,
     ) -> Result<Self> {
-        // The Claude root is created if missing (Piggy has always done so for
-        // its primary source); multi-root callers pass only dirs that exist.
+        Self::for_single_root(projects_dir, home, WatchBackend::Poll(interval))
+    }
+
+    /// Shared single-root setup: create the Claude root if missing (Piggy has
+    /// always done so for its primary source), then watch it with `backend`.
+    fn for_single_root(projects_dir: PathBuf, home: &Path, backend: WatchBackend) -> Result<Self> {
         std::fs::create_dir_all(&projects_dir)
             .with_context(|| format!("creating {}", projects_dir.display()))?;
         Self::with_roots(
             vec![SourceRoot::new(projects_dir, SourceKind::ClaudeCode)],
             home,
-            interval,
+            backend,
         )
     }
 
     /// Watch several source roots at once (e.g. Claude Code projects + Codex
     /// sessions). Roots must exist; each is watched recursively.
-    pub fn with_roots(roots: Vec<SourceRoot>, home: &Path, interval: Duration) -> Result<Self> {
+    pub fn with_roots(roots: Vec<SourceRoot>, home: &Path, backend: WatchBackend) -> Result<Self> {
+        // The native (FSEvents) backend reports canonical, symlink-resolved paths.
+        // `claude_owns` routes each event by prefix-matching against these root
+        // dirs, so canonicalize them once up front — otherwise a symlinked
+        // ancestor (macOS's /var → /private/var, or a symlinked home) makes every
+        // event path fail `starts_with`, and new sessions never get snapshot-
+        // tagged. Fall back to the original path if it can't be resolved yet.
+        let roots: Vec<SourceRoot> = roots
+            .into_iter()
+            .map(|r| SourceRoot::new(r.dir.canonicalize().unwrap_or(r.dir), r.kind))
+            .collect();
         let (tx, rx) = mpsc::channel();
-        let mut watcher = PollWatcher::new(
-            move |res| {
-                let _ = tx.send(res);
-            },
-            Config::default().with_poll_interval(interval),
-        )
-        .context("starting the filesystem poll watcher")?;
+        // `tx` is moved into whichever arm runs — a value may be moved in several
+        // mutually-exclusive match arms, since only one ever executes.
+        let mut watcher: Box<dyn Watcher + Send> = match backend {
+            WatchBackend::Native => Box::new(
+                notify::recommended_watcher(move |res| {
+                    let _ = tx.send(res);
+                })
+                .context("starting the filesystem watcher")?,
+            ),
+            WatchBackend::Poll(interval) => Box::new(
+                PollWatcher::new(
+                    move |res| {
+                        let _ = tx.send(res);
+                    },
+                    Config::default().with_poll_interval(interval),
+                )
+                .context("starting the filesystem poll watcher")?,
+            ),
+        };
         for root in &roots {
             watcher
                 .watch(&root.dir, RecursiveMode::Recursive)

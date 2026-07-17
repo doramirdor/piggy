@@ -391,6 +391,53 @@ fn watcher_indexes_and_tags_a_new_session() {
 }
 
 // ---------------------------------------------------------------------------
+// Native-backend fidelity: production uses FSEvents (WatchBackend::Native), not
+// polling, to keep idle CPU near zero. The smoke test above proves the poll
+// backend; this one proves the native backend actually delivers a new-file
+// event end-to-end, so the CPU win doesn't come at the cost of missing sessions.
+// macOS-only: Native maps to FSEvents there, which is the platform Piggy ships.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_watcher_observes_a_new_session() {
+    let sb = Sandbox::new();
+    let pricing = Pricing::embedded();
+
+    let mut state = PiggyState::default();
+    state.savers.insert("rtk".into(), saver("rtk", true, None));
+    state.ensure_created_at();
+    state.save().unwrap();
+
+    // `new` uses WatchBackend::Native (FSEvents on macOS).
+    let mut watcher = SessionWatcher::new(sb.projects(), &sb.home()).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/basic.jsonl");
+    let dst = sb.projects().join("native-sess.jsonl");
+    std::fs::copy(&src, &dst).unwrap();
+
+    // FSEvents has coalescing latency, so poll a few ticks (~12s budget) for the
+    // event rather than assuming one tick catches it.
+    let mut events = Vec::new();
+    for _ in 0..6 {
+        events = watcher.tick(Duration::from_secs(2), &pricing).unwrap();
+        if events.iter().any(|e| e.session_id == "native-sess") {
+            break;
+        }
+    }
+    let ev = events
+        .iter()
+        .find(|e| e.session_id == "native-sess")
+        .expect("the native watcher should observe the new .jsonl");
+    assert!(ev.newly_tagged, "a brand-new session gets a saver snapshot");
+    assert!(watcher.store().session_count().unwrap() >= 1);
+    let tags = watcher.store().session_savers("native-sess").unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].saver_id, "rtk");
+}
+
+// ---------------------------------------------------------------------------
 // Agent workflow journals are not sessions and must not be indexed as one.
 // ---------------------------------------------------------------------------
 //

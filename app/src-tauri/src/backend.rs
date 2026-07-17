@@ -70,8 +70,9 @@ struct AttrBundle {
 
 /// Invalidate the attribution cache so the next dashboard read recomputes.
 /// Called after anything that changes the session data (indexing, rotation
-/// tagging, baseline anchoring).
-fn bump_attr_version() {
+/// tagging, baseline anchoring) — including the background watcher's incremental
+/// re-index, which is the steady-state path once the app is running.
+pub fn bump_attr_version() {
     ATTR_INDEX_VERSION.fetch_add(1, Ordering::Relaxed);
 }
 

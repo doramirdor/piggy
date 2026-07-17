@@ -142,7 +142,7 @@ fn background_loop(handle: tauri::AppHandle) {
     let home = config::piggy_home();
     let pricing = Pricing::load(&home);
     let mut watcher =
-        match SessionWatcher::with_roots(roots, &home, piggy_core::watcher::DEFAULT_POLL) {
+        match SessionWatcher::with_roots(roots, &home, piggy_core::WatchBackend::Native) {
             Ok(w) => w,
             Err(_) => return,
         };
@@ -155,6 +155,12 @@ fn background_loop(handle: tauri::AppHandle) {
         match watcher.tick(WATCH_TICK, &pricing) {
             Ok(events) => {
                 if !events.is_empty() {
+                    // The tick incrementally re-indexed the touched files, so the
+                    // cached attribution bundle is now stale. Invalidate it before
+                    // telling the UI to refresh — otherwise the dashboard keeps
+                    // reading the frozen startup bundle (headline multiplier and
+                    // saver badges never move until a rotation tick or restart).
+                    backend::bump_attr_version();
                     pending_rotation = true;
                     let _ = handle.emit(STATS_UPDATED, ());
                 } else if pending_rotation && backend::rotation_tick_if_enabled() {

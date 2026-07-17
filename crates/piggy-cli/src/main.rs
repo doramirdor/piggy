@@ -1335,7 +1335,7 @@ fn cmd_watch(once: bool) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ");
         (
-            SessionWatcher::with_roots(roots, &home, piggy_core::watcher::DEFAULT_POLL)?,
+            SessionWatcher::with_roots(roots, &home, piggy_core::WatchBackend::Native)?,
             label,
         )
     };

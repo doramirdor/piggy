@@ -47,4 +47,4 @@ pub use state::PiggyState;
 pub use stats::{GroupRow, Period, SourceRow, Totals};
 pub use store::{SaverTag, Store};
 pub use sweep::{SweepItem, SweepReport};
-pub use watcher::{SessionWatcher, WatchEvent};
+pub use watcher::{SessionWatcher, WatchBackend, WatchEvent};
