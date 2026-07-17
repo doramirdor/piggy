@@ -74,6 +74,50 @@ fn insert_session(
     store.upsert_session(&parse, pricing, &path, 1, 1).unwrap();
 }
 
+/// Insert a session with an explicit `started_at`, for the tests that care which
+/// era a session belongs to. The headline picks the live saver set by recency, so
+/// these fixtures need real timestamps rather than the shared constant one.
+fn insert_session_at(
+    store: &mut Store,
+    pricing: &Pricing,
+    id: &str,
+    turns: u64,
+    output: u64,
+    started_at: &str,
+) {
+    let mut models = BTreeMap::new();
+    models.insert(
+        "claude-sonnet-4-5".to_string(),
+        ModelTokens {
+            input_tokens: 400,
+            output_tokens: output,
+            cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+        },
+    );
+    let parse = SessionParse {
+        session_id: id.to_string(),
+        source: "claude-code".to_string(),
+        interface: "unknown".to_string(),
+        client: None,
+        project_path: Some("/proj".into()),
+        git_branch: None,
+        first_ts: Some(started_at.to_string()),
+        last_ts: Some(started_at.to_string()),
+        models,
+        n_assistant_msgs: turns,
+        n_user_msgs: turns,
+        n_tool_results: 0,
+        sidechain: ModelTokens::default(),
+        tool_use_counts: BTreeMap::new(),
+        parse_errors: 0,
+    };
+    store
+        .upsert_session(&parse, pricing, &format!("/proj/{id}.jsonl"), 1, 1)
+        .unwrap();
+}
+
 /// Uniform in `[0.0, 1.0)` from the deterministic PRNG (matches builder helper).
 fn unit(rng: &mut XorShift64) -> f64 {
     rng.next_u64() as f64 / (u64::MAX as f64 + 1.0)
@@ -1393,4 +1437,207 @@ fn every_saver_switched_off_by_hand_publishes_no_headline() {
         "no saver was running, so there is no savings multiplier to publish: the drift \
          between the eras is not a saving"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 17. The headline describes the saver set you run NOW, not an average of every
+//     set you have ever run (#6).
+// ---------------------------------------------------------------------------
+//
+// A session records no saver set of its own, so the ON group used to pool every
+// era the setup had ever been in. Install a saver, uninstall one, hand-toggle
+// one, and "everything on" quietly means something different on either side of
+// that moment. The pooled median then tracked the era MIX rather than the
+// savers: with saver behaviour held constant and only the ratio of old-era to
+// new-era sessions varying, the multiplier swung from 3.84x to 1.93x, and at a
+// 50/50 mix printed a figure describing no setup the user had ever run.
+//
+// Uses uninstall churn (no manual tags anywhere) on purpose: that is the form
+// that used to be badged MEASURED, so it is the strongest version of the bug.
+
+/// Build a store where `n_old` full-on sessions ran rtk+caveman and `n_new` ran
+/// rtk alone (caveman uninstalled), against clean holdouts. Returns the headline.
+fn churn_store(n_old: usize, n_new: usize) -> attribution::Headline {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    // A separate stream per era on purpose: with one shared RNG, changing n_old
+    // would shift the draws for the NEW-era sessions too, and the sweep below
+    // would measure the fixture instead of the code.
+    let mut rng = XorShift64::new(0x00CB_11A5);
+
+    // Baseline: nothing on. Same treatment in either era.
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session_at(
+            &mut store, &pricing, &id, turns, out, "2026-01-01T00:00:00.000Z",
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+    // OLD era: rtk + caveman, both scheduler-run. Heavier savings (500/turn).
+    let mut rng = XorShift64::new(0x00DA_7A01);
+    for i in 0..n_old {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (500.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("old-{i}");
+        insert_session_at(
+            &mut store, &pricing, &id, turns, out, "2026-02-01T00:00:00.000Z",
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    SaverTag::new("caveman", true, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+    // NEW era: caveman uninstalled, so it has no row at all. rtk alone
+    // (1000/turn). This is the setup the user actually runs.
+    let mut rng = XorShift64::new(0x00DA_7A02);
+    for i in 0..n_new {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("new-{i}");
+        insert_session_at(
+            &mut store, &pricing, &id, turns, out, "2026-03-01T00:00:00.000Z",
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+    attribution::headline(&store, &pricing, 0x4242).unwrap()
+}
+
+#[test]
+fn the_headline_tracks_the_live_saver_set_not_the_era_mix() {
+    // Ground truth for the live setup (rtk alone): the 0-old case, where no other
+    // era exists to blend in.
+    let truth = churn_store(0, 20).multiplier.unwrap();
+
+    // Now hold saver behaviour fixed and vary ONLY how many old-era sessions sit
+    // in the DB alongside. The live-set answer must not move.
+    for n_old in [0usize, 4, 10, 16, 20] {
+        let hl = churn_store(n_old, 20);
+        let mult = hl.multiplier.unwrap();
+        eprintln!(
+            "[churn] old={n_old:>2} new=20 -> n_full_on={} mult={mult:.4} (truth {truth:.4})",
+            hl.n_full_on
+        );
+        assert_eq!(
+            hl.n_full_on, 20,
+            "only the 20 live-set sessions belong in the ON group; the {n_old} sessions \
+             from the abandoned rtk+caveman setup are a different treatment"
+        );
+        assert!(
+            (mult - truth).abs() < 1e-9,
+            "the headline moved from {truth:.4} to {mult:.4} purely because {n_old} \
+             sessions from an old setup exist: it is tracking the era mix, not the savers"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 18. A stale era must not win the headline and be badged measured (#7).
+// ---------------------------------------------------------------------------
+//
+// `pick_group` prefers the randomized group whenever it alone clears MIN_GROUP.
+// With >= 10 sessions from an OLD randomized era, that branch won outright and
+// every session describing the user's live setup was discarded: the dashboard
+// made its strongest claim, MEASURED with no note and no hedge, about a
+// configuration the user had abandoned. Recency has to beat seniority here.
+
+#[test]
+fn a_stale_randomized_era_does_not_win_the_headline() {
+    // 12 old-era sessions is enough to clear MIN_GROUP on its own, which is
+    // exactly what used to let it take over.
+    let hl = churn_store(12, 20);
+    eprintln!(
+        "[stale] n_full_on={} ceiling={:?} mult={:?}",
+        hl.n_full_on, hl.ceiling, hl.multiplier
+    );
+    assert_eq!(
+        hl.n_full_on, 20,
+        "the 12 old randomized sessions must not displace the 20 that describe the \
+         setup the user is running now"
+    );
+    let truth = churn_store(0, 20).multiplier.unwrap();
+    assert!(
+        (hl.multiplier.unwrap() - truth).abs() < 1e-9,
+        "the headline must describe the live setup, not the abandoned one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 19. The live-set vote must be deterministic on tied timestamps.
+// ---------------------------------------------------------------------------
+//
+// `max_by` returns the LAST maximum and `classified` is built by iterating a
+// HashMap, whose order Rust re-randomizes per instance. So when the newest
+// full-on sessions of two different saver sets tie on started_at, `live_set` was
+// decided by hash order: the same database backed two different headline
+// numbers between two refreshes IN ONE PROCESS, both badged the same. Real logs
+// carry millisecond timestamps and do not collide, but the test helpers stamp a
+// constant one, so this is a live trap for future fixtures.
+
+#[test]
+fn the_live_set_vote_is_deterministic_when_timestamps_tie() {
+    fn build() -> attribution::Headline {
+        let home = tempfile::tempdir().unwrap();
+        let pricing = Pricing::embedded();
+        let mut store = Store::open(home.path()).unwrap();
+        let mut rng = XorShift64::new(0x0071_E000);
+        for i in 0..12 {
+            let turns = 8 + rng.below(4) as u64;
+            let out = (2000.0 * noise(&mut rng, 0.2) * turns as f64).round() as u64;
+            let id = format!("holdout-{i}");
+            insert_session_at(&mut store, &pricing, &id, turns, out, "2026-01-01T00:00:00.000Z");
+            store
+                .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+                .unwrap();
+        }
+        // Two saver sets whose newest sessions share an EXACT timestamp.
+        for i in 0..12 {
+            let turns = 8 + rng.below(4) as u64;
+            let out = (500.0 * noise(&mut rng, 0.2) * turns as f64).round() as u64;
+            let id = format!("setA-{i}");
+            insert_session_at(&mut store, &pricing, &id, turns, out, "2026-03-01T00:00:00.000Z");
+            store
+                .set_session_savers(
+                    &id,
+                    &[
+                        SaverTag::new("rtk", true, source::ROTATION),
+                        SaverTag::new("caveman", true, source::ROTATION),
+                    ],
+                )
+                .unwrap();
+
+            let turns = 8 + rng.below(4) as u64;
+            let out = (1000.0 * noise(&mut rng, 0.2) * turns as f64).round() as u64;
+            let id = format!("setB-{i}");
+            insert_session_at(&mut store, &pricing, &id, turns, out, "2026-03-01T00:00:00.000Z");
+            store
+                .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+                .unwrap();
+        }
+        attribution::headline(&store, &pricing, 0x5150).unwrap()
+    }
+
+    // Fresh Store per call means a fresh HashMap, which is what re-rolls the
+    // iteration order. One build is not a test; the point is that they agree.
+    let first = build().multiplier.unwrap();
+    for _ in 0..25 {
+        let m = build().multiplier.unwrap();
+        assert!(
+            (m - first).abs() < 1e-9,
+            "the headline changed from {first:.4} to {m:.4} on byte-identical data: the \
+             live-set vote is being decided by HashMap order, so one database backs two \
+             different numbers between refreshes"
+        );
+    }
 }

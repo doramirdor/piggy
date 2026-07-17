@@ -156,7 +156,10 @@ export function Overview() {
                 (h!.note ?? "estimated")
               : off
                 ? "No savers are on, so nothing is saving right now. Turn one on to start banking tokens."
-                : `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`}
+                : // Also from the backend: which side is short is not always the
+                  // holdout, and saying "15 of 10 holdout sessions" when it isn't
+                  // is worse than saying nothing.
+                  (h?.note ?? `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`)}
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>

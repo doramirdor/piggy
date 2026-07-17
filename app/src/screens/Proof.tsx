@@ -67,7 +67,7 @@ export function Proof() {
             : estimated
               ? // The backend names the reason; see Headline.note.
                 (h!.note ?? "estimated")
-              : `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`}
+              : (h?.note ?? `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`)}
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>

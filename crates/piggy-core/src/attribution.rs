@@ -236,6 +236,27 @@ pub enum HeadlineBaseline {
     None,
 }
 
+/// One session, classified, with what it takes to know whether it is comparable
+/// to another one.
+#[derive(Debug, Clone)]
+struct ClassifiedSession {
+    group: SessionGroup,
+    rates: SessionRates,
+    /// The savers that were ON, canonical (`"caveman+rtk"`). Two full-on sessions
+    /// only describe the same treatment when this matches. Nothing else in a
+    /// session records which savers existed at the time, so without it a
+    /// "rtk + caveman on" era and a later "rtk on" era pool into one median that
+    /// describes neither.
+    on_set: String,
+    /// For picking the CURRENT set. `None` sorts oldest, which is NOT inherently
+    /// the safe end: it means an undated era loses to a dated one, so if the
+    /// user's live era were the undated one, an abandoned setup would win the
+    /// vote. That is only harmless under an assumption worth stating, namely that
+    /// sessions do carry timestamps: `started_at` is `None` only when not one
+    /// line of the log was dated, which Claude Code and Codex never produce.
+    started_at: Option<String>,
+}
+
 /// The dashboard headline.
 #[derive(Debug, Clone)]
 pub struct Headline {
@@ -374,16 +395,22 @@ impl Store {
     fn classified_sessions(
         &self,
         rate_map: &std::collections::HashMap<String, SessionRates>,
-    ) -> Result<Vec<(SessionGroup, SessionRates)>> {
-        // Pull every tag, group by session in Rust.
-        let mut stmt = self
-            .conn
-            .prepare("SELECT session_id, enabled, source FROM session_savers")?;
+    ) -> Result<Vec<ClassifiedSession>> {
+        // Pull every tag, group by session in Rust. `started_at` comes along so
+        // the caller can tell which saver set is the CURRENT one: "everything on"
+        // means different things before and after an install or a toggle.
+        let mut stmt = self.conn.prepare(
+            "SELECT ss.session_id, ss.saver_id, ss.enabled, ss.source, s.started_at
+             FROM session_savers ss
+             LEFT JOIN sessions s ON s.session_id = ss.session_id",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)? != 0,
-                r.get::<_, String>(2)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         })?;
         /// What one session's saver tags add up to. Was a tuple; grew a field per
@@ -392,6 +419,14 @@ impl Store {
             any_holdout: bool,
             any_pre_install: bool,
             any_enabled: bool,
+            /// The savers that were ON. Two full-on sessions only describe the
+            /// same treatment if this matches: a session carries no other record
+            /// of which savers existed at the time, so without it the ON group
+            /// silently pools "rtk + caveman on" with "rtk on" as though they
+            /// were one thing. Kept in step with `any_enabled` by construction,
+            /// since both come off the same row's `enabled`.
+            on_set: std::collections::BTreeSet<String>,
+            started_at: Option<String>,
             /// A saver was off because the SCHEDULER turned it off, i.e. this is a
             /// single-off rotation slot. Deliberately not "any saver was off": a
             /// saver the user switched off by hand is off in every session
@@ -407,6 +442,8 @@ impl Store {
                     any_holdout: false,
                     any_pre_install: false,
                     any_enabled: false,
+                    on_set: std::collections::BTreeSet::new(),
+                    started_at: None,
                     any_scheduler_disabled: false,
                     all_randomized: true,
                 }
@@ -416,16 +453,20 @@ impl Store {
         let mut per_session: std::collections::HashMap<String, Facts> =
             std::collections::HashMap::new();
         for row in rows {
-            let (sid, enabled, src) = row?;
+            let (sid, saver_id, enabled, src, started_at) = row?;
             let f = per_session.entry(sid).or_insert_with(Facts::new);
             f.any_holdout |= src == source::HOLDOUT;
             f.any_pre_install |= src == source::PRE_INSTALL;
             if enabled {
                 f.any_enabled = true;
+                f.on_set.insert(saver_id);
             } else if is_randomized(&src) {
                 f.any_scheduler_disabled = true;
             }
             f.all_randomized &= is_randomized(&src);
+            if f.started_at.is_none() {
+                f.started_at = started_at;
+            }
         }
         let mut out = Vec::new();
         for (sid, f) in per_session {
@@ -474,7 +515,12 @@ impl Store {
             } else {
                 SessionGroup::Mixed
             };
-            out.push((group, rates.clone()));
+            out.push(ClassifiedSession {
+                group,
+                rates: rates.clone(),
+                on_set: f.on_set.into_iter().collect::<Vec<_>>().join("+"),
+                started_at: f.started_at,
+            });
         }
         Ok(out)
     }
@@ -691,17 +737,15 @@ fn pick_group(
 /// Pick the headline's baseline from the clean and contaminated holdouts.
 ///
 /// Deliberately NOT `pick_group`. That helper pools its two groups when the
-/// preferred one is thin, and prices the confounding with the `estimated` cap.
-/// What it does NOT do is guarantee that its two groups describe the same saver
-/// set: the full-on groups never have, because a session carries no saver-set
-/// identity, so installing, uninstalling or hand-switching a saver silently
-/// splits history into eras that the ON group pools regardless. That is a real
-/// and pre-existing gap (see the issue tracker), and the `estimated` cap plus
-/// the headline's note is what currently prices it.
+/// preferred one is thin, which is sound because its callers hand it groups that
+/// are the same treatment state and differ only in provenance: pooling buys
+/// sample size for one estimand, and the `estimated` cap prices the confounding.
+/// (The full-on side upholds that by scoping to one saver set before splitting;
+/// see `live_set` in `headline_with_map`.)
 ///
-/// The baseline is where that would stop being a blur and become a lie, because
-/// the two groups here are not eras of a moving setup, they are the presence or
-/// absence of the counterfactual the headline names. A clean holdout is "every
+/// The two groups here are not the same treatment state. They are the presence
+/// or absence of the very counterfactual the headline names. A clean holdout is
+/// "every
 /// saver off"; a contaminated one is "every saver off except the one you pinned,
 /// which kept running". A median across the union estimates neither population:
 /// it tracks whichever arm is larger, so the headline would move with the mix
@@ -847,31 +891,71 @@ pub fn headline_with_map(
 ) -> Result<Headline> {
     let classified = store.classified_sessions(rate_map)?;
 
-    let full_on_randomized: Vec<SessionRates> = classified
+    let is_full_on =
+        |g: SessionGroup| g == SessionGroup::FullOn || g == SessionGroup::FullOnObservational;
+
+    // Which saver set is the user actually running? The one their most recent
+    // full-on session used. A session records no saver set of its own, so without
+    // this the ON group pools every era the setup has ever been in: install a
+    // saver, uninstall one, hand-toggle one, and "everything on" quietly means
+    // something different on either side of that moment. The pooled median then
+    // tracks the era MIX rather than the savers, and the headline swings with it
+    // even when no saver's behaviour changed at all.
+    //
+    // Recency, not majority: "your plan lasts N.N x longer" is a claim about the
+    // setup you have now, so a bigger pile of sessions from a configuration you
+    // abandoned should not outvote it. Deliberately not read from PiggyState:
+    // the classification stays a pure function of what the sessions recorded.
+    // The `session_id` tiebreak is not decoration. `max_by` returns the LAST
+    // maximum and `classified` comes out of a HashMap, whose order Rust
+    // re-randomizes per instance, so on equal timestamps the winner changed
+    // between two refreshes in one process: the same database backing two
+    // different `measured` numbers. Real logs carry millisecond timestamps and do
+    // not collide, but "unreachable today" is not a reason to leave the headline
+    // deciding itself by hash order.
+    let live_set: Option<&str> = classified
         .iter()
-        .filter(|(g, _)| *g == SessionGroup::FullOn)
-        .map(|(_, r)| r.clone())
-        .collect();
-    let full_on_observational: Vec<SessionRates> = classified
-        .iter()
-        .filter(|(g, _)| *g == SessionGroup::FullOnObservational)
-        .map(|(_, r)| r.clone())
-        .collect();
-    let holdout_clean: Vec<SessionRates> = classified
-        .iter()
-        .filter(|(g, _)| *g == SessionGroup::Holdout)
-        .map(|(_, r)| r.clone())
-        .collect();
-    let holdout_contaminated: Vec<SessionRates> = classified
-        .iter()
-        .filter(|(g, _)| *g == SessionGroup::HoldoutContaminated)
-        .map(|(_, r)| r.clone())
-        .collect();
-    let pre_install: Vec<SessionRates> = classified
-        .iter()
-        .filter(|(g, _)| *g == SessionGroup::PreInstall)
-        .map(|(_, r)| r.clone())
-        .collect();
+        .filter(|c| is_full_on(c.group))
+        .max_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.rates.session_id.cmp(&b.rates.session_id))
+        })
+        .map(|c| c.on_set.as_str());
+
+    let full_on_of = |want: SessionGroup| -> Vec<SessionRates> {
+        classified
+            .iter()
+            .filter(|c| c.group == want && Some(c.on_set.as_str()) == live_set)
+            .map(|c| c.rates.clone())
+            .collect()
+    };
+    let full_on_randomized = full_on_of(SessionGroup::FullOn);
+    let full_on_observational = full_on_of(SessionGroup::FullOnObservational);
+
+    // The baseline is deliberately NOT scoped the same way, and the reason is a
+    // trade rather than a symmetry. Every holdout is "nothing on", so the
+    // treatment really is identical across eras, but that answers the wrong
+    // question: the hazard here is era drift, which randomization only balances
+    // WITHIN an era. A baseline spanning eras therefore carries the same drift
+    // the ON side was just scoped against, and the multiplier moves with the
+    // holdout era mix.
+    //
+    // It stays unscoped anyway because holdouts are ~1 in 10 sessions: scope them
+    // to one era and MIN_GROUP becomes unreachable for most users, so the honest
+    // headline would be "measuring" more or less permanently. Sample viability
+    // beats era purity on this arm. Filed rather than hidden, and said out loud
+    // here rather than papered over with "there is nothing to scope".
+    let of_group = |want: SessionGroup| -> Vec<SessionRates> {
+        classified
+            .iter()
+            .filter(|c| c.group == want)
+            .map(|c| c.rates.clone())
+            .collect()
+    };
+    let holdout_clean = of_group(SessionGroup::Holdout);
+    let holdout_contaminated = of_group(SessionGroup::HoldoutContaminated);
+    let pre_install = of_group(SessionGroup::PreInstall);
 
     // Prefer a live holdout; fall back to observational pre-install history.
     // A clean holdout is the randomized all-off counterfactual the "N.N× longer"

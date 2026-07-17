@@ -378,10 +378,27 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
     } else {
         "not_enough_data"
     };
-    // Say which of the three reasons applies, in the user's terms. Order matters:
-    // a pinned ON side is the thing the user can actually undo, so lead with it.
-    let note = if !estimated {
+    // Say which reason applies, in the user's terms. Order matters: a pinned ON
+    // side is the thing the user can actually undo, so lead with it.
+    let note = if measured {
         None
+    } else if !estimated {
+        // Not enough data: name the side that is actually short. Both screens
+        // hard-coded "N of 10 holdout sessions so far", which reads as nonsense
+        // ("15 of 10") whenever the holdout is fine and the full-on side is the
+        // thin one. That is the normal state right after the saver set changes,
+        // when Piggy restarts counting on the setup you now run.
+        Some(if hl.n_baseline < MIN_GROUP {
+            format!(
+                "{} of {} holdout sessions so far · no number faked",
+                hl.n_baseline, MIN_GROUP
+            )
+        } else {
+            format!(
+                "{} of {} sessions on your current saver set so far · no number faked",
+                hl.n_full_on, MIN_GROUP
+            )
+        })
     } else if !hl.on_randomized {
         // Covers a saver switched on by hand AND one switched off by hand: either
         // way Piggy stopped rotating it, which is the part that matters here.

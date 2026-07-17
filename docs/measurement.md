@@ -77,7 +77,22 @@ Per saver X:
   formula would otherwise read `1 - 0/median_off = 1.0` and claim a perfect saving from no
   data. A non-empty ON group that medians to zero is different, and is a real 100% reduction.
 - Overall headline: full-on vs holdout only (not pre-install, unless zero holdouts exist,
-  then labeled `vs. history (observational)`). The same both-sides rule applies here: a
+  then labeled `vs. history (observational)`). The full-on side is scoped to the saver set
+  from your **most recent** full-on session, i.e. the setup you are running now. A session
+  records no saver set of its own, so without that scoping the ON group pools every era the
+  setup has ever been in: install a saver, uninstall one, hand-toggle one, and "everything
+  on" quietly means something different on either side of that moment. The median then
+  tracks the era mix rather than the savers. Recency rather than majority, because
+  "your plan lasts N.N× longer" is a claim about the setup you have now: a larger pile of
+  sessions from a configuration you abandoned must not outvote it. Changing your saver set
+  therefore restarts the full-on count, and the headline honestly reads "measuring" until
+  10 sessions of the new setup land. The baseline is deliberately *not* scoped that way,
+  and that is a trade, not a symmetry: every holdout is "nothing on" so the treatment does
+  match across eras, but era drift still rides along, and randomization only balances drift
+  *within* an era. Holdouts are ~1 in 10 sessions, so scoping them to one era would put the
+  10-session bar out of reach for most people and the headline would never light up at all.
+  Sample viability wins on that arm, and the cost is stated rather than hidden.
+  The same both-sides rule applies here: a
   full-on session counts as randomized only if **every** saver in it was on because the
   scheduler said so. A session where any saver is pinned on by hand is an observational
   full-on, so a holdout baseline alone does not earn `measured` and the headline is
