@@ -59,8 +59,19 @@ baseline.
 ## Savings math
 
 Per saver X:
-- ON group: sessions where X enabled. OFF group: sessions where X disabled
-  (single-off + holdout + pre-install baseline, flagged separately).
+- ON group: sessions where X enabled. OFF group: sessions where X disabled. **Both** sides
+  additionally require every *other* saver to be on, so the only thing differing between
+  them is X. Rotation turns X off in two different slots and they are not the same
+  treatment: the single-off slot (X off, everything else running) isolates X, while the
+  holdout (X off and everything else off too) is the whole-bundle comparison the headline
+  makes. Pooling them put X's number up against a mix of both, so the other savers'
+  savings landed on X: at the default holdout fraction that mix is 50/50 for every user by
+  construction, and a saver whose true effect was 50% reported 71% once 30 holdouts
+  existed. Note the consequence for the pre-install baseline: with 2+ savers installed it
+  is "nothing on", so it cannot isolate X either, and X stays `measuring` until real
+  single-off data exists rather than showing a figure that credits X with everything.
+  With exactly one saver installed there are no others, holdout and single-off are the
+  same state, and all of this collapses to "X on vs X off" as before.
 - **Both** groups are split by source, not just the OFF one. `rotation` / `holdout` rows
   are randomized and can back a `measured` badge; `manual` / `pre_install` rows are
   observational and cap that side at `estimated`. Each side prefers its randomized rows

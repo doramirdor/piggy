@@ -29,7 +29,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use rusqlite::params;
 
 use crate::pricing::Pricing;
 use crate::rng::XorShift64;
@@ -236,6 +235,19 @@ pub enum HeadlineBaseline {
     None,
 }
 
+/// One session's tag for a single saver, with what it takes to know whether it
+/// is comparable to another one.
+#[derive(Debug, Clone)]
+struct SaverRow {
+    enabled: bool,
+    source: String,
+    /// Every OTHER saver in this session was on. Vacuously true when this is the
+    /// only saver installed, which is why the single-saver case is unaffected by
+    /// the isolation rule.
+    others_on: bool,
+    rates: SessionRates,
+}
+
 /// One session, classified, with what it takes to know whether it is comparable
 /// to another one.
 #[derive(Debug, Clone)]
@@ -363,30 +375,62 @@ impl Store {
         Ok(map)
     }
 
-    /// Every session's `(saver_id, enabled, source)` snapshot for `saver_id`,
-    /// paired with its rates. Sessions with no tag for this saver are omitted.
+    /// Every session's snapshot for `saver_id`, paired with its rates and with
+    /// whether every OTHER saver in that session was on. Sessions with no tag for
+    /// this saver are omitted.
+    ///
+    /// `others_on` is what keeps the comparison about THIS saver. Rotation turns
+    /// X off in two different kinds of slot: the single-off slot (X off,
+    /// everything else still running) and the holdout (X off and everything else
+    /// off too). They are different treatments, and only the first isolates X.
     fn saver_group_rows(
         &self,
         saver_id: &str,
         rate_map: &std::collections::HashMap<String, SessionRates>,
-    ) -> Result<Vec<(bool, String, SessionRates)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT session_id, enabled, source FROM session_savers WHERE saver_id = ?1",
-        )?;
-        let rows = stmt.query_map(params![saver_id], |r| {
+    ) -> Result<Vec<SaverRow>> {
+        // Every row, not just this saver's: the other savers' states in the same
+        // session are exactly the thing we need.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id, saver_id, enabled, source FROM session_savers")?;
+        let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)? != 0,
-                r.get::<_, String>(2)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? != 0,
+                r.get::<_, String>(3)?,
             ))
         })?;
-        let mut out = Vec::new();
+        // (this saver's tag, whether every other saver was on)
+        let mut per_session: std::collections::HashMap<String, (Option<(bool, String)>, bool)> =
+            std::collections::HashMap::new();
         for row in rows {
-            let (sid, enabled, src) = row?;
-            if let Some(rates) = rate_map.get(&sid) {
-                out.push((enabled, src, rates.clone()));
+            let (sid, sid_saver, enabled, src) = row?;
+            let e = per_session.entry(sid).or_insert((None, true));
+            if sid_saver == saver_id {
+                e.0 = Some((enabled, src));
+            } else if !enabled {
+                e.1 = false;
             }
         }
+        let mut out = Vec::new();
+        for (sid, (tag, others_on)) in per_session {
+            let (Some((enabled, source)), Some(rates)) = (tag, rate_map.get(&sid)) else {
+                continue;
+            };
+            out.push(SaverRow {
+                enabled,
+                source,
+                others_on,
+                rates: rates.clone(),
+            });
+        }
+        // Grouping happens in a HashMap, whose order Rust re-randomizes per
+        // instance, and `bootstrap_deltas` resamples BY INDEX: leave the order to
+        // the map and the same seed produces a different CI on every call. Sort
+        // by session id so the bootstrap is reproducible, which is the whole
+        // point of seeding it.
+        out.sort_by(|a, b| a.rates.session_id.cmp(&b.rates.session_id));
         Ok(out)
     }
 
@@ -522,6 +566,10 @@ impl Store {
                 started_at: f.started_at,
             });
         }
+        // Same reason as `saver_group_rows`: this is grouped in a HashMap and
+        // `bootstrap_deltas` resamples by index, so an unsorted vector makes the
+        // headline's CI differ between two calls with the same seed.
+        out.sort_by(|a, b| a.rates.session_id.cmp(&b.rates.session_id));
         Ok(out)
     }
 }
@@ -802,30 +850,53 @@ pub fn attribute_with_map(
 ) -> Result<SaverAttribution> {
     let rows = store.saver_group_rows(saver_id, rate_map)?;
 
+    // Isolate this saver: both arms hold every OTHER saver on, so the only thing
+    // that differs between them is this one.
+    //
+    // Rotation turns X off in two different slots, and they are not the same
+    // treatment: the single-off slot (X off, everything else running) and the
+    // holdout (X off and everything else off too). Pooling them compared
+    // "X on, others on" against a 50/50 mix of "others on" and "others off", so
+    // the other savers' savings landed on X. At shipping defaults that mix is
+    // exactly 50/50 for every user by construction, and its weight was set by
+    // `holdout_fraction`: a measurement-cadence dial silently moved every saver's
+    // reported percentage. Measured: a saver whose true effect was 50% reported
+    // 71% once 30 holdouts existed, badged Measured.
+    //
+    // `others_on` is vacuously true when this is the only saver installed, where
+    // holdout and single-off really are the same state, so the single-saver case
+    // is unchanged.
+    let isolated = |r: &&SaverRow| r.others_on;
     let on_randomized: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| *en && is_randomized(src))
-        .map(|(_, _, r)| r.clone())
+        .filter(isolated)
+        .filter(|r| r.enabled && is_randomized(&r.source))
+        .map(|r| r.rates.clone())
         .collect();
     let on_observational: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| *en && !is_randomized(src))
-        .map(|(_, _, r)| r.clone())
+        .filter(isolated)
+        .filter(|r| r.enabled && !is_randomized(&r.source))
+        .map(|r| r.rates.clone())
         .collect();
     let off_randomized: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| !*en && is_randomized(src))
-        .map(|(_, _, r)| r.clone())
+        .filter(isolated)
+        .filter(|r| !r.enabled && is_randomized(&r.source))
+        .map(|r| r.rates.clone())
         .collect();
     let off_observational: Vec<SessionRates> = rows
         .iter()
-        .filter(|(en, src, _)| !*en && !is_randomized(src))
-        .map(|(_, _, r)| r.clone())
+        .filter(isolated)
+        .filter(|r| !r.enabled && !is_randomized(&r.source))
+        .map(|r| r.rates.clone())
         .collect();
+    // Counted over the rows this saver's number could actually rest on, so the
+    // footnote cannot advertise sessions the comparison excluded.
     let mut off_by_source: BTreeMap<String, usize> = BTreeMap::new();
-    for (en, src, _) in &rows {
-        if !*en {
-            *off_by_source.entry(src.clone()).or_insert(0) += 1;
+    for r in rows.iter().filter(|r| r.others_on) {
+        if !r.enabled {
+            *off_by_source.entry(r.source.clone()).or_insert(0) += 1;
         }
     }
 

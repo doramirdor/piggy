@@ -1641,3 +1641,209 @@ fn the_live_set_vote_is_deterministic_when_timestamps_tie() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 20. A saver must not absorb the other savers' savings (#8).
+// ---------------------------------------------------------------------------
+//
+// Rotation turns X off in two different kinds of slot, and they are NOT the same
+// treatment: the single-off slot (X off, everything else running) and the
+// holdout (X off and everything else off too). Pooling both into X's OFF group
+// compared "X on, others on" against a 50/50 mix of "others on" and "others
+// off", so the other savers' savings landed on X.
+//
+// Not an edge case: at shipping defaults every saver is off in exactly 2 of the
+// 10 slots, 1 holdout + 1 single-off, so the OFF group was 50% "nothing on" for
+// every user by construction. The mix weight was `holdout_fraction` - a
+// measurement-cadence dial that silently moved every saver's percentage.
+//
+// Here rtk's true within-cell effect is exactly 50% (single-off-rtk 1000/turn vs
+// full-on 500/turn). Only the number of holdouts varies. rtk's number must not
+// notice them.
+
+fn rtk_delta_with_holdouts(n_holdouts: usize) -> f64 {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    // Full-on: rtk AND caveman on. 500/turn.
+    let mut rng = XorShift64::new(0x0088_0001);
+    for i in 0..15 {
+        let turns = 8 + rng.below(4) as u64;
+        let out = (500.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("fullon-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    SaverTag::new("caveman", true, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+    // Single-off-rtk: rtk off, caveman still on. 1000/turn => rtk's true effect
+    // is exactly 50%, and this is the ONLY comparison that isolates rtk.
+    let mut rng = XorShift64::new(0x0088_0002);
+    for i in 0..15 {
+        let turns = 8 + rng.below(4) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("singleoff-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::ROTATION),
+                    SaverTag::new("caveman", true, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+    // Holdouts: rtk off AND caveman off. 2000/turn. rtk is off here too, so these
+    // used to land in rtk's OFF group and drag its median up.
+    let mut rng = XorShift64::new(0x0088_0003);
+    for i in 0..n_holdouts {
+        let turns = 8 + rng.below(4) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::HOLDOUT),
+                    SaverTag::new("caveman", false, source::HOLDOUT),
+                ],
+            )
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x0BAD).unwrap();
+    let out = a.output().unwrap();
+    eprintln!(
+        "[absorb] holdouts={n_holdouts:>2} -> n_on={} n_off={} delta={:?}",
+        out.n_on, out.n_off, out.delta
+    );
+    out.delta.unwrap()
+}
+
+#[test]
+fn a_saver_does_not_absorb_the_other_savers_savings() {
+    let truth = rtk_delta_with_holdouts(0);
+    assert!(
+        (truth - 0.5).abs() < 0.05,
+        "sanity: rtk's planted within-cell effect is 50%, got {truth:.4}"
+    );
+    for n in [5usize, 15, 30] {
+        let d = rtk_delta_with_holdouts(n);
+        assert!(
+            (d - truth).abs() < 1e-9,
+            "rtk's number moved from {truth:.4} to {d:.4} because {n} HOLDOUT sessions \
+             exist. rtk did nothing different in them: it is absorbing caveman's savings, \
+             because a holdout is 'nothing on' and a single-off slot is 'everything else \
+             on', and those are not the same comparison"
+        );
+    }
+}
+
+// The single-saver case must be untouched: with no other savers, a holdout and a
+// single-off slot ARE the same state, so there is nothing to isolate and the
+// holdout rows are legitimate OFF data.
+#[test]
+fn a_lone_saver_still_uses_its_holdout_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x0099_0001);
+
+    for i in 0..12 {
+        let turns = 8 + rng.below(4) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+
+        let turns = 8 + rng.below(4) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.3) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x0C0D).unwrap();
+    let out = a.output().unwrap();
+    assert_eq!(
+        out.n_off, 12,
+        "with no other savers there is nothing to isolate from: the holdout sessions are \
+         this saver's OFF group and must still count"
+    );
+    assert_eq!(out.badge, Badge::Measured);
+}
+
+// ---------------------------------------------------------------------------
+// 21. Seeding the bootstrap has to actually make it reproducible.
+// ---------------------------------------------------------------------------
+//
+// `bootstrap_deltas` resamples BY INDEX (`src[rng.below(src.len())]`), so the
+// ORDER of the rate vectors decides which values a seeded run picks. Both group
+// builders assemble their rows in a HashMap, whose iteration order Rust
+// re-randomizes per instance, so an unsorted vector means the same seed produces
+// a different CI on every call. The per-saver path had a test for this; the
+// headline did not, and was nondeterministic.
+
+#[test]
+fn the_headline_ci_is_reproducible_for_a_fixed_seed() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00C1_0001);
+    for i in 0..15 {
+        let turns = 8 + rng.below(4) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+
+        let turns = 8 + rng.below(4) as u64;
+        let out = (1000.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("fullon-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let first = attribution::headline(&store, &pricing, 0xFEED).unwrap();
+    let f = first.streams.iter().find(|s| s.stream == attribution::Stream::Output).unwrap();
+    for _ in 0..20 {
+        let again = attribution::headline(&store, &pricing, 0xFEED).unwrap();
+        let a = again.streams.iter().find(|s| s.stream == attribution::Stream::Output).unwrap();
+        assert_eq!(
+            f.ci, a.ci,
+            "same store, same seed, different CI: the bootstrap is resampling a vector \
+             whose order came out of a HashMap, so seeding it buys nothing"
+        );
+    }
+}
