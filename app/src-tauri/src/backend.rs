@@ -383,8 +383,10 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
     let note = if !estimated {
         None
     } else if !hl.on_randomized {
+        // Covers a saver switched on by hand AND one switched off by hand: either
+        // way Piggy stopped rotating it, which is the part that matters here.
         Some(
-            "estimated: you turned savers on yourself, so Piggy is not rotating them and \
+            "estimated: you set some savers by hand, so Piggy is not rotating them and \
              cannot measure them"
                 .to_string(),
         )

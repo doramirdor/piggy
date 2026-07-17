@@ -39,6 +39,14 @@ pinned saver in it is still real evidence about the savers that *do* rotate, and
 used, but it is not the no-savers baseline the headline's "N.N× longer" is a claim about,
 so it caps that headline at `estimated`.
 
+The mirror case is a saver the user switched **off** by hand. It is off in the holdout and
+off in every full-on session too, so it is a constant rather than a confound: it simply
+leaves the comparison, the way an uninstalled saver would. "Full-on" therefore means every
+saver the *scheduler* is running is on, not that no saver anywhere is off, and what gets
+measured ("everything else on" vs "nothing on") is exactly the setup that user runs. The
+earlier, stricter reading classified every one of their sessions as a single-off slot and
+left the headline reading "measuring" forever, at any session count.
+
 Rotation only ever toggles Piggy-managed savers. User's own hooks are never touched.
 If the user manually flips a toggle, rotation pauses for that saver (respect intent).
 Piggy is then no longer randomizing it, so no *new* measured evidence accrues for it:

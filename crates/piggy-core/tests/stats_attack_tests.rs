@@ -1198,3 +1198,199 @@ fn clean_and_contaminated_holdouts_are_not_pooled_into_one_baseline() {
     assert!(!hl.baseline_clean);
     assert_eq!(hl.ceiling, Badge::Estimated);
 }
+
+// ---------------------------------------------------------------------------
+// 15. Switching one saver off by hand must not kill the headline (#5).
+// ---------------------------------------------------------------------------
+//
+// `controlled_savers` pins a hand-toggled saver out of rotation, so it is tagged
+// (disabled, manual) in EVERY later session. `classified_sessions` tested "no
+// saver is off at all" for full-on, so every one of those sessions classified
+// Mixed, n_full_on stayed 0, and the headline read "measuring" forever at any
+// session count, with no hint that a switch flipped months ago was the cause.
+//
+// Full-on has to mean "every saver the scheduler is running is on". A saver the
+// user switched off is not one of those: it is off in the holdout too, so it
+// leaves the contrast rather than poisoning it, and what remains ("everything
+// else on" vs "nothing on") is exactly the setup the user is actually running.
+// Provenance still caps it at estimated, since Piggy is not rotating that saver.
+
+#[test]
+fn a_hand_switched_off_saver_does_not_kill_the_headline() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00DE_AD11);
+
+    // The user switched caveman off by hand. It is off in every session below,
+    // holdout and full-on alike, so it is a constant and not a confound.
+    for i in 0..15 {
+        // Holdout: everything the scheduler runs is off, and caveman is off too,
+        // so this really is an all-off baseline.
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::HOLDOUT),
+                    SaverTag::new("caveman", false, source::MANUAL),
+                ],
+            )
+            .unwrap();
+
+        // Full-on for this user: rtk on by rotation, caveman still hand-off.
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1200.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("full-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    SaverTag::new("caveman", false, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x8642).unwrap();
+    eprintln!(
+        "[hand_off] n_full_on={} n_baseline={} baseline_clean={} ceiling={:?} mult={:?}",
+        hl.n_full_on, hl.n_baseline, hl.baseline_clean, hl.ceiling, hl.multiplier
+    );
+
+    // The whole bug: this used to be 0 forever.
+    assert_eq!(
+        hl.n_full_on, 15,
+        "sessions where every scheduler-run saver is on are full-on, even though the \
+         user has one switched off by hand"
+    );
+    assert!(
+        hl.multiplier.is_some(),
+        "the headline still has a number: 'everything else on' vs 'nothing on' is exactly \
+         the setup this user runs"
+    );
+    // The holdout genuinely was all-off here, so the baseline is clean...
+    assert!(hl.baseline_clean);
+    // ...but a hand-set saver is still not something Piggy randomized.
+    assert!(!hl.on_randomized);
+    assert_eq!(hl.ceiling, Badge::Estimated);
+}
+
+// A real single-off rotation slot must STILL be excluded from full-on: the guard
+// above narrows "any saver off" to "the scheduler turned a saver off", and that
+// is exactly what a single-off slot is.
+#[test]
+fn a_scheduler_single_off_slot_is_still_not_full_on() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x0051_5A11);
+
+    for i in 0..12 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1500.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("single-off-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        // rtk rotated OFF for its single-off slot, headroom on: not full-on.
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::ROTATION),
+                    SaverTag::new("headroom", true, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x9753).unwrap();
+    assert_eq!(
+        hl.n_full_on, 0,
+        "a single-off rotation slot is Mixed, not full-on: the scheduler turned that \
+         saver off on purpose"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Every saver switched off by hand means NO headline, not a free multiplier.
+// ---------------------------------------------------------------------------
+//
+// The boundary where #5's own reasoning collapses. "Full-on means every saver
+// the scheduler runs is on" is fine while there IS an everything-else. Switch
+// every saver off by hand and there are no scheduler-disabled rows at all, so
+// `!any_scheduler_disabled` is vacuously true and a session running NOTHING
+// would classify as full-on. The headline would then publish a multiplier off
+// pure pre/post-install drift to a user with every saver off.
+//
+// Reachable without rotation ever running: `controlled_savers` returns empty
+// once every saver is manual, so `tick` reports NothingToRotate and no rotation
+// or holdout row is ever written.
+
+#[test]
+fn every_saver_switched_off_by_hand_publishes_no_headline() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00E0_FF11);
+
+    // Pre-Piggy history, heavier era.
+    for i in 0..12 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (300.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("pre-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::PRE_INSTALL)])
+            .unwrap();
+    }
+
+    // Piggy installed, then every saver switched off by hand. Lighter era, but
+    // no saver is running in EITHER era, so the whole gap is drift.
+    for i in 0..12 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (150.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("all-off-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::MANUAL),
+                    SaverTag::new("caveman", false, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x1234).unwrap();
+    eprintln!(
+        "[all_hand_off] n_full_on={} n_baseline={} mult={:?}",
+        hl.n_full_on, hl.n_baseline, hl.multiplier
+    );
+
+    assert_eq!(
+        hl.n_full_on, 0,
+        "a session with every saver switched off is not a full-on session, however \
+         vacuously true 'no scheduler-disabled saver' is"
+    );
+    assert_eq!(
+        hl.multiplier, None,
+        "no saver was running, so there is no savings multiplier to publish: the drift \
+         between the eras is not a saving"
+    );
+}

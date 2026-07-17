@@ -392,7 +392,12 @@ impl Store {
             any_holdout: bool,
             any_pre_install: bool,
             any_enabled: bool,
-            any_disabled: bool,
+            /// A saver was off because the SCHEDULER turned it off, i.e. this is a
+            /// single-off rotation slot. Deliberately not "any saver was off": a
+            /// saver the user switched off by hand is off in every session
+            /// forever, and treating that as a single-off slot classified every
+            /// one of their sessions Mixed and killed the headline for good.
+            any_scheduler_disabled: bool,
             /// Every tag came from Piggy's scheduler rather than the user.
             all_randomized: bool,
         }
@@ -402,7 +407,7 @@ impl Store {
                     any_holdout: false,
                     any_pre_install: false,
                     any_enabled: false,
-                    any_disabled: false,
+                    any_scheduler_disabled: false,
                     all_randomized: true,
                 }
             }
@@ -417,8 +422,8 @@ impl Store {
             f.any_pre_install |= src == source::PRE_INSTALL;
             if enabled {
                 f.any_enabled = true;
-            } else {
-                f.any_disabled = true;
+            } else if is_randomized(&src) {
+                f.any_scheduler_disabled = true;
             }
             f.all_randomized &= is_randomized(&src);
         }
@@ -439,13 +444,28 @@ impl Store {
                 }
             } else if f.any_pre_install {
                 SessionGroup::PreInstall
-            } else if !f.any_disabled {
-                // Same "everything on" state, but only randomized provenance can
-                // back a measured claim. A user who pins savers on by hand takes
-                // them out of rotation for good, so without this split a
-                // manual-on era compared against an older randomized holdout era
-                // reads as a green measured headline, with any drift between the
-                // eras landing on the savers.
+            } else if f.any_enabled && !f.any_scheduler_disabled {
+                // Full-on means every saver the SCHEDULER is running is on. A
+                // saver the user switched off by hand is not one of those: they
+                // opted it out of their setup, the same as never installing it,
+                // and it is off in the holdout too, so it drops out of the
+                // contrast rather than poisoning it. Testing "no saver is off at
+                // all" instead meant one hand-switched-off saver classified every
+                // session Mixed and the headline read "measuring" forever, at any
+                // session count.
+                //
+                // `any_enabled` is load-bearing, not a formality. Switch EVERY
+                // saver off by hand and there are no scheduler-disabled rows at
+                // all, so `!any_scheduler_disabled` is vacuously true and a
+                // session running NOTHING would count as full-on. The headline
+                // would then publish a multiplier off pure pre/post drift, to a
+                // user with every saver off. "Everything else on" needs there to
+                // be an everything else.
+                //
+                // Provenance still governs the claim. Any hand-set saver, on or
+                // off, makes this observational: Piggy is not rotating it, and
+                // the toggle splits history into a before and an after that the
+                // scheduler did not randomize across.
                 if f.all_randomized {
                     SessionGroup::FullOn
                 } else {
@@ -671,11 +691,17 @@ fn pick_group(
 /// Pick the headline's baseline from the clean and contaminated holdouts.
 ///
 /// Deliberately NOT `pick_group`. That helper pools its two groups when the
-/// preferred one is thin, which is sound there because both groups are the same
-/// treatment state and differ only in provenance: pooling buys sample size for
-/// one estimand, and the `estimated` cap prices the confounding.
+/// preferred one is thin, and prices the confounding with the `estimated` cap.
+/// What it does NOT do is guarantee that its two groups describe the same saver
+/// set: the full-on groups never have, because a session carries no saver-set
+/// identity, so installing, uninstalling or hand-switching a saver silently
+/// splits history into eras that the ON group pools regardless. That is a real
+/// and pre-existing gap (see the issue tracker), and the `estimated` cap plus
+/// the headline's note is what currently prices it.
 ///
-/// These two groups are different treatment arms. A clean holdout is "every
+/// The baseline is where that would stop being a blur and become a lie, because
+/// the two groups here are not eras of a moving setup, they are the presence or
+/// absence of the counterfactual the headline names. A clean holdout is "every
 /// saver off"; a contaminated one is "every saver off except the one you pinned,
 /// which kept running". A median across the union estimates neither population:
 /// it tracks whichever arm is larger, so the headline would move with the mix
