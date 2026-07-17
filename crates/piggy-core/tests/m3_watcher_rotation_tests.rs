@@ -389,3 +389,63 @@ fn watcher_indexes_and_tags_a_new_session() {
     assert!(tags[0].enabled);
     assert_eq!(tags[0].source, source::ROTATION);
 }
+
+// ---------------------------------------------------------------------------
+// Agent workflow journals are not sessions and must not be indexed as one.
+// ---------------------------------------------------------------------------
+//
+// Claude Code writes one `subagents/workflows/<run>/journal.jsonl` per workflow
+// run. Session ids come from the file stem, so every one of them claimed
+// `session_id = "journal"` and `INSERT OR REPLACE` silently dropped all but the
+// last, leaving a phantom ("journal", project=NULL) row. A real tree had 56.
+// They carry no usage, so nothing was miscounted, but a non-session should not
+// be indexed as a session at all, and journals are the only basename collision
+// a real tree produces (session logs are UUIDs, subagent logs are agent-<hash>).
+
+#[test]
+fn agent_workflow_journals_are_not_indexed_as_sessions() {
+    let sb = Sandbox::new();
+    let projects = sb.projects();
+
+    // Two workflow runs, each with its own journal.jsonl: the colliding shape.
+    for run in ["wf_44923d8c-cde", "wf_9f57aba1-4cb"] {
+        let dir = projects
+            .join("-Users-x-proj")
+            .join("3db00708-aba4-4672-bd62-a5bd5c9d40b8")
+            .join("subagents")
+            .join("workflows")
+            .join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("journal.jsonl"),
+            b"{\"type\":\"result\",\"key\":\"a\",\"result\":\"x\"}\n",
+        )
+        .unwrap();
+    }
+    // A real session log alongside them, to prove the walk still works.
+    std::fs::write(
+        projects.join("11111111-2222-3333-4444-555555555555.jsonl"),
+        b"{\"type\":\"assistant\",\"requestId\":\"r1\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":20}}}\n",
+    )
+    .unwrap();
+
+    let mut store = Store::open(&sb.home()).unwrap();
+    let pricing = Pricing::embedded();
+    let rep = piggy_core::index::run_index(&mut store, &pricing, &projects, false).unwrap();
+
+    // One session indexed: the real log. The two journals are not sessions.
+    assert_eq!(
+        store.session_count().unwrap(),
+        1,
+        "a workflow journal is not a session: indexing it creates a phantom 'journal' \
+         row that every other workflow run then collides with via INSERT OR REPLACE"
+    );
+    assert_eq!(rep.scanned, 1, "journals are not even scanned");
+    // The real session's own row survived, and it is the UUID one.
+    assert!(
+        store
+            .session_savers("11111111-2222-3333-4444-555555555555")
+            .is_ok(),
+        "the real session log must still be indexed"
+    );
+}

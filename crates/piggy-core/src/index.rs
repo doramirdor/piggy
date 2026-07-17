@@ -20,6 +20,29 @@ use crate::pricing::Pricing;
 use crate::sources::SourceKind;
 use crate::store::Store;
 
+/// Whether a path is an agent workflow journal rather than a session log.
+///
+/// Claude Code writes one `subagents/workflows/<run>/journal.jsonl` per workflow
+/// run. They are not sessions, they hold no token usage, and they are the one
+/// thing under `projects/` that is not uniquely named: a real tree had **56** of
+/// them. Session ids come from the file stem, so all 56 claimed `session_id =
+/// "journal"` and `INSERT OR REPLACE` silently dropped 55, leaving a phantom
+/// `("journal", project=NULL, n_msgs=0)` row.
+///
+/// It costs no tokens today only because those files happen to carry no usage.
+/// Not indexing a non-session is the right answer regardless, and it removes the
+/// only basename collision a real tree actually produces: session logs are
+/// UUID-named and subagent logs are `agent-<hash>`, so both are unique.
+fn is_agent_workflow_journal(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some("journal.jsonl")
+        && path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some("workflows")
+}
+
 /// One directory tree of session logs plus the tool that writes it — the unit
 /// [`run_index_roots`] and the watcher operate over.
 #[derive(Debug, Clone)]
@@ -119,6 +142,9 @@ fn index_root(
         }
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if is_agent_workflow_journal(path) {
             continue;
         }
         rep.scanned += 1;
