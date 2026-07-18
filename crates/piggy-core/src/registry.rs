@@ -263,4 +263,25 @@ impl Entry {
             .find_map(|s| s.get("name").and_then(Value::as_str))
             .map(String::from)
     }
+
+    /// Each `require_binary` install step as `(binary, reason)`. A *soft* require
+    /// installs anyway, so if the binary later goes missing the saver runs but
+    /// degrades or silently no-ops (Token Optimizer's Python hooks, RTK's Node
+    /// lifecycle hooks). Lets the UI say which binary and why, in the author's
+    /// own words.
+    pub fn required_binaries(&self) -> Vec<(&str, &str)> {
+        self.install
+            .steps
+            .iter()
+            .filter(|s| step_kind(s) == "require_binary")
+            .filter_map(|s| {
+                let bin = s.get("binary").and_then(Value::as_str)?;
+                let reason = s
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("required by this saver");
+                Some((bin, reason))
+            })
+            .collect()
+    }
 }

@@ -104,6 +104,9 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
               <span>instead of plain claude. Other sessions are untouched.</span>
             </div>
           )}
+          {saver.badge.note && !busy && (
+            <div className="measure-note">{saver.badge.note}</div>
+          )}
         </div>
         <StatusChip badge={saver.badge} />
         {saver.configurable && (

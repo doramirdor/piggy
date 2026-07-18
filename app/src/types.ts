@@ -95,6 +95,10 @@ export interface Badge {
   kind: BadgeKind;
   delta: number | null;
   n: number;
+  /** Why an enabled saver is stuck at "measuring" (a required binary missing,
+   * rotation off, or pinned on by hand), in the user's terms. Absent for settled
+   * badges, off savers, or the ordinary warm-up. Mirrors `Headline.note`. */
+  note?: string | null;
 }
 
 export interface SaverRow {

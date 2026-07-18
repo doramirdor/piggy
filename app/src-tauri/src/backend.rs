@@ -16,7 +16,7 @@
 //! * preferences      → the `piggy-core` [`PiggyState`] `settings` ledger,
 //! * background loop  → [`piggy_core::SessionWatcher`] + [`rotation::tick_now`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -603,6 +603,12 @@ pub struct Badge {
     /// Sessions backing the figure (measured/estimated) or counted so far
     /// (measuring).
     pub n: u64,
+    /// Why an *enabled* saver is stuck at `measuring`, in the user's terms (a
+    /// required binary missing, rotation off, or pinned on by hand). `None` for a
+    /// settled badge, a disabled saver, or the ordinary warm-up - the chip's
+    /// progress bar already says "n of 10" there. Mirrors `Headline::note`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -669,7 +675,12 @@ fn default_on_ids(catalog: &Catalog) -> Vec<String> {
         .collect()
 }
 
-fn saver_row(e: &Entry, state: &PiggyState, attr: Option<&SaverAttribution>) -> SaverRow {
+fn saver_row(
+    e: &Entry,
+    state: &PiggyState,
+    attr: Option<&SaverAttribution>,
+    bin_present: &HashMap<&str, bool>,
+) -> SaverRow {
     let st = state.savers.get(&e.id);
     SaverRow {
         id: e.id.clone(),
@@ -689,11 +700,29 @@ fn saver_row(e: &Entry, state: &PiggyState, attr: Option<&SaverAttribution>) -> 
         license: e.license.clone(),
         license_note: e.license_note.clone(),
         ordering: e.ordering,
-        badge: attr.map(saver_badge).unwrap_or(Badge {
-            kind: "measuring".to_string(),
-            delta: None,
-            n: 0,
-        }),
+        badge: {
+            let mut b = attr.map(saver_badge).unwrap_or(Badge {
+                kind: "measuring".to_string(),
+                delta: None,
+                n: 0,
+                note: None,
+            });
+            if b.kind == "measuring" {
+                // First required binary that's now missing (soft-required ones
+                // install anyway, so this can happen at runtime).
+                let missing_binary = e
+                    .required_binaries()
+                    .into_iter()
+                    .find(|(bin, _)| !bin_present.get(bin).copied().unwrap_or(true));
+                b.note = measuring_note(
+                    st.map(|s| s.enabled).unwrap_or(false),
+                    st.and_then(|s| s.last_toggle_source.as_deref()),
+                    state.settings.holdout_enabled,
+                    missing_binary,
+                );
+            }
+            b
+        },
         configurable: !e.config_options.is_empty(),
         launch_command: e.launch_command(),
     }
@@ -723,14 +752,53 @@ fn saver_badge(a: &SaverAttribution) -> Badge {
                     delta
                 },
                 n,
+                note: None,
             }
         }
         None => Badge {
             kind: "measuring".to_string(),
             delta: None,
             n: 0,
+            note: None,
         },
     }
+}
+
+/// Why an *enabled* saver's badge still reads `measuring`, phrased for the row so
+/// the user knows what to change. `None` when the honest answer is just "needs
+/// more sessions" - the chip's progress bar already says that - or when the saver
+/// is off. Otherwise the blocked states, most-actionable first: a required binary
+/// gone (the saver runs but its hooks degrade or no-op, so there is nothing to
+/// measure), rotation turned off globally, or this saver pinned on by hand (so it
+/// sits out the A/B rotation that measurement needs). `missing_binary` is the
+/// absent `(binary, reason)` from the saver's `require_binary` step, if any.
+fn measuring_note(
+    enabled: bool,
+    toggle_source: Option<&str>,
+    holdout_enabled: bool,
+    missing_binary: Option<(&str, &str)>,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    if let Some((bin, reason)) = missing_binary {
+        return Some(format!(
+            "Needs {bin}, which isn't installed: {reason}. Install {bin} to fix."
+        ));
+    }
+    if !holdout_enabled {
+        return Some(
+            "Rotation is off, so Piggy can't run a fair test. Turn on \"Rotate savers for fair tests\" in Settings."
+                .to_string(),
+        );
+    }
+    if toggle_source == Some(piggy_core::store::source::MANUAL) {
+        return Some(
+            "Pinned on by you, so it sits out rotation. It still runs; Piggy just can't measure it."
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// The master switch is a system-level flag, not a rollup of savers: disabling
@@ -750,11 +818,23 @@ fn build_savers_state() -> anyhow::Result<SaversState> {
     // so every row agrees with `piggy report`). A store failure degrades each row
     // to an honest "measuring".
     let bundle = attribution_bundle().ok();
-    let savers = curated_installable(&catalog)
+    let entries = curated_installable(&catalog);
+    // Presence of each required binary (python3, node, ...), checked once per
+    // distinct binary per list refresh - not per row - since each check spawns a
+    // process. A saver whose hooks degrade or no-op without its binary says so.
+    let mut bin_present: HashMap<&str, bool> = HashMap::new();
+    for e in &entries {
+        for (bin, _) in e.required_binaries() {
+            bin_present
+                .entry(bin)
+                .or_insert_with(|| engine::binary_on_path(bin));
+        }
+    }
+    let savers = entries
         .iter()
         .map(|e| {
             let attr = bundle.as_ref().and_then(|b| b.per_saver.get(&e.id));
-            saver_row(e, &state, attr)
+            saver_row(e, &state, attr, &bin_present)
         })
         .collect();
     Ok(SaversState {
@@ -1821,4 +1901,85 @@ pub fn rotation_tick_if_enabled() -> bool {
         bump_attr_version();
     }
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::measuring_note;
+    use piggy_core::store::source;
+
+    #[test]
+    fn measuring_note_names_the_blocker() {
+        let py = Some(("python3", "hooks no-op without it"));
+        let node = Some(("node", "degrades to skill-only without it"));
+        // Off saver: nothing to explain.
+        assert_eq!(measuring_note(false, None, true, None), None);
+        // A missing binary is the root cause and outranks rotation/pin - and the
+        // message names the binary and its reason, so node works the same way.
+        let m = measuring_note(true, Some(source::MANUAL), false, py).unwrap();
+        assert!(m.contains("python3") && m.contains("no-op"));
+        let n = measuring_note(true, Some(source::MANUAL), true, node).unwrap();
+        assert!(n.contains("node") && n.contains("skill-only"));
+        // Rotation off wins over a manual pin.
+        assert!(measuring_note(true, Some(source::MANUAL), false, None)
+            .unwrap()
+            .contains("Rotation is off"));
+        // Rotating but hand-pinned: excluded from the A/B.
+        assert!(measuring_note(true, Some(source::MANUAL), true, None)
+            .unwrap()
+            .contains("Pinned on by you"));
+        // Rotating, not pinned, binaries present: ordinary warm-up, chip covers it.
+        assert_eq!(
+            measuring_note(true, Some(source::ROTATION), true, None),
+            None
+        );
+    }
+
+    // The pure-fn test above covers the message; this covers the wiring - that
+    // `saver_row` reads the pin/holdout/binary state off a real catalog entry and
+    // attaches the note to the row the UI renders.
+    #[test]
+    fn saver_row_attaches_pin_note() {
+        use super::{curated_installable, saver_row};
+        use piggy_core::state::SaverState;
+        use piggy_core::{Catalog, PiggyState};
+        use std::collections::HashMap;
+
+        let catalog = Catalog::embedded();
+        let entries = curated_installable(&catalog);
+        let e = entries.first().copied().expect("a curated saver to pin");
+
+        // Pin it on by hand, rotation enabled: it runs but sits out the A/B.
+        let saver: SaverState = serde_json::from_value(serde_json::json!({
+            "id": e.id,
+            "version": "1.0.0",
+            "installed_at": "2026-01-01",
+            "enabled": true,
+            "last_toggle_source": source::MANUAL,
+        }))
+        .unwrap();
+        let mut state = PiggyState::default();
+        state.settings.holdout_enabled = true;
+        state.savers.insert(e.id.clone(), saver);
+
+        // Its required binaries present, so the note reaches the pin branch (a
+        // missing binary would outrank it).
+        let mut bin_present: HashMap<&str, bool> = HashMap::new();
+        for (bin, _) in e.required_binaries() {
+            bin_present.insert(bin, true);
+        }
+
+        // No attribution yet: the badge is "measuring", the state the note explains.
+        let row = saver_row(e, &state, None, &bin_present);
+        assert_eq!(row.badge.kind, "measuring");
+        assert!(
+            row.badge
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("Pinned on by you"),
+            "expected the pin note on the row, got {:?}",
+            row.badge.note
+        );
+    }
 }

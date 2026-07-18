@@ -1579,7 +1579,7 @@ fn string_args(step: &Value) -> Result<Vec<String>> {
         .ok_or_else(|| anyhow!("claude_cli: missing 'args' array"))
 }
 
-fn binary_on_path(bin: &str) -> bool {
+pub fn binary_on_path(bin: &str) -> bool {
     // Try `<bin> --version`; a spawn failure means it is not on PATH.
     Command::new(bin)
         .arg("--version")
