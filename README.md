@@ -9,7 +9,7 @@
 <p align="center"><em>The App Store - and the referee - for Claude Code token savers.</em></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-pre--release-e8a33d" alt="Status: pre-release">
+  <img src="https://img.shields.io/badge/release-v0.1.0-e8a33d" alt="Release: v0.1.0">
   <img src="https://img.shields.io/badge/license-MIT-3d7fd8" alt="License: MIT">
   <img src="https://img.shields.io/badge/platform-macOS-6b7280" alt="Platform: macOS">
   <img src="https://img.shields.io/badge/tests-208%20local-6b7280" alt="208 tests, run locally">
@@ -19,10 +19,11 @@ Piggy is a free, open-source macOS menu bar app for Claude Code users who keep h
 limits. It installs the best community token savers with one toggle - no terminal, no config
 files - and then does something nobody else does: **it measures whether they actually work.**
 
-> [!WARNING]
-> **Not released yet.** There is no published build to download. `npx piggybank` and the `.dmg`
-> link further down do not work, because the first signed build has not shipped. Everything
-> below describes an app you cannot install today. See [Status](#status).
+> [!NOTE]
+> **v0.1.0 is out, as an unsigned developer preview.** Grab the `.dmg` from
+> [Releases](../../releases). It's the real, tested app, but Apple hasn't notarized it yet, so the
+> first launch takes one extra step (right-click → **Open**). The [Install](#install) section walks
+> through it. Notarized, double-click builds are the next milestone.
 
 <p align="center">
   <img src="docs/screenshots/dashboard.png" alt="Piggy's Dashboard tab: a hero card reading 'Your Claude plan lasts 1.7x longer, measured against 12 holdout sessions', a four-stream token bar for input, output, cache write and cache read, tiles for tokens saved and money avoided, and an 'Across your tools' section">
@@ -79,6 +80,36 @@ Three things in that screenshot are the whole product:
   always estimated, and always says so.
 - **`measured against 12 holdout sessions`.** The headline carries its own denominator.
 
+## What's inside
+
+Flip the master switch and Piggy sets up a curated stack of savers, in the right order, backing up
+your Claude settings first. What ships in v0.1.0:
+
+| Saver | What it does | License |
+| --- | --- | --- |
+| **Sweep** *(built-in)* | Finds skills, MCP servers and plugins you haven't used lately and switches them off | MIT |
+| **RTK** | Shrinks noisy command output (git, tests, builds) before Claude reads it | Apache-2.0 |
+| **Headroom** | Deep compression on the sessions you start with `piggy-claude` | Apache-2.0 |
+| **Caveman** | Nudges Claude to answer in fewer words, same code | MIT |
+| **Ponytail** | Nudges Claude to build only what you asked for, no gold-plating | MIT |
+| **Claude Token Optimizer** | Restructures your `CLAUDE.md` so sessions start lighter | MIT |
+| **Token Optimizer** | Sends Claude only what changed in files it already saw | PolyForm-Noncommercial &sup1; |
+| **Context Mode** | Keeps huge tool outputs out of context until you need them | Elastic-2.0 &sup1; |
+
+<sub>&sup1; Source-available, **not** open source. Piggy names the license on the saver's row before
+you touch the toggle, and never vendors or forks a saver's code: it installs from wherever the author
+already publishes and pins a known-good version.</sub>
+
+Under the hood it's three pieces, and only the first holds any optimization logic Piggy wrote itself:
+
+- **`piggy-core`** (Rust) parses Claude Code's session logs, stores per-session token counts in
+  SQLite, runs the pricing and holdout math, and owns every write to `~/.claude/settings.json`:
+  timestamped backup, atomic replace, your existing hooks preserved byte-for-byte.
+- **`piggy` CLI** (Rust) is that same core on the command line: `stats`, `doctor`, `report`,
+  `sweep`, and more. It ships inside the app.
+- **The app** is a Tauri v2 menu bar tray plus desktop window, Rust backend, React + Tailwind front end.
+- **`registry/catalog.json`** is the saver list, data not code, so a new saver is a pull request.
+
 ## Privacy
 
 No telemetry. No accounts. Your usage data never leaves your Mac. Piggy reads Claude Code's
@@ -100,14 +131,25 @@ way plain `claude` already does.
 
 ## Install
 
-> [!WARNING]
-> **Still not released.** Nothing in this section works yet. See [Status](#status).
+**v0.1.0 is an unsigned developer preview.** The real, tested app, but not notarized by Apple yet,
+so Gatekeeper needs one nudge the first time.
+
+1. Download **`Piggy_0.1.0_universal.dmg`** from [Releases](../../releases). One universal build runs
+   on both Apple Silicon and Intel.
+2. Open the `.dmg` and drag **Piggy** into Applications.
+3. **First launch only:** right-click Piggy in Applications → **Open** → **Open**. macOS remembers
+   after that, and you launch it normally from then on.
+
+If macOS instead says the app is *"damaged"*, that's just the quarantine flag on an un-notarized
+download, not actual damage. Clear it once and open normally:
 
 ```
-npx piggybank        # downloads and opens the notarized app
+xattr -dr com.apple.quarantine /Applications/Piggy.app
 ```
 
-or grab the latest `.dmg` from [Releases](../../releases).
+A one-command installer, `npx piggybank`, lives in [`installer/`](installer/) and becomes the easy
+path once it's published to npm: it downloads the `.dmg`, verifies it against `checksums.txt`, and
+copies it into Applications for you.
 
 Command-line fans get a standalone CLI too. It ships inside the app: turn on **Command line
 tool** in Settings and Piggy links `piggy` onto your PATH, via `~/.piggy/bin` and one managed
@@ -179,13 +221,34 @@ The **Listed for transparency** section is the part worth reading: when Piggy wo
 something, it names the rules the tool broke rather than quietly leaving it out, and when the
 holdup is Piggy's own unfinished work it says that instead.</sub>
 
+## What can be inside
+
+Piggy is built so the interesting parts grow without a rewrite:
+
+- **More savers, by PR.** The catalog is data. If your tool has an official release (GitHub, PyPI,
+  the Claude plugin marketplace), it can be listed and measured on the same honest terms as
+  everything already in the box. Two are staged: **NadirClaw** (route simple prompts to
+  cheaper or local models) is deferred pending a v2 install path, and **token-optimizer-mcp** is
+  listed for transparency only.
+- **Discovery → measurement.** The Discover tab already surfaces candidate savers spotted on GitHub.
+  The next step is wiring a spotted tool straight into a measured holdout test.
+- **Notarized, signed builds** so install is a plain double-click, and the `npx piggybank`
+  one-liner goes live on npm.
+- **Registry updates without an app release.** The refresh-from-GitHub path is designed but stubbed
+  today; the catalog is embedded at build time. Wiring it lets new savers reach you between releases.
+- **Codex, more fully.** Piggy already reads Codex session logs for counting; the savers themselves
+  are still Claude Code only.
+
+Want your tool in the box? See [For saver authors](#for-saver-authors).
+
 ## Status
 
-All four milestones built and tested: ✅ measurement core · ✅ install engine · ✅ holdout
-measurement · ✅ menu bar app (152 Rust + 26 UI + 30 installer tests, run locally - this repo has
-no CI). Not yet released: the first .dmg needs the signing/notarization steps in
-[docs/releasing.md](docs/releasing.md), which require an Apple Developer ID certificate. See
-[DESIGN.md](DESIGN.md).
+**v0.1.0 shipped** as an unsigned developer preview: a universal `.dmg` on the
+[Releases](../../releases) page. All four milestones are built and tested: ✅ measurement core ·
+✅ install engine · ✅ holdout measurement · ✅ menu bar app (208 tests, run locally - this repo has
+no CI). Next up: Apple notarization and the npm installer (see
+[What can be inside](#what-can-be-inside)); the signing/notarization steps live in
+[docs/releasing.md](docs/releasing.md). Design notes are in [DESIGN.md](DESIGN.md).
 
 ## License
 
