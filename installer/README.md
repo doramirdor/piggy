@@ -68,8 +68,11 @@ The installer reads its target repo and version from **this package's own
 ```
 
 - `piggy.repo` - the GitHub `<owner>/<name>` to fetch releases from.
-  `doramirdor/piggy` is the real repo, but it has no published release yet, so
-  `npx piggybank` reports "no release yet" until the first one ships.
+  `doramirdor/piggy` is the real repo. Its first release, `v0.1.0`, is an
+  **unsigned developer preview**: the installer downloads and verifies it fine,
+  but macOS Gatekeeper needs one right-click → **Open** on first launch (or
+  `xattr -dr com.apple.quarantine /Applications/Piggy.app`) until notarized
+  builds ship.
 - `piggy.version` - a release tag (e.g. `"v1.2.0"`) or `"latest"`.
 
 ### Updating this at release time
