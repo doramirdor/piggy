@@ -503,6 +503,65 @@ fn headline_falls_back_to_pre_install_when_no_holdout() {
     assert!(hl.multiplier.unwrap() > 1.0);
 }
 
+#[test]
+fn an_observational_cost_more_estimate_is_suppressed_but_a_measured_one_shows() {
+    // An estimate that the savers made things *worse* cannot be trusted from an
+    // observational pre-install baseline (confounded by heavier recent work), so
+    // the headline stays "measuring" (multiplier None, no per-stream estimated
+    // badge). The identical shape against a randomized holdout IS trustworthy and
+    // must still surface, regression and all.
+    let pricing = Pricing::embedded();
+
+    // A) Observational: full-on spends ~3× the pre-install baseline (delta ~ -2 =
+    //    "200% more"): garbage that used to render as a confident estimate.
+    let obs = tempfile::tempdir().unwrap();
+    let mut store = Store::open(obs.path()).unwrap();
+    for i in 0..12u64 {
+        let id = format!("fullon-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 1500 + i, 1500 + i, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+        let id = format!("pre-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 500 + i, 500 + i, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::PRE_INSTALL)])
+            .unwrap();
+    }
+    let hl = attribution::headline(&store, &pricing, 0x11).unwrap();
+    assert_eq!(hl.baseline, attribution::HeadlineBaseline::PreInstall);
+    assert!(
+        hl.multiplier.is_none(),
+        "a cost-more observational estimate must publish no number, got {:?}",
+        hl.multiplier
+    );
+    assert!(
+        hl.streams.iter().all(|s| s.badge != Badge::Estimated),
+        "a >100%-more stream must stay measuring, never estimated"
+    );
+
+    // B) Randomized holdout, identical cost-more shape: a real, measured regression
+    //    that the app must show honestly rather than hide.
+    let hd = tempfile::tempdir().unwrap();
+    let mut store = Store::open(hd.path()).unwrap();
+    for i in 0..12u64 {
+        let id = format!("fullon-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 1500 + i, 1500 + i, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+        let id = format!("hold-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 500 + i, 500 + i, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+    let hl = attribution::headline(&store, &pricing, 0x11).unwrap();
+    assert_eq!(hl.baseline, attribution::HeadlineBaseline::Holdout);
+    let m = hl.multiplier.expect("a measured regression must still surface");
+    assert!(m < 1.0, "savers genuinely cost more against the holdout (m={m:.2})");
+}
+
 // ---------------------------------------------------------------------------
 // Store: session_savers + rotation_state + pre-install tagging round-trips.
 // ---------------------------------------------------------------------------

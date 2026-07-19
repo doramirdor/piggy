@@ -714,7 +714,14 @@ fn stream_stat(stream: Stream, on: &[f64], off: &[f64], ceiling: Badge, seed: u6
         .map(|d| ci_at(d, CI_ALPHA / STREAM_FAMILY as f64));
     let enough = on.len() >= MIN_GROUP && off.len() >= MIN_GROUP;
     let significant = gate_ci.map(ci_is_significant).unwrap_or(false);
-    let badge = if enough && delta.is_some() && significant {
+    // A saver can cut a stream by at most 100% (delta -> 1). An *observational*
+    // (estimated) comparison showing the treatment using >100% MORE (delta <= -1)
+    // is the pre-install workload mix talking, not the saver, so it must not wear
+    // the "estimated" badge - it stays "measuring" until a real contrast exists.
+    // The randomized (measured) path is exempt: a genuine holdout may show a large
+    // increase and has to surface it honestly.
+    let plausible = ceiling == Badge::Measured || delta.is_some_and(|d| d > -1.0);
+    let badge = if enough && delta.is_some() && significant && plausible {
         ceiling
     } else {
         Badge::Measuring
@@ -1072,7 +1079,19 @@ pub fn headline_with_map(
         let mon = median(&on_spend);
         let moff = median(&off_spend);
         if mon > 0.0 && moff > 0.0 {
-            Some(moff / mon)
+            let m = moff / mon;
+            // An observational (estimated) baseline can suggest a saving but cannot
+            // credibly attribute a *cost increase* to the savers: a full-on set that
+            // spends more than pre-install history (m < 1) is far likelier heavier
+            // recent work than a real regression, and this app fakes no number. Such
+            // an estimate stays "measuring" (None -> the headline shows progress, not
+            // a figure) until a randomized holdout can prove the sign. A real
+            // regression still surfaces once `ceiling == Measured`, which is exempt.
+            if ceiling != Badge::Measured && m < 1.0 {
+                None
+            } else {
+                Some(m)
+            }
         } else {
             None
         }
