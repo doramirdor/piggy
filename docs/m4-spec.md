@@ -113,6 +113,6 @@ from DESIGN.md apply everywhere (savers, never hooks).
 
 ## Acceptance (from build prompt M4)
 
-Fresh Mac path: `npx piggybank` → app opens → master toggle → run one Claude Code session →
+Fresh Mac path: `npx @amirdor/piggybank` → app opens → master toggle → run one Claude Code session →
 panel shows it counted. Plus: `npm run tauri build` produces a .app; `npm run tauri dev`
 works for development; unit tests for share-card data mapping and badge-state logic.

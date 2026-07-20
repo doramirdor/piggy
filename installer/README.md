@@ -1,4 +1,4 @@
-# piggybank
+# @amirdor/piggybank
 
 The `npx` installer for **Piggy**, a macOS menu bar app. Zero dependencies -
 Node stdlib only (`https`, `crypto`, `fs`, `os`, `child_process`, `readline`).
@@ -8,7 +8,7 @@ Node stdlib only (`https`, `crypto`, `fs`, `os`, `child_process`, `readline`).
 Install the latest release:
 
 ```sh
-npx piggybank
+npx @amirdor/piggybank
 ```
 
 This will:
@@ -30,13 +30,13 @@ This will:
 Skip the copy prompt (assume yes) - handy for CI or scripted setups:
 
 ```sh
-npx piggybank --yes
+npx @amirdor/piggybank --yes
 ```
 
 Uninstall:
 
 ```sh
-npx piggybank --uninstall
+npx @amirdor/piggybank --uninstall
 ```
 
 Prompts **[y/N]** before removing `/Applications/Piggy.app` (or pass `--yes`
@@ -50,7 +50,7 @@ rm -rf ~/.piggy
 See all flags:
 
 ```sh
-npx piggybank --help
+npx @amirdor/piggybank --help
 ```
 
 ## Configuration
@@ -84,9 +84,9 @@ install target changes), update `installer/package.json`:
 2. Leave `piggy.version` as `"latest"` for normal releases - the installer
    always resolves whatever GitHub currently marks as the latest release via
    `GET /repos/<repo>/releases/latest`. Only pin `piggy.version` to a
-   specific tag if you deliberately want `npx piggybank` to install an
+   specific tag if you deliberately want `npx @amirdor/piggybank` to install an
    older/specific version.
-3. Bump the installer's own `version` field (semver for the `piggybank` npm
+3. Bump the installer's own `version` field (semver for the `@amirdor/piggybank` npm
    package itself - independent of the Piggy app version) and `npm publish`
    from `installer/`.
 
@@ -107,7 +107,7 @@ Piggy):
 
   Typically generated with `shasum -a 256 *.dmg > checksums.txt`.
 
-Until the repo has a first release, `npx piggybank` prints:
+Until the repo has a first release, `npx @amirdor/piggybank` prints:
 
 > Piggy hasn't shipped its first release yet - watch
 > https://github.com/\<repo\>/releases
@@ -136,7 +136,7 @@ node cli.js --help
   streaming download + progress bar, `hdiutil`/`open` invocations, the
   readline `[y/N]` prompts, and ANSI-colored output. It has no exported
   surface to unit test directly - it's exercised by hand (`node cli.js`)
-  and via the acceptance path in the M4 spec (`npx piggybank` → app opens).
+  and via the acceptance path in the M4 spec (`npx @amirdor/piggybank` → app opens).
 
 ### Tests
 

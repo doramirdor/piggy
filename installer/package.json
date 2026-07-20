@@ -1,10 +1,10 @@
 {
-  "name": "piggybank",
+  "name": "@amirdor/piggybank",
   "version": "0.1.0",
   "description": "npx installer for Piggy, a macOS menu bar app that tracks Claude Code savings.",
   "license": "MIT",
   "bin": {
-    "piggybank": "./cli.js"
+    "piggybank": "cli.js"
   },
   "main": "lib.js",
   "files": [

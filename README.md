@@ -163,9 +163,10 @@ download, not actual damage. Clear it once and open normally:
 xattr -dr com.apple.quarantine /Applications/Piggy.app
 ```
 
-A one-command installer, `npx piggybank`, lives in [`installer/`](installer/) and becomes the easy
-path once it's published to npm: it downloads the `.dmg`, verifies it against `checksums.txt`, and
-copies it into Applications for you.
+A one-command installer is now on npm: **`npx @amirdor/piggybank`** downloads the `.dmg`, verifies
+it against `checksums.txt`, and copies it into Applications for you. (Source in
+[`installer/`](installer/); package at
+[npmjs.com/package/@amirdor/piggybank](https://www.npmjs.com/package/@amirdor/piggybank).)
 
 Command-line fans get a standalone CLI too. It ships inside the app: turn on **Command line
 tool** in Settings and Piggy links `piggy` onto your PATH, via `~/.piggy/bin` and one managed
@@ -250,8 +251,8 @@ Piggy is built so the interesting parts grow without a rewrite:
   are curated but likewise wait on install work.)
 - **Discovery → measurement.** The Discover tab already surfaces candidate savers spotted on GitHub.
   The next step is wiring a spotted tool straight into a measured holdout test.
-- **Notarized, signed builds** so install is a plain double-click, and the `npx piggybank`
-  one-liner goes live on npm.
+- **Notarized, signed builds** so install is a plain double-click. (The `npx @amirdor/piggybank`
+  one-liner is already live on npm; notarization is the piece still to come.)
 - **Registry updates without an app release.** The refresh-from-GitHub path is designed but stubbed
   today; the catalog is embedded at build time. Wiring it lets new savers reach you between releases.
 - **Codex, more fully.** Piggy already reads Codex session logs for counting; the savers themselves
@@ -264,7 +265,7 @@ Want your tool in the box? See [For saver authors](#for-saver-authors).
 **v0.1.0 shipped** as an unsigned developer preview: a universal `.dmg` on the
 [Releases](../../releases) page. All four milestones are built and tested: ✅ measurement core ·
 ✅ install engine · ✅ holdout measurement · ✅ menu bar app (159 tests, run locally - this repo has
-no CI). Next up: Apple notarization and the npm installer (see
+no CI). The `npx @amirdor/piggybank` installer is live on npm; next up is Apple notarization (see
 [What can be inside](#what-can-be-inside)); the signing/notarization steps live in
 [docs/releasing.md](docs/releasing.md). Design notes are in [DESIGN.md](DESIGN.md).
 

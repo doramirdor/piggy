@@ -12,7 +12,7 @@
   needed: the indexer already reads Codex rollout logs from `~/.codex` (read-only) alongside
   Claude Code's, and pricing covers `gpt-*`. The savers themselves are still Claude Code only.
 - CLI binary: `piggy` · data dir: `~/.piggy/` · db: `~/.piggy/piggy.db`
-- npm installer: `npx piggybank` (verified available) · repo working dir: this one.
+- npm installer: `npx @amirdor/piggybank` (verified available) · repo working dir: this one.
 - Tagline: **"Your Claude plan, but longer."** Sub: *The App Store - and the referee - for
   Claude Code token savers.*
 
@@ -113,4 +113,4 @@ Rationale: standard, small, audited crates; hand-rolling arg parsing/error types
 - **M2** engine: install→verify→uninstall leaves settings.json byte-identical to backup, with
   pre-existing hooks present. ✅ = merge.
 - **M3** measurement: dashboard-ready measured deltas with n-counts.
-- **M4** GUI: fresh Mac → `npx piggybank` → toggle master switch → run a session → see it counted.
+- **M4** GUI: fresh Mac → `npx @amirdor/piggybank` → toggle master switch → run a session → see it counted.

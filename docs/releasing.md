@@ -19,7 +19,7 @@ Manual steps a maintainer runs; nothing here blocks local development.
      `-p` and set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` wherever you build.
    - CI secret: `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents or a path to it).
 3. **GitHub repo.** Does not exist yet, and the working copy has no git remote. Until it is
-   created and a release is published, `npx piggybank` and the README's release links resolve
+   created and a release is published, `npx @amirdor/piggybank` and the README's release links resolve
    to nothing. Create it, then confirm `installer/package.json` → `piggy.repo` matches
    (currently: `doramirdor/piggy`).
 
