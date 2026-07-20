@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/release-v0.1.0-e8a33d" alt="Release: v0.1.0">
   <img src="https://img.shields.io/badge/license-MIT-3d7fd8" alt="License: MIT">
   <img src="https://img.shields.io/badge/platform-macOS-6b7280" alt="Platform: macOS">
-  <img src="https://img.shields.io/badge/tests-208%20local-6b7280" alt="208 tests, run locally">
+  <img src="https://img.shields.io/badge/tests-159%20local-6b7280" alt="159 tests, run locally">
 </p>
 
 Piggy is a free, open-source macOS menu bar app for Claude Code users who keep hitting usage
@@ -26,6 +26,16 @@ files - and then does something nobody else does: **it measures whether they act
 > through it. Notarized, double-click builds are the next milestone.
 
 <p align="center">
+  <a href="docs/piggy-demo.mp4">
+    <img src="docs/piggy-demo.gif" width="760" alt="A 30-second demo of Piggy: a title card reading 'Make your agent plan last longer', the Dashboard reading 'Your Claude plan lasts 1.7x longer', and the Savers list with green Measured badges">
+  </a>
+</p>
+
+<p align="center">
+  <sub><strong>▶ <a href="docs/piggy-demo.mp4">Watch the full 33-second demo</a></strong> — the loop above is a silent highlight</sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/dashboard.png" alt="Piggy's Dashboard tab: a hero card reading 'Your Claude plan lasts 1.7x longer, measured against 12 holdout sessions', a four-stream token bar for input, output, cache write and cache read, tiles for tokens saved and money avoided, and an 'Across your tools' section">
 </p>
 
@@ -33,9 +43,9 @@ files - and then does something nobody else does: **it measures whether they act
 *estimated*, and the app says so on both: `Tokens saved` reads *estimated from a holdout-measured
 multiplier*, `Money avoided` reads *estimated from your plan pricing*.</sub>
 
-> **About the screenshots.** They are the real UI running on sample fixtures, captured from the
-> app's mock mode (`npm run dev:mock`), never from a real install. Every number in them is seeded
-> demo data. They show what Piggy displays and how it labels things; they are not anyone's
+> **About the screenshots and the demo.** They are the real UI running on sample fixtures, captured
+> from the app's mock mode (`npm run dev:mock`), never from a real install. Every number in them is
+> seeded demo data. They show what Piggy displays and how it labels things; they are not anyone's
 > measured results, and no saver's savings should be inferred from them.
 
 ## How it works
@@ -73,8 +83,9 @@ where they all land at once:
 
 Three things in that screenshot are the whole product:
 
-- **`−9%` and `−22%`, each with an `n=`.** Per-saver deltas against your holdout sessions, with the
-  sample size attached, so you can see how much session data each number rests on.
+- **`−9%` and `−22%`, each with an `n=`.** Per-saver deltas, each against the sessions where Piggy
+  held that one saver out with everything else still running, and the sample size attached, so you can
+  see how much session data each number rests on.
 - **`tokens measured` sitting beside `estimated from plan pricing`.** Two tiles, two labels, never
   blended. Tokens are counted from your logs. Cost always involves a pricing table, so cost is
   always estimated, and always says so.
@@ -83,7 +94,8 @@ Three things in that screenshot are the whole product:
 ## What's inside
 
 Flip the master switch and Piggy sets up a curated stack of savers, in the right order, backing up
-your Claude settings first. What ships in v0.1.0:
+your Claude settings first. Six install in v0.1.0; two more (marked &sup2;) are curated but their
+install path lands in a later update:
 
 | Saver | What it does | License |
 | --- | --- | --- |
@@ -92,13 +104,17 @@ your Claude settings first. What ships in v0.1.0:
 | **Headroom** | Deep compression on the sessions you start with `piggy-claude` | Apache-2.0 |
 | **Caveman** | Nudges Claude to answer in fewer words, same code | MIT |
 | **Ponytail** | Nudges Claude to build only what you asked for, no gold-plating | MIT |
-| **Claude Token Optimizer** | Restructures your `CLAUDE.md` so sessions start lighter | MIT |
+| **Claude Token Optimizer** &sup2; | Restructures your `CLAUDE.md` so sessions start lighter | MIT |
 | **Token Optimizer** | Sends Claude only what changed in files it already saw | PolyForm-Noncommercial &sup1; |
-| **Context Mode** | Keeps huge tool outputs out of context until you need them | Elastic-2.0 &sup1; |
+| **Context Mode** &sup2; | Keeps huge tool outputs out of context until you need them | Elastic-2.0 &sup1; |
 
 <sub>&sup1; Source-available, **not** open source. Piggy names the license on the saver's row before
 you touch the toggle, and never vendors or forks a saver's code: it installs from wherever the author
-already publishes and pins a known-good version.</sub>
+already publishes, pinning a known-good version where the source supports it (a GitHub release tag or
+a PyPI version; Claude-marketplace plugins install the version the marketplace currently serves).</sub>
+
+<sub>&sup2; Curated, but not installable in v0.1.0 yet - the install path lands in a later update, and
+Piggy refuses to turn them on until then (in the app they read *Coming in a later Piggy update*).</sub>
 
 Under the hood it's three pieces, and only the first holds any optimization logic Piggy wrote itself:
 
@@ -123,9 +139,9 @@ reach you with app updates.
 
 Turning a saver on is the one exception, and it's worth stating plainly: Piggy runs that
 saver's official installer, which fetches from that saver's own home rather than from GitHub.
-Headroom comes from PyPI, into an isolated venv; the plugin savers come from the Claude
-plugin marketplace, fetched by your own `claude` binary. Normal, and pinned to a known
-version, but it isn't Piggy talking to GitHub. Separately, once Headroom is on,
+Headroom comes from PyPI at a pinned version, into an isolated venv; the plugin savers come
+from the Claude plugin marketplace, fetched by your own `claude` binary, at whatever version the
+marketplace currently serves. Normal either way, but it isn't Piggy talking to GitHub. Separately, once Headroom is on,
 `piggy-claude` runs your session through its local proxy, which relays to Anthropic the same
 way plain `claude` already does.
 
@@ -158,7 +174,7 @@ unless a saver you still have on keeps a binary in `~/.piggy/bin` - Headroom's `
 is the usual reason it stays.
 
 ```
-piggy stats          # today / week / month token totals, per project and model
+piggy stats          # token totals by window (day / week / month / all)
 piggy doctor         # checks your setup and Piggy's own health
 ```
 
@@ -206,8 +222,9 @@ savings, so pick the wrapper and stick with it.
 ## For saver authors
 
 Piggy never forks or vendors your code. It installs from wherever you already publish (GitHub
-release artifacts, PyPI, the Claude plugin marketplace) and pins a known-good version. Where
-you ship a checksums file alongside a GitHub release, Piggy verifies the download against it.
+release artifacts, PyPI, the Claude plugin marketplace) and pins a known-good version where the
+source supports it - a release tag or a PyPI version. Where you ship a checksums file alongside a
+GitHub release, Piggy verifies the download against it.
 Want your tool listed? Open a PR against `registry/catalog.json`. Honest measurement is
 applied equally to everyone.
 
@@ -227,9 +244,10 @@ Piggy is built so the interesting parts grow without a rewrite:
 
 - **More savers, by PR.** The catalog is data. If your tool has an official release (GitHub, PyPI,
   the Claude plugin marketplace), it can be listed and measured on the same honest terms as
-  everything already in the box. Two are staged: **NadirClaw** (route simple prompts to
-  cheaper or local models) is deferred pending a v2 install path, and **token-optimizer-mcp** is
-  listed for transparency only.
+  everything already in the box. Two more sit outside the box entirely: **NadirClaw** (route simple
+  prompts to cheaper or local models) is deferred pending a v2 install path, and **token-optimizer-mcp**
+  is listed for transparency only. (The two &sup2; rows above, Claude Token Optimizer and Context Mode,
+  are curated but likewise wait on install work.)
 - **Discovery → measurement.** The Discover tab already surfaces candidate savers spotted on GitHub.
   The next step is wiring a spotted tool straight into a measured holdout test.
 - **Notarized, signed builds** so install is a plain double-click, and the `npx piggybank`
@@ -245,7 +263,7 @@ Want your tool in the box? See [For saver authors](#for-saver-authors).
 
 **v0.1.0 shipped** as an unsigned developer preview: a universal `.dmg` on the
 [Releases](../../releases) page. All four milestones are built and tested: ✅ measurement core ·
-✅ install engine · ✅ holdout measurement · ✅ menu bar app (208 tests, run locally - this repo has
+✅ install engine · ✅ holdout measurement · ✅ menu bar app (159 tests, run locally - this repo has
 no CI). Next up: Apple notarization and the npm installer (see
 [What can be inside](#what-can-be-inside)); the signing/notarization steps live in
 [docs/releasing.md](docs/releasing.md). Design notes are in [DESIGN.md](DESIGN.md).
