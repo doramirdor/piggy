@@ -212,10 +212,10 @@ function printHelp() {
 ${c.pink}🐷 piggybank${c.reset} - installer for Piggy, the macOS menu bar app
 
 ${c.bold}Usage${c.reset}
-  npx piggybank              Install the latest Piggy release
-  npx piggybank --yes        Install, skipping the copy-to-/Applications prompt
-  npx piggybank --uninstall  Remove /Applications/Piggy.app
-  npx piggybank --help       Show this help
+  npx @amirdor/piggybank              Install the latest Piggy release
+  npx @amirdor/piggybank --yes        Install, skipping the copy-to-/Applications prompt
+  npx @amirdor/piggybank --uninstall  Remove /Applications/Piggy.app
+  npx @amirdor/piggybank --help       Show this help
 
 ${c.bold}Flags${c.reset}
   -y, --yes        Assume "yes" for confirmation prompts
