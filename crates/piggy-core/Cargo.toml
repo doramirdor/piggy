@@ -28,6 +28,24 @@ tar = "0.4"
 notify = "6"
 # Atomic temp-file+rename writes for settings.json / state.json (also used in tests).
 tempfile = "3"
+# Local advisor inference. Optional and OFF by default: it links llama.cpp, so
+# enabling it puts a C++/cmake toolchain on the critical path of every build.
+# Piggy ships without an LLM; this is what the opt-in build turns on.
+llama-cpp-2 = { version = "0.1.153", optional = true }
+# Needed to hold ONE decoder across a whole generation: llama.cpp emits tokens
+# whose bytes can split a multi-byte character, so a fresh decoder per token
+# mangles any non-ASCII output. Version tracks llama-cpp-2's own so the two
+# resolve to a single crate.
+encoding_rs = { version = "0.8.35", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = []
+# The local advisor. Weights are downloaded at runtime (data, sha256-verified);
+# the inference code is linked in here so what executes is what was signed.
+local-llm = ["dep:llama-cpp-2", "dep:encoding_rs"]
+# Apple GPU offload. Separate from `local-llm` so a CI build can compile the
+# advisor without a Metal toolchain.
+metal = ["llama-cpp-2/metal"]

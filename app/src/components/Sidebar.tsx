@@ -6,6 +6,12 @@ import { Switch } from "./Switch";
 
 // Line-icon set for the sidebar nav (SF-Symbols-adjacent, 1.7px stroke).
 const ICONS: Record<Tab, JSX.Element> = {
+  ledger: (
+    <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5h16v14H4z" />
+      <path d="M4 9.5h16M9.5 9.5V19" />
+    </svg>
+  ),
   overview: (
     <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <path d="M3 10.5 12 3l9 7.5" />
@@ -45,6 +51,7 @@ const ICONS: Record<Tab, JSX.Element> = {
 };
 
 const LABELS: Record<Tab, string> = {
+  ledger: "Ledger",
   overview: "Dashboard",
   savers: "Savers",
   discover: "Discovery",
@@ -53,11 +60,15 @@ const LABELS: Record<Tab, string> = {
   settings: "Settings",
 };
 
-const ORDER: Tab[] = ["overview", "savers", "discover", "proof", "reports", "settings"];
+const ORDER: Tab[] = ["ledger", "overview", "savers", "discover", "proof", "reports", "settings"];
 
 export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
   const savers = useStore((s) => s.savers);
   const masterOn = savers?.masterOn ?? false;
+  // The master switch can read ON while every saver is off. Don't claim savers
+  // are live unless at least one actually is, or this pill contradicts the
+  // dashboard hero (which keys off enabled savers, not the master flag).
+  const anyEnabled = (savers?.savers ?? []).some((s) => s.enabled);
   const masterBusy = useStore((s) => s.masterBusy);
   const toggleMaster = useStore((s) => s.toggleMaster);
 
@@ -85,7 +96,9 @@ export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
         <div className="master-mini">
           <div className="mtxt">
             <div className="m1">{masterOn ? "Piggy is ON" : "Piggy is OFF"}</div>
-            <div className="m2">{masterOn ? "Your savers are live" : "Savers are paused"}</div>
+            <div className="m2">
+              {masterOn ? (anyEnabled ? "Your savers are live" : "No savers on yet") : "Savers are paused"}
+            </div>
           </div>
           <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Piggy master switch" />
         </div>

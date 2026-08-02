@@ -23,6 +23,14 @@ exit 0
 PIP
   chmod +x "$dir/bin/pip"
 
+  # Fake venv interpreter: answers `-c "import <pkg>"` (barber's health check)
+  # as if pip had really installed the package.
+  cat > "$dir/bin/python" <<'PY'
+#!/bin/bash
+exit 0
+PY
+  chmod +x "$dir/bin/python"
+
   # Fake headroom CLI: answers --version and no-ops wrap/doctor.
   cat > "$dir/bin/headroom" <<'HR'
 #!/bin/bash

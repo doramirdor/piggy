@@ -43,6 +43,7 @@ function ProofRow({ saver }: { saver: SaverRow }) {
 
 export function Overview() {
   const stats = useStore((s) => s.stats);
+  const ledger = useStore((s) => s.ledger);
   const sources = useStore((s) => s.sources);
   const savers = useStore((s) => s.savers);
   const setTab = useStore((s) => s.setTab);
@@ -56,13 +57,27 @@ export function Overview() {
   }, [showError, sweepOpen]);
 
   // Live gate: a saving figure is only shown when at least one saver is
-  // actually enabled right now. When Piggy is off nothing is being saved, so the
-  // dashboard shows the honest "off" state instead of a stale historical number.
+  // actually enabled right now. When nothing is enabled nothing is being saved,
+  // so the dashboard shows the honest non-live state instead of a stale number.
+  //
+  // "Piggy on/off" is the master switch (savers.masterOn), a separate flag that
+  // can read ON while every saver is off. Keep the two apart so the hero never
+  // says "Piggy is off" while the sidebar switch reads ON: master-off is
+  // "paused", master-on-but-nothing-enabled is "idle" (no savers on).
   const live = (savers?.savers ?? []).some((s) => s.enabled);
-  const off = savers != null && !live;
+  const masterOn = savers?.masterOn ?? false;
+  const paused = savers != null && !masterOn;
+  const idle = savers != null && masterOn && !live;
+  const off = paused || idle;
   const h = stats?.headline;
   const measured = live && h && h.label === "measured" && h.value != null;
   const estimated = live && h && h.label === "estimated" && h.value != null;
+  // Whether the A/B engine has an actual number. When it doesn't, the hero
+  // falls back to the ledger's headroom rather than sitting on "measuring…":
+  // one is a measured saving, the other is available headroom, and the eyebrow
+  // and sub-line below keep them worded apart.
+  const hasMeasuredValue = Boolean(measured || estimated);
+  const headroom = ledger?.headroom ?? null;
   const mult = measured || estimated ? h!.value! : null;
 
   // Savings derived from the multiplier: to do the work you did without savers
@@ -124,7 +139,15 @@ export function Overview() {
       <div className={`hero ${off ? "off" : ""}`}>
         <div className="hero-top">
           <div>
-            <div className="eyebrow">{off ? "Savings are live only" : "Your Claude plan lasts"}</div>
+            <div className="eyebrow">
+              {off
+                ? "Savings are live only"
+                : hasMeasuredValue
+                  ? "Your Claude plan lasts"
+                  : headroom != null
+                    ? "Your Claude plan could go"
+                    : "Your Claude plan lasts"}
+            </div>
             {measured ? (
               <div className="big">
                 <em>{h!.value!.toFixed(1)}×</em> longer
@@ -134,7 +157,21 @@ export function Overview() {
                 <em>~{h!.value!.toFixed(1)}×</em> longer
               </div>
             ) : off ? (
-              <div className="big measuring">Piggy is off</div>
+              <div className="big measuring">{paused ? "Piggy is off" : "No savers on"}</div>
+            ) : headroom != null ? (
+              // The A/B headline needs randomization and can sit at "measuring"
+              // for weeks. The ledger needs neither, so rather than show nothing
+              // we show what IS known: exact token arithmetic on how much of the
+              // context is configurable. Worded "could" throughout — this is
+              // available headroom, never a saving already banked.
+              // `em.exact`, not a bare `em`: the hero's green is reserved for a
+              // holdout-backed claim, and headroom is exact arithmetic on
+              // configurable context, not a saving anyone has banked. Sharing
+              // the claim colour with it is exactly the blur this app exists to
+              // avoid.
+              <div className="big">
+                <em className="exact">{headroom.toFixed(1)}×</em> further
+              </div>
             ) : (
               <div className="big measuring">measuring…</div>
             )}
@@ -142,7 +179,7 @@ export function Overview() {
           {savedPct != null && <span className="delta">saved {savedPct}%</span>}
           {off && (
             <button className="btn" onClick={() => setTab("savers")}>
-              Turn on
+              {paused ? "Turn on" : "Choose a saver"}
             </button>
           )}
         </div>
@@ -155,11 +192,15 @@ export function Overview() {
                 // saver riding through the holdout) are not "in progress" at all.
                 (h!.note ?? "estimated")
               : off
-                ? "No savers are on, so nothing is saving right now. Turn one on to start banking tokens."
-                : // Also from the backend: which side is short is not always the
-                  // holdout, and saying "15 of 10 holdout sessions" when it isn't
-                  // is worse than saying nothing.
-                  (h?.note ?? `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`)}
+                ? paused
+                  ? "Piggy is paused, so nothing is saving right now. Turn it on to start banking tokens."
+                  : "No savers are on, so nothing is saving right now. Turn one on to start banking tokens."
+                : headroom != null
+                  ? `${Math.round((ledger?.removableShare ?? 0) * 100)}% of your spend is configurable context (startup listings, hooks, injections) - removing it stretches the same plan that much further`
+                  : // Also from the backend: which side is short is not always the
+                    // holdout, and saying "15 of 10 holdout sessions" when it isn't
+                    // is worse than saying nothing.
+                    (h?.note ?? `${h?.nHoldout ?? 0} of 10 holdout sessions so far - no number faked`)}
         </div>
         {stats && <StreamBars streams={stats.streams} tall />}
       </div>

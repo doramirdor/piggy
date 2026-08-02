@@ -28,10 +28,18 @@ function WarnTri({ text }: { text: string | null }) {
   );
 }
 
-function InfoBtn({ saver }: { saver: SaverRow }) {
-  const info = saver.warning ?? saver.claimedSavings ?? saver.description;
+/* Click-to-expand rather than a hover tooltip: the webview does not render
+ * native `title` tooltips, and this copy runs to a paragraph anyway. Same
+ * disclosure pattern as the gear. */
+function InfoBtn({ saver, open, onClick }: { saver: SaverRow; open: boolean; onClick: () => void }) {
   return (
-    <button type="button" className="info-btn" title={info} aria-label={`About ${saver.name}`}>
+    <button
+      type="button"
+      className={`info-btn ${open ? "open" : ""}`}
+      aria-label={`About ${saver.name}`}
+      aria-expanded={open}
+      onClick={onClick}
+    >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
         <circle cx="12" cy="12" r="9" />
         <path d="M12 11v5" />
@@ -70,7 +78,9 @@ function GearBtn({
 function SaverRowItem({ saver }: { saver: SaverRow }) {
   const busy = useStore((s) => s.busySavers.includes(saver.id));
   const toggle = useStore((s) => s.toggleSaver);
+  const unpin = useStore((s) => s.unpinSaver);
   const [configOpen, setConfigOpen] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const name = saver.name;
   return (
     <>
@@ -107,12 +117,17 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
           {saver.badge.note && !busy && (
             <div className="measure-note">{saver.badge.note}</div>
           )}
+          {saver.pinned && saver.enabled && !busy && (
+            <button type="button" className="unpin-cta" onClick={() => unpin(saver.id)}>
+              Let Piggy rotate &amp; measure this
+            </button>
+          )}
         </div>
         <StatusChip badge={saver.badge} />
         {saver.configurable && (
           <GearBtn name={name} open={configOpen} onClick={() => setConfigOpen((o) => !o)} />
         )}
-        <InfoBtn saver={saver} />
+        <InfoBtn saver={saver} open={infoOpen} onClick={() => setInfoOpen((o) => !o)} />
         <Switch
           on={saver.enabled}
           busy={busy}
@@ -120,6 +135,11 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
           label={`Turn ${name} ${saver.enabled ? "off" : "on"}`}
         />
       </div>
+      {infoOpen && (
+        <div className="cfg">
+          <div className="desc">{saver.warning ?? saver.claimedSavings ?? saver.description}</div>
+        </div>
+      )}
       {configOpen && saver.configurable && <SaverConfigPanel saverId={saver.id} />}
     </>
   );
@@ -128,6 +148,9 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
 export function Savers() {
   const savers = useStore((s) => s.savers);
   const masterOn = savers?.masterOn ?? false;
+  // Master can be ON with every saver off. Keep the panel copy honest about
+  // whether anything is actually running, matching the sidebar and hero.
+  const anyEnabled = (savers?.savers ?? []).some((s) => s.enabled);
   const masterBusy = useStore((s) => s.masterBusy);
   const toggleMaster = useStore((s) => s.toggleMaster);
 
@@ -175,12 +198,18 @@ export function Savers() {
             <div className="t1">{masterOn ? "Piggy is ON" : "Piggy is OFF"}</div>
             <div className="t2">
               {masterOn
-                ? "Piggy is running. Your enabled savers are live."
+                ? anyEnabled
+                  ? "Piggy is running. Your enabled savers are live."
+                  : "Piggy is on, but no savers are enabled yet."
                 : "All savers are paused. No changes are active."}
             </div>
             <div className="mstatus">
               <i />
-              {masterOn ? "Active and measuring" : "No impact while off"}
+              {masterOn
+                ? anyEnabled
+                  ? "Active and measuring"
+                  : "On, but nothing saving yet"
+                : "No impact while off"}
             </div>
           </div>
         )}

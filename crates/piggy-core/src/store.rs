@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::parser::SessionParse;
 use crate::pricing::Pricing;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// How a session's saver assignment came to be, stored in `session_savers.source`.
 /// `rotation`/`holdout` are Piggy's A/B scheduler; `manual` is a user toggle;
@@ -119,6 +119,13 @@ impl Store {
                 source     TEXT NOT NULL,
                 PRIMARY KEY (session_id, saver_id)
             );
+            CREATE TABLE IF NOT EXISTS session_context (
+                session_id TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                tokens     INTEGER NOT NULL DEFAULT 0,
+                n          INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, kind)
+            );
             CREATE TABLE IF NOT EXISTS rotation_state (
                 id           INTEGER PRIMARY KEY CHECK (id = 0),
                 block_pos    INTEGER NOT NULL DEFAULT 0,
@@ -129,7 +136,8 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
             CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);
             CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);
-            CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);",
+            CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
+            CREATE INDEX IF NOT EXISTS idx_session_context_kind ON session_context(kind);",
         )?;
         // v3 → v4: sessions grew source/interface/client (multi-tool
         // observability). ALTERs run before the index that uses the columns;
@@ -246,6 +254,17 @@ impl Store {
                 "INSERT OR REPLACE INTO session_tools (session_id, tool_name, n)
                  VALUES (?1, ?2, ?3)",
                 params![parse.session_id, tool, n],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM session_context WHERE session_id = ?1",
+            params![parse.session_id],
+        )?;
+        for (kind, c) in &parse.context {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_context (session_id, kind, tokens, n)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![parse.session_id, kind, c.tokens, c.n],
             )?;
         }
         tx.execute(

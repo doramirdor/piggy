@@ -4,11 +4,16 @@
 // mutate module-level copies so the UI feels live during design QA.
 
 import { MOCK_MODE } from "./ipc";
+import snapshot from "./dev-snapshot.json";
 import type {
+  AdvisorStatus,
+  Annotation,
   ConfigOption,
   DiscoverDto,
   Doctor,
   Environment,
+  Insight,
+  LedgerOverview,
   Period,
   ReindexResult,
   RestoreResult,
@@ -39,6 +44,7 @@ function populatedSavers(): SaverRow[] {
       description: "Finds add-ons you never use that cost tokens on every request.",
       installType: "builtin",
       status: "curated_v1",
+      pinned: false,
       defaultOn: true,
       installed: true,
       enabled: true,
@@ -52,7 +58,7 @@ function populatedSavers(): SaverRow[] {
       ordering: 5,
       configurable: false,
       launchCommand: null,
-      badge: { kind: "measured", delta: -0.09, n: 18 },
+      badge: { kind: "measured", delta: -0.09, n: 18, nOn: 12, nOff: 6 },
     },
     {
       id: "rtk",
@@ -61,6 +67,7 @@ function populatedSavers(): SaverRow[] {
       description: "Compresses command output (git, tests, builds) before Claude sees it.",
       installType: "binary+hook",
       status: "curated_v1",
+      pinned: false,
       defaultOn: false,
       installed: true,
       enabled: true,
@@ -74,7 +81,7 @@ function populatedSavers(): SaverRow[] {
       ordering: 10,
       configurable: false,
       launchCommand: null,
-      badge: { kind: "measured", delta: -0.22, n: 41 },
+      badge: { kind: "measured", delta: -0.22, n: 41, nOn: 30, nOff: 11 },
     },
     {
       id: "token-optimizer",
@@ -83,6 +90,7 @@ function populatedSavers(): SaverRow[] {
       description: "Sends Claude only what changed in files it already saw.",
       installType: "claude_plugin",
       status: "curated_v1",
+      pinned: false,
       defaultOn: false,
       installed: false,
       enabled: false,
@@ -97,7 +105,7 @@ function populatedSavers(): SaverRow[] {
       ordering: 30,
       configurable: false,
       launchCommand: null,
-      badge: { kind: "measuring", delta: null, n: 0 },
+      badge: { kind: "measuring", delta: null, n: 0, nOn: 0, nOff: 0 },
     },
     {
       id: "headroom",
@@ -106,6 +114,7 @@ function populatedSavers(): SaverRow[] {
       description: "Compresses everything Claude reads. Works in sessions you start with piggy-claude.",
       installType: "venv+wrapper",
       status: "curated_v1",
+      pinned: false,
       defaultOn: true,
       installed: true,
       // Off initially so rtk can be on - turning the master on flips this and
@@ -121,7 +130,7 @@ function populatedSavers(): SaverRow[] {
       ordering: 40,
       configurable: false,
       launchCommand: "piggy-claude",
-      badge: { kind: "measuring", delta: null, n: 0 },
+      badge: { kind: "measuring", delta: null, n: 0, nOn: 0, nOff: 0 },
     },
     {
       id: "caveman",
@@ -130,6 +139,7 @@ function populatedSavers(): SaverRow[] {
       description: "Claude answers in short caveman speak - fewer words, same meaning.",
       installType: "claude_plugin",
       status: "curated_v1",
+      pinned: false,
       defaultOn: true,
       installed: true,
       enabled: true,
@@ -146,7 +156,7 @@ function populatedSavers(): SaverRow[] {
       launchCommand: null,
       // Estimated: enough observational history to show a number, but no live
       // holdout yet - the gray-blue "≈ −X% estimated" badge.
-      badge: { kind: "estimated", delta: -0.085, n: 15 },
+      badge: { kind: "estimated", delta: -0.085, n: 15, nOn: 10, nOff: 5 },
     },
     {
       id: "ponytail",
@@ -155,6 +165,7 @@ function populatedSavers(): SaverRow[] {
       description: "Nudges Claude to build only what you asked for - no gold-plating.",
       installType: "claude_plugin",
       status: "curated_v1",
+      pinned: false,
       defaultOn: false,
       installed: false,
       enabled: false,
@@ -169,7 +180,7 @@ function populatedSavers(): SaverRow[] {
       ordering: 60,
       configurable: false,
       launchCommand: null,
-      badge: { kind: "measuring", delta: null, n: 4 },
+      badge: { kind: "measuring", delta: null, n: 4, nOn: 4, nOff: 0 },
     },
   ];
 }
@@ -179,7 +190,7 @@ function emptySavers(): SaverRow[] {
     ...s,
     installed: false,
     enabled: false,
-    badge: { kind: "measuring", delta: null, n: 0 },
+    badge: { kind: "measuring", delta: null, n: 0, nOn: 0, nOff: 0 },
   }));
 }
 
@@ -344,69 +355,36 @@ function periodLabel(p: Period): string {
 }
 
 function statsOverview(period: Period): StatsOverview {
+  const label =
+    period === "today" ? "Today" : period === "week" ? "Last 7 days" : period === "month" ? "Last 30 days" : "All time";
   if (EMPTY) {
     return {
-      period,
-      periodLabel: periodLabel(period),
+      period, periodLabel: label,
       streams: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
-      totalTokens: 0,
-      sessions: 0,
-      costUsdEst: 0,
-      costEstimated: true,
-      fullyPriced: true,
+      totalTokens: 0, sessions: 0, costUsdEst: 0, costEstimated: true, fullyPriced: false,
       todayTokens: 0,
-      headline: { value: null, label: "not_enough_data", nHoldout: 0, note: null },
+      headline: {
+        value: null,
+        label: "not_enough_data",
+        nHoldout: 0,
+        note: null,
+        nFullOn: 0,
+        nBaseline: 0,
+        baselineKind: "none",
+        onRandomized: false,
+        baselineClean: false,
+        minGroup: 10,
+        streams: [],
+      },
     };
   }
-  const scale = { today: 0.12, week: 1, month: 4.2, all: 11 }[period];
-  const streams = {
-    input: Math.round(620_000 * scale),
-    output: Math.round(240_000 * scale),
-    cacheWrite: Math.round(380_000 * scale),
-    cacheRead: Math.round(520_000 * scale),
-  };
-  const total = streams.input + streams.output + streams.cacheWrite + streams.cacheRead;
-  return {
-    period,
-    periodLabel: periodLabel(period),
-    streams,
-    totalTokens: total,
-    sessions: { today: 4, week: 31, month: 118, all: 143 }[period],
-    costUsdEst: Math.round(42.18 * scale * 100) / 100,
-    costEstimated: true,
-    fullyPriced: true,
-    todayTokens: 184_000,
-    headline: { value: 1.7, label: "measured", nHoldout: 12, note: null },
-  };
+  const st = snapshot.stats as Omit<StatsOverview, "period" | "todayTokens">;
+  return { ...st, period, periodLabel: label, todayTokens: 0 };
 }
 
 function sourcesOverview(period: Period): SourcesOverview {
-  if (EMPTY) {
-    return {
-      period,
-      cells: [
-        { source: "claude-code", interface: "gui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: true },
-        { source: "claude-code", interface: "tui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: true },
-        { source: "codex", interface: "gui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: false },
-        { source: "codex", interface: "tui", sessions: 0, totalTokens: 0, costUsdEst: 0, toolPresent: false },
-      ],
-      unknownTokens: 0,
-      unknownSessions: 0,
-    };
-  }
-  const scale = { today: 0.12, week: 1, month: 4.2, all: 11 }[period];
-  const t = (n: number) => Math.round(n * scale);
-  return {
-    period,
-    cells: [
-      { source: "claude-code", interface: "gui", sessions: t(19), totalTokens: t(1_080_000), costUsdEst: Math.round(2540 * scale) / 100, toolPresent: true },
-      { source: "claude-code", interface: "tui", sessions: t(8), totalTokens: t(410_000), costUsdEst: Math.round(980 * scale) / 100, toolPresent: true },
-      { source: "codex", interface: "gui", sessions: t(2), totalTokens: t(90_000), costUsdEst: Math.round(160 * scale) / 100, toolPresent: true },
-      { source: "codex", interface: "tui", sessions: t(2), totalTokens: t(180_000), costUsdEst: Math.round(320 * scale) / 100, toolPresent: true },
-    ],
-    unknownTokens: 0,
-    unknownSessions: 0,
-  };
+  if (EMPTY) return { period, cells: [], unknownTokens: 0, unknownSessions: 0 };
+  return { period, ...(snapshot.sources as Omit<SourcesOverview, "period">) };
 }
 
 function usageSeries(period: Period): UsageSeries {
@@ -520,6 +498,20 @@ function discover(): DiscoverDto {
       ];
   const listedOnly = [
     {
+      id: "boost",
+      name: "Boost",
+      description: "JFrog CLI that compacts terminal output before Claude reads it (shell-wrapper, like RTK)",
+      claimedSavings: "up to 89.6% claimed (JFrog); ~12% measured in Boost's own README",
+      license: "Proprietary-Beta",
+      licenseNote:
+        "JFrog product in public beta under a BETA_AGREEMENT (not an OSI open-source license). Source-available at github.com/jfrog/boost.",
+      exclusionReason:
+        "Proprietary beta under the JFrog Online Preview Agreement - its terms forbid a third party from distributing, proxying, or installing a plug-in to the Beta Service without JFrog's prior written approval, so Piggy cannot ship or wire it (install it yourself if you want it). Its Claude hook also auto-allows every Bash command and turns on telemetry with no opt-out.",
+      note: "Listed for transparency - not installable.",
+      repoUrl: "https://github.com/jfrog/boost",
+      risk: "high",
+    },
+    {
       id: "token-optimizer-mcp",
       name: "token-optimizer-mcp",
       description: "MCP server with 65 tools + hook pipeline",
@@ -605,6 +597,88 @@ function environment(): Environment {
 
 // ---------------------------------------------------------------------------
 // dispatch
+/** Ledger + insights come from a SNAPSHOT OF THE REAL DATABASE, never from
+ *  numbers typed here. Regenerate with:
+ *
+ *      node scripts/snapshot-dev-data.mjs [--since YYYY-MM-DD]
+ *
+ *  Hand-written figures drift from the product and hide bugs — one did exactly
+ *  that, disagreeing with the real ledger while a broken headroom multiplier
+ *  went unnoticed. If these look wrong on screen, they are wrong for real. */
+function ledgerOverview(period: Period): LedgerOverview {
+  const label =
+    period === "today" ? "Today" : period === "week" ? "Last 7 days" : period === "month" ? "Last 30 days" : "All time";
+  if (EMPTY) {
+    return {
+      period, periodLabel: label, totalTokens: 0, removableTokens: 0, overhead: 0,
+      headroom: null, removableShare: 0,
+      sessions: 0, sources: [], projects: [], empty: true,
+    };
+  }
+  return { ...(snapshot.ledger as Omit<LedgerOverview, "period">), period };
+}
+
+function ledgerInsights(): Insight[] {
+  return EMPTY ? [] : (snapshot.insights as Insight[]);
+}
+
+// --- the local advisor ------------------------------------------------------
+
+/** An 8GB Mac: only the models that fit are listed, which is the real gate. */
+let advisorStatus: AdvisorStatus = {
+  compiledIn: true,
+  hostRamBytes: 8 * 1024 * 1024 * 1024,
+  budgetBytes: 4.8 * 1024 * 1024 * 1024,
+  state: "ready",
+  selectedId: "qwen3-4b-instruct-2507",
+  recommendedId: "qwen3-4b-instruct-2507",
+  models: [
+    {
+      id: "qwen3-4b-instruct-2507",
+      name: "Qwen3 4B Instruct",
+      blurb: "Best at reading your config. The default when it fits.",
+      bytes: 2_497_281_120,
+      peakBytes: 3_073_000_000,
+      context: 4096,
+      downloaded: true,
+    },
+    {
+      id: "gemma-3-4b-it",
+      name: "Gemma 3 4B",
+      blurb: "Same size as Qwen 4B but far cheaper at long context.",
+      bytes: 2_489_894_016,
+      peakBytes: 2_900_000_000,
+      context: 8192,
+      downloaded: false,
+    },
+  ],
+};
+
+/**
+ * Sample notes, written the way real ones must read: they name a cause and a
+ * specific item, and they contain **no figures**. Anything numeric here would be
+ * a fixture that the real guard would have rejected, which would make the mock
+ * lie about what the feature does.
+ */
+function advisorAnnotations(): Annotation[] {
+  if (EMPTY) return [];
+  const ids = new Set(ledgerInsights().map((i) => i.id));
+  return [
+    {
+      insightId: "floor-dominates",
+      headline: "Your skill listing is the largest thing loaded before you type",
+      why: "Every project loads the full catalogue at startup, so short sessions pay for it without using it. Scoping it to the projects that invoke skills would shrink the floor.",
+      model: "Qwen3 4B Instruct",
+    },
+    {
+      insightId: "per-turn-injections",
+      headline: "A hook is firing on every tool call, not just once",
+      why: "The largest injection re-enters context on each turn rather than at startup. Narrowing its matcher would keep it out of turns that do not need it.",
+      model: "Qwen3 4B Instruct",
+    },
+  ].filter((n) => ids.has(n.insightId));
+}
+
 // ---------------------------------------------------------------------------
 
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -619,6 +693,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return sourcesOverview((a.period as Period) ?? "week");
       case "usage_series":
         return usageSeries((a.period as Period) ?? "week");
+      case "ledger_overview":
+        return ledgerOverview((a.period as Period) ?? "week");
+      case "ledger_insights":
+        return ledgerInsights();
       case "savers_list":
         return saversState();
       case "saver_config_get":
@@ -693,6 +771,24 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       case "settings_set":
         settings = a.settings as Settings;
         return settings;
+      // The advisor, as an 8GB Mac with the model already downloaded, so the
+      // "ready" state and the annotated findings can be designed without a
+      // 2.5 GB fetch. Progress events do not exist in mock (no Tauri event bus),
+      // so the download flow is the one state this cannot show.
+      case "advisor_status":
+        return advisorStatus;
+      case "advisor_select":
+        advisorStatus = { ...advisorStatus, selectedId: (a.modelId as string) ?? null };
+        advisorStatus.state = advisorStatus.selectedId ? "ready" : "off";
+        return advisorStatus;
+      case "advisor_download":
+      case "advisor_cancel":
+        return undefined;
+      case "advisor_remove":
+        advisorStatus = { ...advisorStatus, selectedId: null, state: "off" };
+        return advisorStatus;
+      case "advisor_annotate":
+        return advisorStatus.state === "ready" ? advisorAnnotations() : [];
       case "restore_defaults":
         savers = EMPTY ? emptySavers() : populatedSavers();
         sweepItems = EMPTY ? [] : initialSweepItems();

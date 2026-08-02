@@ -26,8 +26,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use piggy_core::attribution::{
-    self, Badge as CoreBadge, Headline as CoreHeadline, HeadlineBaseline, SaverAttribution,
-    MIN_GROUP,
+    self, Badge as CoreBadge, Headline as CoreHeadline, HeadlineBaseline,
+    MultiplierState as CoreMultiplierState, SaverAttribution, MIN_GROUP,
 };
 use piggy_core::registry::Entry;
 use piggy_core::rotation::{self, RotationOutcome};
@@ -62,6 +62,12 @@ fn time_seed() -> u64 {
 
 static ATTR_INDEX_VERSION: AtomicU64 = AtomicU64::new(0);
 static ATTR_CACHE: Mutex<Option<(u64, Arc<AttrBundle>)>> = Mutex::new(None);
+/// Held for the duration of a recompute so concurrent callers queue behind one
+/// another instead of each starting their own. `stats_overview` and
+/// `savers_list` are issued together on every refresh and both want this bundle,
+/// so without it a single refresh ran the whole scan-and-bootstrap twice, in
+/// parallel, competing for the same cores.
+static ATTR_COMPUTE: Mutex<()> = Mutex::new(());
 
 struct AttrBundle {
     headline: CoreHeadline,
@@ -80,14 +86,31 @@ pub fn bump_attr_version() {
 /// once and cached. Best-effort: an unreadable store propagates as `Err` and the
 /// caller degrades to an honest "measuring"/"not_enough_data" rather than crash.
 fn attribution_bundle() -> anyhow::Result<Arc<AttrBundle>> {
+    let fresh = |version: u64| -> Option<Arc<AttrBundle>> {
+        let guard = ATTR_CACHE.lock().ok()?;
+        let (v, bundle) = guard.as_ref()?;
+        (*v == version).then(|| bundle.clone())
+    };
+
     let version = ATTR_INDEX_VERSION.load(Ordering::Relaxed);
-    if let Ok(guard) = ATTR_CACHE.lock() {
-        if let Some((v, bundle)) = guard.as_ref() {
-            if *v == version {
-                return Ok(bundle.clone());
-            }
-        }
+    if let Some(bundle) = fresh(version) {
+        return Ok(bundle);
     }
+
+    // Single-flight. The second caller blocks here rather than racing the first
+    // through the same scan, then finds the finished bundle on the re-check
+    // below and returns it. `lock()` only fails if a previous holder panicked
+    // mid-recompute; that poisons nothing we read, so take the guard anyway and
+    // let this call rebuild the cache.
+    let _compute = ATTR_COMPUTE.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-read the version rather than reusing the one from before the wait: a
+    // re-index may have landed while we queued, and computing against a version
+    // we already know is stale would cache under it and miss immediately.
+    let version = ATTR_INDEX_VERSION.load(Ordering::Relaxed);
+    if let Some(bundle) = fresh(version) {
+        return Ok(bundle);
+    }
+
     let home = config::piggy_home();
     let store = Store::open(&home)?;
     let pricing = Pricing::load(&home);
@@ -151,7 +174,7 @@ fn first_sentence(s: &str) -> String {
 // Period helpers
 // ---------------------------------------------------------------------------
 
-fn period_from(s: &str) -> Period {
+pub(crate) fn period_from(s: &str) -> Period {
     match s {
         "today" => Period::Today,
         "week" => Period::Week,
@@ -248,6 +271,43 @@ pub struct Streams {
     pub cache_read: u64,
 }
 
+/// One stream's side of the headline comparison, as the Proof screen draws it:
+/// the two medians it is a ratio of, plus the delta the core is willing to show.
+///
+/// The medians are the load-bearing part. `docs/measurement.md` says to show the
+/// measured per-stream percentages *before* the price-weighted `×`, and a
+/// percentage with nothing behind it is still a number the user has to take on
+/// faith. With both medians the screen can draw the comparison the delta came
+/// from, and an arm with no sessions is visibly an empty bar rather than a
+/// missing sentence.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadlineStream {
+    /// `"input" | "output" | "cache write" | "cache read"`.
+    pub stream: String,
+    /// `"measured" | "estimated" | "measuring"` — this stream's own badge, which
+    /// is not always the headline's: a stream can settle before the `×` does.
+    pub kind: String,
+    pub n_on: u64,
+    pub n_off: u64,
+    /// Median tokens per assistant turn, savers on / savers off. Zero when that
+    /// arm has no sessions, which the UI renders as an empty arm rather than a
+    /// zero measurement.
+    pub median_on: f64,
+    pub median_off: f64,
+    /// The change as a fraction, **negative = a saving** — the same sign
+    /// convention as `Badge.delta` (see `saver_badge`), because both cross this
+    /// boundary in one payload and a UI that flipped one and not the other would
+    /// render a saving as a regression.
+    ///
+    /// **Gated on the badge** (`StreamStat::shown_pct`), so a stream still
+    /// `measuring` sends `null` rather than a point estimate the UI might print
+    /// anyway. Note that `shown_pct` also fires for an observational
+    /// `estimated` figure, which is why `kind` travels alongside: only a
+    /// `measured` kind may be labelled measured in the UI.
+    pub delta: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Headline {
@@ -266,6 +326,34 @@ pub struct Headline {
     /// ("estimated vs your history, holdout measurement in progress") was simply
     /// false for the other two.
     pub note: Option<String>,
+    // --- the experiment behind the number -----------------------------------
+    //
+    // Everything below is what the Proof screen needs to show the *comparison*
+    // rather than assert its result. The core has always computed it; this
+    // payload used to drop it on the floor, so a screen titled "Proof" could
+    // only ever render the conclusion or the word "measuring".
+    /// Sessions on the ON arm: your current saver set, running.
+    pub n_full_on: u64,
+    /// Sessions on the OFF arm, whichever baseline won (`baseline_kind`).
+    /// `n_holdout` is the same count *only* when the baseline is the holdout,
+    /// and 0 otherwise, so it cannot stand in for this.
+    pub n_baseline: u64,
+    /// `"holdout" | "pre_install" | "none"` — what the ON arm is being compared
+    /// against, which decides whether a measured claim is reachable at all.
+    pub baseline_kind: String,
+    /// Whether the ON arm is randomized (every saver on because the scheduler
+    /// said so). False once it leans on hand-pinned sessions, which is the
+    /// blocker the user can actually undo.
+    pub on_randomized: bool,
+    /// Whether the holdout was a clean all-off one. False when a pinned saver
+    /// rode through it, so the no-savers counterfactual was never observed.
+    pub baseline_clean: bool,
+    /// Sessions needed on **each** arm before a measured claim ([`MIN_GROUP`]),
+    /// so the UI can draw honest progress instead of hard-coding 10.
+    pub min_group: u64,
+    /// Per-stream comparison, in display order. Empty when the store had no
+    /// attribution bundle to read.
+    pub streams: Vec<HeadlineStream>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,6 +389,13 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
                 label: "not_enough_data".to_string(),
                 n_holdout: 0,
                 note: None,
+                n_full_on: 0,
+                n_baseline: 0,
+                baseline_kind: "none".to_string(),
+                on_randomized: false,
+                baseline_clean: false,
+                min_group: MIN_GROUP as u64,
+                streams: Vec::new(),
             });
         Ok(StatsOverview {
             period: period_key(period).to_string(),
@@ -384,21 +479,52 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
     let note = if measured {
         None
     } else if !estimated {
-        // Not enough data: name the side that is actually short. Both screens
-        // hard-coded "N of 10 holdout sessions so far", which reads as nonsense
-        // ("15 of 10") whenever the holdout is fine and the full-on side is the
-        // thin one. That is the normal state right after the saver set changes,
-        // when Piggy restarts counting on the setup you now run.
-        Some(if hl.n_baseline < MIN_GROUP {
-            format!(
-                "{} of {} holdout sessions so far · no number faked",
-                hl.n_baseline, MIN_GROUP
-            )
+        // No publishable multiplier. Two very different reasons land here and want
+        // different words: the sample bar not being met yet, versus the data being
+        // in but the estimate withheld as implausible. `multiplier_state` carries
+        // which, so the sub-line stops always blaming sample size (it read "10 of 10
+        // sessions ... no number faked" while the real blocker was suppression).
+        let sample_short = hl.n_full_on < MIN_GROUP || hl.n_baseline < MIN_GROUP;
+        Some(if !hl.on_randomized {
+            // The root blocker, when it applies: nothing is being rotated. A setup
+            // with every saver pinned by hand gives Piggy no on/off contrast to
+            // measure - and its all-off holdouts get contaminated by the still-on
+            // pinned savers - so it sits here forever. Name that and the fix, not a
+            // session count that implies it is merely gathering.
+            "your savers are pinned by hand, so Piggy can't rotate them to compare on vs \
+             off · un-pin one in the Savers tab to let it measure"
+                .to_string()
+        } else if sample_short {
+            // Name the side that is actually short. Hard-coding "N of 10 holdout
+            // sessions" reads as nonsense ("15 of 10") whenever the holdout is fine
+            // and the full-on side is the thin one, the normal state right after the
+            // saver set changes and Piggy restarts counting on the setup you run now.
+            if hl.n_baseline < MIN_GROUP {
+                format!(
+                    "{} of {} holdout sessions so far · no number faked",
+                    hl.n_baseline, MIN_GROUP
+                )
+            } else {
+                format!(
+                    "{} of {} sessions on your current saver set so far · no number faked",
+                    hl.n_full_on, MIN_GROUP
+                )
+            }
+        } else if hl.multiplier_state == CoreMultiplierState::WithheldCostMore {
+            // Enough sessions on both sides, but the savers came out behind an
+            // observational baseline. Almost always heavier recent work, not a real
+            // regression, and Piggy is not rotating the savers so it cannot prove the
+            // sign. Say that, rather than "N of N sessions", which reads as "just
+            // gathering data" when the data is already in.
+            "your recent sessions cost more per turn than your history · likelier heavier \
+             work than a regression, so no number is faked · let Piggy rotate savers to \
+             measure the sign"
+                .to_string()
         } else {
-            format!(
-                "{} of {} sessions on your current saver set so far · no number faked",
-                hl.n_full_on, MIN_GROUP
-            )
+            // Enough sessions but no comparable spend to divide (a side priced to
+            // zero). Rare, and honest about it rather than faking a count.
+            "enough sessions, but no comparable spend to measure yet · no number faked"
+                .to_string()
         })
     } else if !hl.on_randomized {
         // Covers a saver switched on by hand AND one switched off by hand: either
@@ -408,7 +534,12 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
              cannot measure them"
                 .to_string(),
         )
-    } else if !hl.baseline_clean {
+    } else if !hl.baseline_clean && hl.baseline == HeadlineBaseline::Holdout {
+        // Only a real holdout baseline can be "dirtied" by a saver running through
+        // it. A pre-install baseline is `baseline_clean == false` by definition (it
+        // is not a holdout at all), so without the `== Holdout` guard the
+        // observational estimate wrongly claimed a saver ran through a holdout that
+        // does not exist. It falls through to the honest history note instead.
         Some(
             "estimated: a saver you turned on yourself kept running through the holdout, \
              so it was not a no-savers comparison"
@@ -426,6 +557,40 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         label: label.to_string(),
         n_holdout,
         note,
+        n_full_on: hl.n_full_on as u64,
+        n_baseline: hl.n_baseline as u64,
+        baseline_kind: match hl.baseline {
+            HeadlineBaseline::Holdout => "holdout",
+            HeadlineBaseline::PreInstall => "pre_install",
+            HeadlineBaseline::None => "none",
+        }
+        .to_string(),
+        on_randomized: hl.on_randomized,
+        baseline_clean: hl.baseline_clean,
+        min_group: MIN_GROUP as u64,
+        streams: hl
+            .streams
+            .iter()
+            .map(|s| HeadlineStream {
+                stream: s.stream.label().to_string(),
+                kind: match s.badge {
+                    CoreBadge::Measured => "measured",
+                    CoreBadge::Estimated => "estimated",
+                    CoreBadge::Measuring => "measuring",
+                }
+                .to_string(),
+                n_on: s.n_on as u64,
+                n_off: s.n_off as u64,
+                median_on: s.median_on,
+                median_off: s.median_off,
+                // Gate on the badge, not on `delta` being Some: a stream below
+                // the bar has a delta the core computed and deliberately will
+                // not stand behind, and the UI must not be the place that
+                // decides to print it anyway. Negated to match `Badge.delta`'s
+                // negative-is-a-saving convention, exactly as `saver_badge` does.
+                delta: s.shown_pct().map(|p| -p / 100.0),
+            })
+            .collect(),
     }
 }
 
@@ -603,6 +768,12 @@ pub struct Badge {
     /// Sessions backing the figure (measured/estimated) or counted so far
     /// (measuring).
     pub n: u64,
+    /// The two arms behind `n`, sent separately because the sum hides the thing
+    /// the chip's progress bar is about: promotion needs `MIN_GROUP` on **both**
+    /// sides, so a 14-on / 0-off split is `n = 14` and paints a full bar that can
+    /// never settle. The bar fills on the weaker arm.
+    pub n_on: u64,
+    pub n_off: u64,
     /// Why an *enabled* saver is stuck at `measuring`, in the user's terms (a
     /// required binary missing, rotation off, or pinned on by hand). `None` for a
     /// settled badge, a disabled saver, or the ordinary warm-up - the chip's
@@ -623,6 +794,10 @@ pub struct SaverRow {
     pub default_on: bool,
     pub installed: bool,
     pub enabled: bool,
+    /// True when the last toggle was a manual (hand) choice, which pauses this
+    /// saver from rotation. The UI shows an "un-pin" action so measurement can
+    /// resume - without it, a saver touched in the UI is measured never again.
+    pub pinned: bool,
     pub installable: bool,
     pub behavior_changing: bool,
     pub warning: Option<String>,
@@ -692,6 +867,7 @@ fn saver_row(
         default_on: e.default_on,
         installed: st.is_some(),
         enabled: st.map(|s| s.enabled).unwrap_or(false),
+        pinned: st.map(|s| s.is_pinned()).unwrap_or(false),
         installable: e.installable().is_ok() && e.has_install_steps(),
         behavior_changing: e.behavior_changing,
         warning: e.warning.clone(),
@@ -705,6 +881,8 @@ fn saver_row(
                 kind: "measuring".to_string(),
                 delta: None,
                 n: 0,
+                n_on: 0,
+                n_off: 0,
                 note: None,
             });
             if b.kind == "measuring" {
@@ -752,6 +930,8 @@ fn saver_badge(a: &SaverAttribution) -> Badge {
                     delta
                 },
                 n,
+                n_on: s.n_on as u64,
+                n_off: s.n_off as u64,
                 note: None,
             }
         }
@@ -759,6 +939,8 @@ fn saver_badge(a: &SaverAttribution) -> Badge {
             kind: "measuring".to_string(),
             delta: None,
             n: 0,
+            n_on: 0,
+            n_off: 0,
             note: None,
         },
     }
@@ -983,6 +1165,38 @@ pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
             false,
         )),
     }
+}
+
+/// Hand a hand-pinned saver back to the scheduler so it can be measured.
+///
+/// A manual toggle records `source == "manual"`, which pauses the saver from
+/// rotation forever (see `rotation::controlled_savers`) - so a saver ever touched
+/// in the UI is never measured again, and while pinned ON it also contaminates
+/// every all-off holdout. Un-pinning re-stamps the source to `rotation` at the
+/// saver's *current* on/off state (no flip now), so the next scheduler tick can
+/// start the on/off comparison. This is the missing inverse of the manual toggle.
+pub fn saver_unpin(id: String) -> Result<SaversState, ApiError> {
+    let catalog = Catalog::embedded();
+    let enabled = PiggyState::load()
+        .ok()
+        .and_then(|s| s.savers.get(&id).map(|x| x.enabled))
+        .unwrap_or(false);
+    engine::set_enabled_src(&catalog, &id, enabled, piggy_core::store::source::ROTATION)
+        .map_err(generic("Couldn't hand that saver back to Piggy"))?;
+    // Un-pin is a deliberate return to rotation, so clear the resting-choice
+    // marker: `SaverState::is_pinned` keys on it, and leaving it set would keep the
+    // saver paused. (A holdout override preserves it, on purpose.)
+    let mut st = PiggyState::load().map_err(generic("Couldn't read your savers"))?;
+    if st.savers.get(&id).and_then(|s| s.manual_enabled).is_some() {
+        if let Some(s) = st.savers.get_mut(&id) {
+            s.manual_enabled = None;
+        }
+        st.save().map_err(generic("Couldn't save your savers"))?;
+    }
+    // Rotation reads the new source on its next tick; invalidate the cached
+    // attribution bundle so the dashboard reflects the change on refresh.
+    bump_attr_version();
+    build_savers_state().map_err(generic("Couldn't read your savers"))
 }
 
 /// The master switch. On installs/enables the curated default-on set in
@@ -1909,6 +2123,35 @@ mod tests {
     use piggy_core::store::source;
 
     #[test]
+    fn boost_is_wired_to_discover_not_home() {
+        use super::{curated_installable, listed_only_entries};
+        use piggy_core::registry::Catalog;
+        let c = Catalog::embedded();
+
+        // Home (the master-switch set) shows curated+installable savers only.
+        let home: Vec<&str> = curated_installable(&c).iter().map(|e| e.id.as_str()).collect();
+        assert!(home.contains(&"rtk"), "rtk should be on Home");
+        assert!(!home.contains(&"boost"), "boost must NOT be a Home toggle");
+
+        // Discover carries boost as listed-only, with its verified exclusion reason.
+        let listed = listed_only_entries(&c);
+        let boost = listed
+            .iter()
+            .find(|d| d.id == "boost")
+            .expect("boost surfaces in Discover");
+        let reason = boost.exclusion_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("telemetry") && reason.contains("permissionDecision"),
+            "boost reason names both blockers"
+        );
+        assert_eq!(
+            boost.repo_url.as_deref(),
+            Some("https://github.com/jfrog/boost"),
+            "Discover links the real repo"
+        );
+    }
+
+    #[test]
     fn measuring_note_names_the_blocker() {
         let py = Some(("python3", "hooks no-op without it"));
         let node = Some(("node", "degrades to skill-only without it"));
@@ -1932,6 +2175,64 @@ mod tests {
         assert_eq!(
             measuring_note(true, Some(source::ROTATION), true, None),
             None
+        );
+    }
+
+    #[test]
+    fn headline_note_names_cost_more_suppression_not_sample_size() {
+        use super::map_headline;
+        use piggy_core::attribution::{
+            Badge, Headline as CoreHeadline, HeadlineBaseline, MultiplierState,
+        };
+
+        // Enough sessions on BOTH sides and the on-side IS randomized, but the
+        // multiplier was withheld because the savers came out behind an
+        // observational baseline. The old note read "10 of 10 sessions ... no number
+        // faked", implying we were still gathering.
+        let cost_more = CoreHeadline {
+            baseline: HeadlineBaseline::PreInstall,
+            n_full_on: 10,
+            n_baseline: 7515,
+            ceiling: Badge::Estimated,
+            on_randomized: true,
+            baseline_clean: false,
+            multiplier: None,
+            multiplier_state: MultiplierState::WithheldCostMore,
+            streams: vec![],
+        };
+        let h = map_headline(&cost_more);
+        assert_eq!(h.label, "not_enough_data");
+        let note = h.note.expect("a reason");
+        assert!(
+            note.contains("cost more") && !note.contains(" of 10"),
+            "cost-more suppression must be named, never reported as a session count, got {note:?}"
+        );
+
+        // A genuinely short full-on side (still randomized) is an honest count.
+        let warming = CoreHeadline {
+            n_full_on: 4,
+            multiplier_state: MultiplierState::NoData,
+            ..cost_more.clone()
+        };
+        assert!(
+            map_headline(&warming)
+                .note
+                .unwrap()
+                .contains("4 of 10 sessions on your current saver set"),
+            "a short full-on side stays a count, not the suppression note"
+        );
+
+        // The root blocker: nothing is randomized (savers pinned by hand). This must
+        // beat both the count and the cost-more message - it is the actual cause,
+        // and the only one the user can act on - and point to the fix.
+        let pinned = CoreHeadline {
+            on_randomized: false,
+            ..cost_more.clone()
+        };
+        let note = map_headline(&pinned).note.expect("a reason");
+        assert!(
+            note.contains("pinned") && note.contains("un-pin") && !note.contains(" of 10"),
+            "a hand-pinned setup must be named as the blocker with the un-pin fix, got {note:?}"
         );
     }
 
@@ -1982,4 +2283,160 @@ mod tests {
             row.badge.note
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Context ledger
+// ---------------------------------------------------------------------------
+
+/// One row of "where did my context tokens come from".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerSourceDto {
+    /// Stable key (`__floor`, `__conversation`, or an attachment type).
+    pub kind: String,
+    /// Display name.
+    pub label: String,
+    pub tokens: u64,
+    /// Share of all cache-write tokens, 0.0–1.0.
+    pub share: f64,
+    /// Whether this is an injection the user can configure away, as opposed to
+    /// the session floor or the work itself. Drives the "removable" styling.
+    pub removable: bool,
+    /// Whether this row is part of the session floor — the residual OR a named
+    /// component of it. The hero bar sums these; reading only the residual
+    /// understated the floor by every component it had been decomposed into.
+    pub is_floor: bool,
+    /// Whether the figure is bounded-by-content rather than a measured write.
+    pub estimated: bool,
+}
+
+/// One project's split between opening sessions and doing work.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerProjectDto {
+    pub project: String,
+    /// Trailing path component, for a readable label.
+    pub name: String,
+    pub sessions: u64,
+    pub msgs_per_session: f64,
+    pub floor_tokens: u64,
+    pub work_tokens: u64,
+    /// Floor share of this project's tokens, 0.0–1.0.
+    pub overhead: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerOverview {
+    pub period: String,
+    pub period_label: String,
+    pub total_tokens: u64,
+    pub removable_tokens: u64,
+    /// Share of cache writes that bought session startup rather than work.
+    pub overhead: f64,
+    /// How much further the same plan goes with the configurable context
+    /// removed. **Available headroom, not achieved savings** — the dashboard
+    /// must word it as "could", never as a saving already banked.
+    pub headroom: Option<f64>,
+    /// The removable share behind `headroom`, as a fraction of TOTAL COST
+    /// (0.0-1.0). Not the share of cache writes — that number is bigger and
+    /// quoting it next to a cost-weighted multiplier makes the two disagree.
+    pub removable_share: f64,
+    pub sessions: u64,
+    pub sources: Vec<LedgerSourceDto>,
+    pub projects: Vec<LedgerProjectDto>,
+    /// True when nothing is indexed for this window, so the UI shows the empty
+    /// state instead of a table of zeroes.
+    pub empty: bool,
+}
+
+pub fn ledger_overview(period_s: String) -> Result<LedgerOverview, ApiError> {
+    (|| -> anyhow::Result<LedgerOverview> {
+        let home = config::piggy_home();
+        let store = Store::open(&home)?;
+        let period = period_from(&period_s);
+        let pricing = Pricing::load(&home);
+        let l = store.ledger(period.cutoff().as_deref(), &pricing)?;
+        let total = l.total_tokens();
+        let sources = l
+            .rows
+            .iter()
+            .map(|r| LedgerSourceDto {
+                kind: r.kind.clone(),
+                label: r.label(),
+                tokens: r.tokens,
+                share: l.share(r),
+                removable: r.removable(),
+                is_floor: r.is_floor(),
+                estimated: r.estimated(),
+            })
+            .collect();
+        let projects = l
+            .projects
+            .iter()
+            .map(|p| LedgerProjectDto {
+                project: p.project.clone(),
+                name: p
+                    .project
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or(&p.project)
+                    .to_string(),
+                sessions: p.sessions,
+                msgs_per_session: p.msgs_per_session(),
+                floor_tokens: p.floor_tokens,
+                work_tokens: p.work_tokens,
+                overhead: p.overhead(),
+            })
+            .collect();
+        Ok(LedgerOverview {
+            period: period_key(period).to_string(),
+            period_label: period.label().to_string(),
+            total_tokens: total,
+            removable_tokens: l.removable_tokens(),
+            overhead: l.overhead(),
+            headroom: l.headroom(),
+            removable_share: l.removable_cost_share(),
+            sessions: l.projects.iter().map(|p| p.sessions).sum(),
+            sources,
+            projects,
+            empty: total == 0,
+        })
+    })()
+    .map_err(|e| ApiError::new("Could not build the context ledger", e.to_string(), true))
+}
+
+/// One ledger finding for the UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsightDto {
+    pub id: String,
+    /// `high` | `notable` | `info`.
+    pub severity: String,
+    pub title: String,
+    pub detail: String,
+    pub tokens: u64,
+    pub action: String,
+}
+
+pub fn ledger_insights(period_s: String) -> Result<Vec<InsightDto>, ApiError> {
+    (|| -> anyhow::Result<Vec<InsightDto>> {
+        let home = config::piggy_home();
+        let store = Store::open(&home)?;
+        let period = period_from(&period_s);
+        Ok(store
+            .insights(period.cutoff().as_deref(), &Pricing::load(&home))?
+            .into_iter()
+            .map(|i| InsightDto {
+                id: i.id,
+                severity: i.severity.as_str().to_string(),
+                title: i.title,
+                detail: i.detail,
+                tokens: i.tokens,
+                action: i.action,
+            })
+            .collect())
+    })()
+    .map_err(|e| ApiError::new("Could not derive insights", e.to_string(), true))
 }

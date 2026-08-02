@@ -41,6 +41,22 @@ pub const MIN_GROUP: usize = 10;
 pub const BOOTSTRAP_N: usize = 1000;
 /// Two-sided alpha for the **displayed** interval (the spec's 90% CI).
 pub const CI_ALPHA: f64 = 0.10;
+/// Smallest OFF-group median (tokens per turn) a **ratio** may be taken against.
+///
+/// `delta` is `1 - median_on/median_off`, so a stream the baseline barely uses
+/// turns a rounding difference into a headline percentage. Real profile: with
+/// every prompt served from cache the input stream medians at ~2 tokens/turn,
+/// and a 400-token/turn ON median printed `-20071%`. Guarding only `== 0.0` is
+/// not enough — the failure is continuous, not a special case at zero.
+///
+/// A stream this quiet has no percentage worth showing: 10 tokens/turn is under
+/// a thousandth of the streams that actually carry traffic here (3k-100k), and
+/// halving it saves 5 tokens a turn. Below the floor the stream reports
+/// `measuring` rather than a number.
+// ponytail: absolute floor, not a share of the other streams. Revisit if a
+// workload ever runs every stream this thin, where the floor would mute a real
+// saving instead of noise.
+pub const MIN_RATE_DENOM: f64 = 10.0;
 /// Number of per-stream badges shown together for one saver/headline. The badge
 /// gate is Bonferroni-corrected across this family so the *family-wise* chance a
 /// truly-null saver lights up any green badge stays near the ~10% a reader infers
@@ -241,9 +257,11 @@ pub enum HeadlineBaseline {
 struct SaverRow {
     enabled: bool,
     source: String,
-    /// Every OTHER saver in this session was on. Vacuously true when this is the
-    /// only saver installed, which is why the single-saver case is unaffected by
-    /// the isolation rule.
+    /// Every OTHER saver the SCHEDULER controls in this session was on. Savers
+    /// the user pinned off by hand don't count against it: they are off in both
+    /// arms of this saver's contrast, so they are a constant, not a confounder.
+    /// Vacuously true when this is the only saver installed, which is why the
+    /// single-saver case is unaffected by the isolation rule.
     others_on: bool,
     rates: SessionRates,
 }
@@ -267,6 +285,24 @@ struct ClassifiedSession {
     /// sessions do carry timestamps: `started_at` is `None` only when not one
     /// line of the log was dated, which Claude Code and Codex never produce.
     started_at: Option<String>,
+}
+
+/// Why the headline carries no multiplier, when it doesn't. A bare
+/// `Option<f64>` cannot tell "still gathering data" from "the data is in, but the
+/// estimate is not trustworthy enough to publish", and the two want different
+/// words in the UI: the first is a session count, the second is a reason. Carried
+/// so the sub-line stops always blaming sample size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiplierState {
+    /// A multiplier was computed and lives in [`Headline::multiplier`].
+    Shown,
+    /// Neither side had a priced spend rate to compare yet: nothing to divide.
+    NoData,
+    /// A rate was computable, but the savers came out *behind* a non-measured
+    /// (observational) baseline (`m < 1`). Withheld on purpose: heavier recent
+    /// work is a likelier cause than a real regression, and a randomized
+    /// comparison is exempt. The data is in; the number is deliberately hidden.
+    WithheldCostMore,
 }
 
 /// The dashboard headline.
@@ -295,6 +331,10 @@ pub struct Headline {
     /// `median(baseline spend rate) / median(full_on spend rate)` — "lasts N.N×
     /// longer". Price-weighted, hence `estimated`. `None` if not computable.
     pub multiplier: Option<f64>,
+    /// Why `multiplier` is `None`, when it is (`Shown` when it is `Some`). Lets a
+    /// caller distinguish "not enough sessions yet" from "enough, but the estimate
+    /// was withheld as implausible" without re-deriving the gate.
+    pub multiplier_state: MultiplierState,
     /// Per-stream measured deltas (full-on vs baseline), shown before the ×.
     pub streams: Vec<StreamStat>,
 }
@@ -383,6 +423,17 @@ impl Store {
     /// X off in two different kinds of slot: the single-off slot (X off,
     /// everything else still running) and the holdout (X off and everything else
     /// off too). They are different treatments, and only the first isolates X.
+    ///
+    /// A saver the USER switched off is a different thing again, and the same
+    /// exception [`Store::classified_sessions`] already makes for
+    /// `any_scheduler_disabled` applies here: `rotation::controlled_savers` drops
+    /// a hand-toggled saver from rotation, so it is off in every session of that
+    /// era — X's ON arm and X's OFF arm alike. Holding it against isolation
+    /// doesn't protect the contrast, it deletes it: one saver pinned off by hand
+    /// made `others_on` false for every session and every saver's group went
+    /// empty, so the per-saver table read "not enough data yet" forever at any
+    /// session count. Measured on a real profile: sweep had 245 on / 45 off
+    /// randomized sessions and the table showed 52 / 0.
     fn saver_group_rows(
         &self,
         saver_id: &str,
@@ -409,7 +460,9 @@ impl Store {
             let e = per_session.entry(sid).or_insert((None, true));
             if sid_saver == saver_id {
                 e.0 = Some((enabled, src));
-            } else if !enabled {
+            } else if !enabled && src != source::MANUAL {
+                // Scheduler-driven off only. A `manual` off is constant across
+                // both arms; a `rotation`/`holdout`/`pre_install` off is not.
                 e.1 = false;
             }
         }
@@ -594,7 +647,8 @@ pub fn median(xs: &[f64]) -> f64 {
 }
 
 /// The delta `1 - median(on)/median(off)`, or `None` when there is nothing to
-/// compare: an empty ON group, or an OFF group that medians to zero.
+/// compare: an empty ON group, or an OFF group whose median is below
+/// [`MIN_RATE_DENOM`] (a stream the baseline doesn't meaningfully use).
 fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
     // `median(&[])` is 0.0, so an empty ON group computes `1 - 0/mo == 1.0`: a
     // nominal 100% saving conjured out of no data at all. Downstream gates do
@@ -611,7 +665,7 @@ fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
         return None;
     }
     let mo = median(off);
-    if mo == 0.0 {
+    if mo < MIN_RATE_DENOM {
         return None;
     }
     Some(1.0 - median(on) / mo)
@@ -638,7 +692,10 @@ fn bootstrap_deltas(on: &[f64], off: &[f64], seed: u64) -> Option<Vec<f64>> {
         resample(&mut rng, on, &mut on_s);
         resample(&mut rng, off, &mut off_s);
         let mo = median(&off_s);
-        if mo == 0.0 {
+        // Same floor as `delta_of`: a resample that lands on a near-zero
+        // denominator would widen the CI with ratios the point estimate refuses
+        // to compute.
+        if mo < MIN_RATE_DENOM {
             continue;
         }
         deltas.push(1.0 - median(&on_s) / mo);
@@ -1042,19 +1099,40 @@ pub fn headline_with_map(
     // describes was never observed, so it can only back an `estimated` figure.
     // The pre-install baseline is observational for the older reason: it predates
     // Piggy and was never randomized at all.
+    // `pick_baseline` chooses the holdout arm (clean, else contaminated) and its
+    // ceiling. A holdout only *wins* the baseline once that arm can clear the
+    // sample bar (`>= MIN_GROUP`) - the same gate the headline applies downstream,
+    // so keying off it here means the holdout takes over exactly when it can back
+    // a number, not the instant the first holdout row lands.
+    //
+    // Until then, keep the observational pre-install estimate instead of dropping
+    // to "measuring". One holdout session used to evict a MIN_GROUP-strong
+    // pre-install baseline and blank the figure for the whole 1..MIN_GROUP warm-up,
+    // so the displayed estimate went backwards (a number, then nothing) as data
+    // accrued. The pre-install baseline is only ever `estimated`, never measured,
+    // so nothing is over-claimed by showing it a little longer. Only when there is
+    // no pre-install history to stand on does the thin holdout carry the headline,
+    // so its "N of MIN_GROUP sessions so far" warm-up progress still shows.
+    let (used_holdout, holdout_ceiling) = pick_baseline(holdout_clean, holdout_contaminated);
     let (baseline_kind, baseline, baseline_ceiling, baseline_clean) =
-        if !holdout_clean.is_empty() || !holdout_contaminated.is_empty() {
-            let (used, ceiling) = pick_baseline(holdout_clean, holdout_contaminated);
-            // `pick_baseline` returns Measured exactly when it took the
-            // clean-only branch, so deriving the flag from the ceiling keeps the
-            // two from drifting apart later.
-            let clean = ceiling == Badge::Measured;
-            (HeadlineBaseline::Holdout, used, ceiling, clean)
+        if used_holdout.len() >= MIN_GROUP {
+            // `pick_baseline` returns Measured exactly when it took the clean-only
+            // branch, so deriving the flag from the ceiling keeps the two from
+            // drifting apart later.
+            let clean = holdout_ceiling == Badge::Measured;
+            (HeadlineBaseline::Holdout, used_holdout, holdout_ceiling, clean)
         } else if !pre_install.is_empty() {
             // Not a holdout at all: "clean holdout" does not apply, and claiming
             // it does would be a field that quietly means something other than
             // its name.
             (HeadlineBaseline::PreInstall, pre_install, Badge::Estimated, false)
+        } else if !used_holdout.is_empty() {
+            // A thin holdout with no pre-install history to fall back on: carry it
+            // so the sub-line shows real warm-up progress rather than an empty
+            // state. It is below MIN_GROUP, so the downstream gate keeps the figure
+            // at "measuring" - this only preserves the honest session count.
+            let clean = holdout_ceiling == Badge::Measured;
+            (HeadlineBaseline::Holdout, used_holdout, holdout_ceiling, clean)
         } else {
             (HeadlineBaseline::None, Vec::new(), Badge::Estimated, false)
         };
@@ -1075,7 +1153,7 @@ pub fn headline_with_map(
     // Price-weighted "lasts N.N× longer" (estimated).
     let on_spend: Vec<f64> = full_on.iter().filter_map(|s| s.spend_rate()).collect();
     let off_spend: Vec<f64> = baseline.iter().filter_map(|s| s.spend_rate()).collect();
-    let multiplier = {
+    let (multiplier, multiplier_state) = {
         let mon = median(&on_spend);
         let moff = median(&off_spend);
         if mon > 0.0 && moff > 0.0 {
@@ -1087,13 +1165,17 @@ pub fn headline_with_map(
             // an estimate stays "measuring" (None -> the headline shows progress, not
             // a figure) until a randomized holdout can prove the sign. A real
             // regression still surfaces once `ceiling == Measured`, which is exempt.
+            //
+            // The reason is carried out in `multiplier_state`: "withheld as
+            // implausible" is a different thing to tell the user than "still
+            // gathering", and a bare `None` cannot tell them apart.
             if ceiling != Badge::Measured && m < 1.0 {
-                None
+                (None, MultiplierState::WithheldCostMore)
             } else {
-                Some(m)
+                (Some(m), MultiplierState::Shown)
             }
         } else {
-            None
+            (None, MultiplierState::NoData)
         }
     };
 
@@ -1122,6 +1204,7 @@ pub fn headline_with_map(
         on_randomized,
         baseline_clean,
         multiplier,
+        multiplier_state,
         streams,
     })
 }

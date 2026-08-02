@@ -6,10 +6,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AdvisorProgress,
+  AdvisorStatus,
+  Annotation,
   ConfigOption,
   DiscoverDto,
   Doctor,
   Environment,
+  Insight,
+  LedgerOverview,
   Period,
   ReindexResult,
   RestoreResult,
@@ -40,11 +45,26 @@ export const api = {
   statsOverview: (period: Period) => call<StatsOverview>("stats_overview", { period }),
   sourcesOverview: (period: Period) => call<SourcesOverview>("sources_overview", { period }),
   usageSeries: (period: Period) => call<UsageSeries>("usage_series", { period }),
+  ledgerOverview: (period: Period) => call<LedgerOverview>("ledger_overview", { period }),
+  ledgerInsights: (period: Period) => call<Insight[]>("ledger_insights", { period }),
+  advisorStatus: () => call<AdvisorStatus>("advisor_status"),
+  /** `null` switches the advisor off. Weights stay on disk; use `advisorRemove`
+   *  to reclaim the space. */
+  advisorSelect: (modelId: string | null) => call<AdvisorStatus>("advisor_select", { modelId }),
+  /** Returns as soon as the transfer starts. Follow `onAdvisorProgress` for the
+   *  rest: awaiting a multi-gigabyte download would block the invoke channel. */
+  advisorDownload: (modelId: string) => call<void>("advisor_download", { modelId }),
+  advisorCancel: () => call<void>("advisor_cancel"),
+  advisorRemove: (modelId: string) => call<AdvisorStatus>("advisor_remove", { modelId }),
+  /** Empty whenever the advisor is off, not downloaded, or produced nothing that
+   *  survived the guard. None of those is an error. */
+  advisorAnnotate: (period: Period) => call<Annotation[]>("advisor_annotate", { period }),
   saversList: () => call<SaversState>("savers_list"),
   saverConfigGet: (id: string) => call<ConfigOption[]>("saver_config_get", { id }),
   saverConfigSet: (id: string, key: string, value: string) =>
     call<ConfigOption[]>("saver_config_set", { id, key, value }),
   saverToggle: (id: string, on: boolean) => call<SaversState>("saver_toggle", { id, on }),
+  saverUnpin: (id: string) => call<SaversState>("saver_unpin", { id }),
   masterToggle: (on: boolean) => call<SaversState>("master_toggle", { on }),
   sweepReport: () => call<SweepReport>("sweep_report"),
   sweepApply: (itemIds: string[]) => call<SweepReport>("sweep_apply", { itemIds }),
@@ -67,6 +87,14 @@ export const api = {
 export async function onStatsUpdated(cb: () => void): Promise<() => void> {
   if (IS_MOCK) return () => {};
   return listen("piggy://stats-updated", () => cb());
+}
+
+/** Subscribe to advisor download progress (no-op in mock). */
+export async function onAdvisorProgress(
+  cb: (p: AdvisorProgress) => void,
+): Promise<() => void> {
+  if (IS_MOCK) return () => {};
+  return listen<AdvisorProgress>("advisor://download", (e) => cb(e.payload));
 }
 
 /** Hide the panel window (Esc / click-away). No-op in the browser mock. */

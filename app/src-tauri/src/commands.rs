@@ -5,10 +5,11 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
+use crate::advisor::{self, AdvisorStatusDto, AnnotationDto};
 use crate::backend::{
     self, ApiError, AppPrefs, ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ReindexDto,
     RestoreDto, SaversState, ShareCardData, SourcesOverview, StatsOverview, SweepReportDto,
-    UsageSeries,
+    InsightDto, LedgerOverview, UsageSeries,
 };
 
 /// Run blocking `piggy-core` work off the main thread, flattening the join error.
@@ -44,6 +45,59 @@ pub async fn usage_series(period: String) -> Result<UsageSeries, ApiError> {
 }
 
 #[tauri::command]
+pub async fn ledger_overview(period: String) -> Result<LedgerOverview, ApiError> {
+    run(move || backend::ledger_overview(period)).await
+}
+
+#[tauri::command]
+pub async fn ledger_insights(period: String) -> Result<Vec<InsightDto>, ApiError> {
+    run(move || backend::ledger_insights(period)).await
+}
+
+// ---------------------------------------------------------------------------
+// local advisor (opt-in, off by default)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn advisor_status() -> Result<AdvisorStatusDto, ApiError> {
+    run(advisor::status).await
+}
+
+#[tauri::command]
+pub async fn advisor_select(model_id: Option<String>) -> Result<AdvisorStatusDto, ApiError> {
+    run(move || advisor::select(model_id)).await
+}
+
+/// Starts the transfer and returns immediately; progress arrives on
+/// [`advisor::DOWNLOAD_EVENT`]. Awaiting a multi-gigabyte download from the UI
+/// would block the invoke channel for minutes.
+#[tauri::command]
+pub async fn advisor_download(app: AppHandle, model_id: String) -> Result<(), ApiError> {
+    run(move || advisor::start_download(app, model_id)).await
+}
+
+#[tauri::command]
+pub async fn advisor_cancel() -> Result<(), ApiError> {
+    run(|| {
+        advisor::cancel_download();
+        Ok(())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn advisor_remove(model_id: String) -> Result<AdvisorStatusDto, ApiError> {
+    run(move || advisor::remove(model_id)).await
+}
+
+/// Annotations for the current findings, or an empty list whenever the advisor
+/// is off, not downloaded, or produced nothing that survived the guard.
+#[tauri::command]
+pub async fn advisor_annotate(period: String) -> Result<Vec<AnnotationDto>, ApiError> {
+    run(move || advisor::annotate(period)).await
+}
+
+#[tauri::command]
 pub async fn savers_list() -> Result<SaversState, ApiError> {
     run(backend::savers_list).await
 }
@@ -65,6 +119,11 @@ pub async fn saver_config_set(
 #[tauri::command]
 pub async fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
     run(move || backend::saver_toggle(id, on)).await
+}
+
+#[tauri::command]
+pub async fn saver_unpin(id: String) -> Result<SaversState, ApiError> {
+    run(move || backend::saver_unpin(id)).await
 }
 
 #[tauri::command]

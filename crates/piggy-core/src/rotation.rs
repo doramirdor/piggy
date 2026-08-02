@@ -12,9 +12,12 @@
 //! * one **single-off** slot per saver (everything on except that saver),
 //! * the **remainder** full-on.
 //!
-//! A saver the user toggled manually is *paused*: rotation never touches it
-//! (`last_toggle_source == "manual"`), respecting the explicit choice. Rotation
-//! applies via [`crate::engine::set_enabled_src`] with a non-manual source.
+//! A saver the user toggled manually is *paused* from per-saver rotation (the
+//! single-off slots never touch it), respecting the explicit choice. The one
+//! exception is the all-off holdout: it turns every saver off - pinned ones
+//! included - for its sampled session, then restores them, so a fully-pinned
+//! setup can still produce a clean baseline. The user opts into this by enabling
+//! holdout. Rotation applies via [`crate::engine::set_enabled_src`].
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -111,15 +114,24 @@ impl RotationPlan {
     }
 }
 
-/// Block length: at least enough for one holdout + one single-off per saver, and
-/// large enough that the holdout is ~`holdout_fraction` of sessions.
+/// Block length: at least enough for one holdout + one single-off per saver
+/// **plus one full-on**, and large enough that the holdout is
+/// ~`holdout_fraction` of sessions.
+///
+/// The `+ 1` is load-bearing. Without it, a user with 9 rotation-controlled
+/// savers at the default 10% holdout gets `max(10, 10) = 10`: one holdout and
+/// nine single-off slots, and not a single full-on session. Full-on is the ON
+/// arm of every per-saver comparison (`saver_group_rows` needs every *other*
+/// saver on), so that arm stayed empty forever and no saver could ever be
+/// promoted past `Estimated`, at any session count. Install enough savers and
+/// measurement quietly switched itself off.
 fn block_len(n_savers: usize, holdout_fraction: f64, holdout_enabled: bool) -> usize {
     let target = if holdout_fraction > 0.0 {
         (1.0 / holdout_fraction).round() as usize
     } else {
         0
     };
-    let min_needed = n_savers + usize::from(holdout_enabled);
+    let min_needed = n_savers + usize::from(holdout_enabled) + 1;
     target.max(min_needed).max(1)
 }
 
@@ -129,7 +141,7 @@ pub fn controlled_savers(catalog: &Catalog, state: &PiggyState) -> Vec<String> {
     let mut ids: Vec<String> = state
         .savers
         .iter()
-        .filter(|(_, s)| s.last_toggle_source.as_deref() != Some(source::MANUAL))
+        .filter(|(_, s)| !s.is_pinned())
         .map(|(id, _)| id.clone())
         .collect();
     // Order by catalog `ordering` (fall back to id) for a stable plan.
@@ -205,19 +217,47 @@ pub fn tick(
     if is_session_active(projects_dir, now, window_secs) {
         return Ok(RotationOutcome::SkippedActive);
     }
-    let state = PiggyState::load()?;
+    let mut state = PiggyState::load()?;
+    let holdout_enabled = state.settings.holdout_enabled;
+
+    // Pinned (hand-toggled) savers sit out per-saver rotation, but the all-off
+    // holdout still turns them off for its sampled session - otherwise a pinned-on
+    // saver rides through it and the "every saver off" baseline is contaminated,
+    // so a fully-pinned setup never gets a clean number. The user opted into this
+    // by enabling holdout. Backfill each pin's resting choice from its current
+    // state (they are at rest now, before any override) so a later holdout knows
+    // what to restore.
+    let pinned: Vec<String> = state
+        .savers
+        .iter()
+        .filter(|(_, s)| s.is_pinned())
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut dirty = false;
+    for id in &pinned {
+        if let Some(s) = state.savers.get_mut(id) {
+            if s.manual_enabled.is_none() {
+                s.manual_enabled = Some(s.enabled);
+                dirty = true;
+            }
+        }
+    }
+    if dirty {
+        state.save()?;
+    }
+
     let controlled = controlled_savers(catalog, &state);
-    if controlled.is_empty() {
+    // Nothing to do only when there is neither a per-saver rotation to run nor a
+    // holdout to hold the pinned savers out for.
+    if controlled.is_empty() && !(holdout_enabled && !pinned.is_empty()) {
         return Ok(RotationOutcome::NothingToRotate);
     }
-    let plan = RotationPlan::new(
-        controlled,
-        state.settings.holdout_fraction,
-        state.settings.holdout_enabled,
-    );
+
+    let plan = RotationPlan::new(controlled, state.settings.holdout_fraction, holdout_enabled);
     let (block_pos, _) = store.rotation_state()?;
     let block_pos = block_pos.max(0) as usize;
     let assignment = plan.assignment_at(block_pos);
+    let is_holdout = assignment.kind == SlotKind::Holdout;
 
     // Apply: flip savers whose state differs, and re-stamp the source on savers
     // already in the wanted state. The re-stamp matters: a saver the holdout slot
@@ -228,8 +268,6 @@ pub fn tick(
     // the holdout baseline - putting sessions that ran with other savers ON into
     // the all-off baseline. `set_enabled_src` handles the no-flip case by
     // recording the source and returning early, so this is cheap.
-    // Manual savers were already excluded from `controlled`, so this never
-    // overrides a user choice.
     let mut changed = Vec::new();
     for (id, &want) in &assignment.set {
         let cur = PiggyState::load()?
@@ -238,6 +276,30 @@ pub fn tick(
             .map(|s| s.enabled)
             .unwrap_or(false);
         engine::set_enabled_src(catalog, id, want, assignment.source)?;
+        if cur != want {
+            changed.push(id.clone());
+        }
+    }
+
+    // Pinned savers: the ONE place rotation touches a hand-pinned saver, and only
+    // because the user enabled holdout. During a holdout they are forced off and
+    // tagged `holdout`, so the session is a true all-off baseline even when every
+    // saver is pinned; every other slot restores them to the user's resting
+    // choice. `manual_enabled` survives the override, so `is_pinned` still holds
+    // and the saver stays out of `controlled`.
+    for id in &pinned {
+        let pref = state.savers.get(id).and_then(|s| s.manual_enabled).unwrap_or(false);
+        let (want, src) = if is_holdout {
+            (false, source::HOLDOUT)
+        } else {
+            (pref, source::MANUAL)
+        };
+        let cur = PiggyState::load()?
+            .savers
+            .get(id)
+            .map(|s| s.enabled)
+            .unwrap_or(false);
+        engine::set_enabled_src(catalog, id, want, src)?;
         if cur != want {
             changed.push(id.clone());
         }

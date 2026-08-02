@@ -75,8 +75,9 @@ function measuring(n: number): BadgeView {
 
 export type StatusTone = "measured" | "estimated" | "measuring" | "nodata" | "claimed";
 
-/** Holdout sessions Piggy needs before a saver flips from "Measuring" to a
- *  settled "Measured" delta. Mirrors the "N of 10 holdout sessions" copy. */
+/** Sessions Piggy needs **on each arm** (with the saver on, and with it off)
+ *  before it can flip from "Measuring" to a settled delta. Mirrors `MIN_GROUP`
+ *  in `attribution.rs`, which gates both sides, not their sum. */
 export const MEASURE_TARGET = 10;
 
 export interface StatusView {
@@ -102,11 +103,15 @@ export function statusView(b: Badge): StatusView {
     return { label: "Claimed", tone: "claimed", title: "The author's own number - not yet measured" };
   }
   if (b.n > 0) {
+    // Fill on the WEAKER arm. A saver needs MEASURE_TARGET sessions with it on
+    // AND that many with it off before anything can settle, so a bar driven by
+    // the total reads 100% on a 14-on / 0-off split that will never finish.
+    const weaker = Math.min(b.nOn, b.nOff);
     return {
       label: "Measuring",
       tone: "measuring",
-      title: `Gathering holdout data - ${b.n} of ${MEASURE_TARGET} holdout sessions so far`,
-      progress: Math.min(1, b.n / MEASURE_TARGET),
+      title: `Gathering holdout data - ${b.nOff} of ${MEASURE_TARGET} sessions with it off, ${b.nOn} of ${MEASURE_TARGET} with it on`,
+      progress: Math.min(1, weaker / MEASURE_TARGET),
     };
   }
   return { label: "No data", tone: "nodata", title: "No sessions observed yet" };

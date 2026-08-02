@@ -19,6 +19,42 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+/// Ledger bucket for the context a session pays for before anyone types: system
+/// prompt, tool definitions, memory files. Charged to the first assistant
+/// message, which is where it is actually written to cache.
+pub const CTX_FLOOR: &str = "__floor";
+/// Ledger bucket for context that grew from the work itself — prompts, tool
+/// results, file reads. The residual: what no injection accounts for.
+pub const CTX_CONVERSATION: &str = "__conversation";
+
+/// Prefix for a **named component of the session floor** (`floor:skill_listing`).
+///
+/// Injections logged before the first assistant message are not per-turn costs;
+/// they are what the session opens with. Recording them by name turns "your
+/// floor is 26k tokens" into "…of which 6.5k is the skill listing", which is
+/// the difference between a number and something a user can act on. 99.9% of
+/// real sessions log at least one.
+///
+/// `CTX_FLOOR` keeps whatever is left (system prompt, tool schemas, memory —
+/// none of which are logged), so floor total = `CTX_FLOOR` + every `floor:*`.
+pub const CTX_FLOOR_PREFIX: &str = "floor:";
+
+/// Bytes per token when bounding an injection's cost by its own content.
+///
+/// An injection cannot cost more tokens than it contains, and a cache write is
+/// never *only* the injection: the same write carries the user's prompt and the
+/// previous turn's tool results. Charging an injection the whole write let a
+/// 480-byte `date_change` notice absorb **1,144,283 tokens** across 4,000
+/// sessions (7,152x its own size) and inflated the headline "removable by
+/// configuration" figure with conversation growth.
+///
+/// 3 is a deliberate over-estimate — JSON-ish text runs nearer 4 bytes/token —
+/// so the bound errs toward charging an injection slightly too much rather than
+/// too little. A "you could remove this" number should not be flattered by its
+/// own rounding.
+const BYTES_PER_TOKEN: u64 = 3;
+
 /// Bucket used when an assistant line carries usage but no model id. Kept so
 /// its tokens are still counted (and reported as unpriced), matching a lenient
 /// `jq` reduction over the same lines.
@@ -51,6 +87,11 @@ struct RawLine {
     entrypoint: Option<String>,
     #[serde(default)]
     message: Option<RawMessage>,
+    /// Present on `type == "attachment"` lines. Its `type` field names what was
+    /// injected (`hook_success`, `skill_listing`, `mcp_instructions_delta`, …) —
+    /// the ledger's whole "from where".
+    #[serde(default)]
+    attachment: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,6 +171,19 @@ impl ModelTokens {
     }
 }
 
+/// One ledger bucket's cost within a session: the cache-write tokens charged to
+/// it and how many times it was charged.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextTokens {
+    /// Cache-write tokens (`input + cache_creation`) attributed to this bucket.
+    /// Cache *reads* are excluded on purpose: a read is the discounted re-send
+    /// of context already paid for, so charging it here would bill the same
+    /// injection once per turn for the rest of the session.
+    pub tokens: u64,
+    /// How many assistant messages this bucket was charged on.
+    pub n: u64,
+}
+
 /// Result of parsing one session `.jsonl` file.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionParse {
@@ -162,6 +216,12 @@ pub struct SessionParse {
     /// cares about: MCP tools (`mcp__<server>__<tool>`) and `Skill`. Counted from
     /// the last-wins assistant records so a streamed message is not double-counted.
     pub tool_use_counts: BTreeMap<String, u64>,
+    /// Where this session's cache-write tokens came from, keyed by
+    /// [`CTX_FLOOR`], [`CTX_CONVERSATION`], or an attachment type. Sums to the
+    /// session's `input + cache_creation` across deduplicated assistant
+    /// messages, so the ledger reconciles against `session_models` rather than
+    /// estimating.
+    pub context: BTreeMap<String, ContextTokens>,
     pub parse_errors: u64,
 }
 
@@ -191,6 +251,12 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
     let reader = BufReader::new(File::open(path)?);
 
     let mut dedup: HashMap<String, AssistantRec> = HashMap::new();
+    // The ledger needs ORDER, which `dedup` throws away. `order` records each
+    // assistant message the first time its key is seen, paired with whatever was
+    // injected since the previous one. A streaming rewrite of the same requestId
+    // is not a new message and must not be charged again.
+    let mut order: Vec<(String, Vec<(String, u64)>)> = Vec::new();
+    let mut pending: Vec<(String, u64)> = Vec::new();
     let mut nokey_counter: u64 = 0;
     let mut n_user_msgs: u64 = 0;
     let mut n_tool_results: u64 = 0;
@@ -271,6 +337,9 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                     .map(|m| sweep_tool_use_names(&m.content))
                     .unwrap_or_default();
                 let model_key = model.unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+                if !dedup.contains_key(&key) {
+                    order.push((key.clone(), std::mem::take(&mut pending)));
+                }
                 // Last-wins: a later streaming rewrite of the same requestId
                 // replaces the earlier record.
                 dedup.insert(
@@ -294,7 +363,32 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                     n_tool_results += 1;
                 }
             }
-            _ => { /* summary / queue-operation / attachment / unknown: ignore */ }
+            Some("attachment") => {
+                // Weight by line length: when several injections land between
+                // the same pair of assistant messages their shared cache write
+                // splits by byte share. It is the one approximation in the
+                // ledger, and it only ever redistributes *within* a single
+                // message's write — the session total stays exact.
+                let kind = raw
+                    .attachment
+                    .as_ref()
+                    .and_then(|a| a.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("attachment:unknown")
+                    .to_string();
+                // The attachment payload, NOT the whole line: every record
+                // carries ~150 bytes of envelope (timestamp, sessionId, uuid)
+                // that never reaches the model. Charging by line length gave a
+                // 30-byte date_change 29% of a write it shared with a 200-byte
+                // hook injection.
+                let weight = raw
+                    .attachment
+                    .as_ref()
+                    .map(|a| serde_json::to_string(a).map(|s| s.len()).unwrap_or(0))
+                    .unwrap_or(0) as u64;
+                pending.push((kind, weight));
+            }
+            _ => { /* summary / queue-operation / unknown: ignore */ }
         }
     }
 
@@ -314,6 +408,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         }
     }
 
+    let context = attribute_context(&order, &dedup);
     let client = most_common(&entrypoint_counts);
     let interface = client
         .as_deref()
@@ -335,8 +430,94 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         n_tool_results,
         sidechain,
         tool_use_counts,
+        context,
         parse_errors,
     })
+}
+
+/// Replay a session in order and charge every cache-write token to what caused
+/// it.
+///
+/// Three buckets, in the order the rules fire:
+///
+/// 1. The **first** assistant message is [`CTX_FLOOR`] — system prompt, tool
+///    definitions, memory. It is charged whole even when attachments preceded
+///    it, because those attachments *are* part of what the session opens with.
+/// 2. Each injection pending since the previous message is charged **at most
+///    what it contains** ([`BYTES_PER_TOKEN`]), never the whole write.
+/// 3. [`CTX_CONVERSATION`] takes the residual: the prompt, the tool results,
+///    the file reads — everything in the same write that was not an injection.
+///
+/// Rule 2 is the load-bearing one. A cache write following an injection is not
+/// caused by the injection alone; it carries the user's turn as well. Charging
+/// the whole write to whatever happened to precede it made injections absorb
+/// conversation growth, and the error was not subtle: a `date_change` notice
+/// totalling 480 bytes was charged 1.1M tokens.
+///
+/// Precision differs per bucket, and the UI should not pretend otherwise. Floor
+/// and conversation are **exact** (a measured write and an exact residual);
+/// the injection figures are a **bounded estimate**. What stays exact either
+/// way is the total: `sum(context) == sum(input + cache_creation)`, so the
+/// ledger still reconciles against `session_models`.
+fn attribute_context(
+    order: &[(String, Vec<(String, u64)>)],
+    dedup: &HashMap<String, AssistantRec>,
+) -> BTreeMap<String, ContextTokens> {
+    let mut out: BTreeMap<String, ContextTokens> = BTreeMap::new();
+    let mut charge = |kind: &str, tokens: u64| {
+        let e = out.entry(kind.to_string()).or_default();
+        e.tokens += tokens;
+        e.n += 1;
+    };
+    for (i, (key, pend)) in order.iter().enumerate() {
+        let Some(rec) = dedup.get(key) else { continue };
+        let written = rec.usage.input_tokens.unwrap_or(0)
+            + rec.usage.cache_creation_input_tokens.unwrap_or(0);
+        if i == 0 {
+            // Same bounded-by-content rule as injections, but the residual is
+            // the floor rather than the conversation: whatever the logged
+            // components don't explain is the system prompt, the tool schemas
+            // and memory, none of which appear in the log at all.
+            let mut assigned = 0u64;
+            for (kind, bytes) in pend {
+                let remaining = written - assigned;
+                if remaining == 0 {
+                    break;
+                }
+                let est = (bytes / BYTES_PER_TOKEN).min(remaining);
+                if est > 0 {
+                    charge(&format!("{CTX_FLOOR_PREFIX}{kind}"), est);
+                    assigned += est;
+                }
+            }
+            charge(CTX_FLOOR, written - assigned);
+            continue;
+        }
+        if written == 0 {
+            continue;
+        }
+        // Each injection takes what it contains, capped by what is left of this
+        // write (several large injections before one small write cannot invent
+        // tokens). Order is file order, so the charge is deterministic.
+        let mut assigned = 0u64;
+        for (kind, bytes) in pend {
+            let remaining = written - assigned;
+            if remaining == 0 {
+                break;
+            }
+            let est = (bytes / BYTES_PER_TOKEN).min(remaining);
+            if est > 0 {
+                charge(kind, est);
+                assigned += est;
+            }
+        }
+        // The residual is the work: the prompt and tool results that shared
+        // this write. Also the whole write when nothing was pending.
+        if written > assigned {
+            charge(CTX_CONVERSATION, written - assigned);
+        }
+    }
+    out
 }
 
 /// Extract Sweep-relevant `tool_use` names from an assistant message's content:

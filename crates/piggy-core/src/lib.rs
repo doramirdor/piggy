@@ -8,6 +8,7 @@
 //! The crate is UI-agnostic: the `piggy` CLI and (later) the Tauri app both
 //! link against it.
 
+pub mod advisor;
 pub mod attribution;
 pub mod cli_link;
 pub mod codex;
@@ -15,6 +16,8 @@ pub mod config;
 pub mod discovery;
 pub mod engine;
 pub mod index;
+pub mod insights;
+pub mod ledger;
 pub mod parser;
 pub mod pricing;
 pub mod registry;
@@ -30,6 +33,10 @@ pub mod sweep;
 pub mod tagging;
 pub mod watcher;
 
+pub use advisor::{
+    facts::Facts, guard::Annotation, available, model, recommended, AdvisorModel, AdvisorState,
+    CATALOG,
+};
 pub use attribution::{
     attribute, headline, Badge, Headline, HeadlineBaseline, SaverAttribution, Stream, StreamStat,
 };
@@ -38,7 +45,9 @@ pub use codex::parse_codex_file;
 pub use discovery::{DiscoveredRepo, DiscoveryCache};
 pub use engine::{ActionReport, HealthReport};
 pub use index::{default_roots, run_index, run_index_roots, IndexReport, SourceRoot};
-pub use parser::{parse_file, ModelTokens, SessionParse};
+pub use insights::{insights, Insight, Severity};
+pub use ledger::{Ledger, LedgerRow, ProjectRow};
+pub use parser::{parse_file, ContextTokens, ModelTokens, SessionParse, CTX_CONVERSATION, CTX_FLOOR, CTX_FLOOR_PREFIX};
 pub use pricing::{ModelPrice, Pricing};
 pub use registry::{Catalog, Entry};
 pub use rotation::{RotationOutcome, RotationPlan};

@@ -3,6 +3,7 @@ import { useStore } from "./store";
 import { onStatsUpdated } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { Banner } from "./components/Banner";
+import { Ledger } from "./screens/Ledger";
 import { Overview } from "./screens/Overview";
 import { Savers } from "./screens/Savers";
 import { Discover } from "./screens/Discover";
@@ -11,6 +12,7 @@ import { Reports } from "./screens/Reports";
 import { Settings } from "./screens/Settings";
 import { NoClaude, FirstRun } from "./screens/EmptyStates";
 import { PiggyMark } from "./components/PiggyMark";
+import { usePageTurn } from "./lib/motion";
 
 export default function App() {
   const booting = useStore((s) => s.booting);
@@ -19,6 +21,10 @@ export default function App() {
   const setTab = useStore((s) => s.setTab);
   const boot = useStore((s) => s.boot);
   const refresh = useStore((s) => s.refresh);
+  // Hoisted above the early returns below: hooks must run in the same order on
+  // every render, and this component bails out for the booting, no-tool and
+  // first-run states before it reaches the JSX.
+  const turnKey = usePageTurn(tab);
 
   // Boot once.
   useEffect(() => {
@@ -57,7 +63,9 @@ export default function App() {
   if (env && !env.hasData) return <FirstRun />;
 
   const screen =
-    tab === "overview" ? (
+    tab === "ledger" ? (
+      <Ledger />
+    ) : tab === "overview" ? (
       <Overview />
     ) : tab === "savers" ? (
       <Savers />
@@ -77,7 +85,13 @@ export default function App() {
       <main className="content">
         <div className="inner">
           <Banner />
-          {screen}
+          {/* THE PAGE. The key changes with the tab, so React replaces the
+              subtree and the CSS stagger re-runs: a page turning rather than a
+              panel sliding. `usePageTurn` returns a constant under
+              prefers-reduced-motion so the animation never arms. */}
+          <div className="page-turn" key={turnKey}>
+            {screen}
+          </div>
         </div>
       </main>
     </div>

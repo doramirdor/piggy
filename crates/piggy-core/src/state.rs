@@ -92,6 +92,15 @@ pub struct Settings {
     /// the observational pre-install baseline and are labelled `estimated`).
     #[serde(default = "default_true")]
     pub holdout_enabled: bool,
+    /// Which local advisor model the user opted into, by
+    /// [`crate::advisor::AdvisorModel::id`].
+    ///
+    /// `None` means off, and off is the default and the shipping configuration:
+    /// Piggy's findings are arithmetic, and the advisor only ever re-words them.
+    /// One field rather than an `enabled` flag plus a selection, because those
+    /// two can disagree and this cannot.
+    #[serde(default)]
+    pub advisor_model: Option<String>,
 }
 
 fn default_holdout_fraction() -> f64 {
@@ -107,6 +116,7 @@ impl Default for Settings {
         Settings {
             holdout_fraction: default_holdout_fraction(),
             holdout_enabled: true,
+            advisor_model: None,
         }
     }
 }
@@ -137,11 +147,32 @@ pub struct SaverState {
     /// (Piggy respects an explicit choice). `None` == as-installed, never toggled.
     #[serde(default)]
     pub last_toggle_source: Option<String>,
+    /// The user's *resting* on/off choice, captured on every manual toggle. The
+    /// all-off holdout flips a pinned saver off for its sampled session and this
+    /// records what to restore it to afterward, so a hand-pinned setup can still
+    /// produce a clean baseline. `Some(_)` is the durable "pinned" marker — it
+    /// outlives the transient `last_toggle_source = "holdout"` a holdout stamps.
+    /// `None` until the first manual toggle (rotation backfills it from `enabled`).
+    #[serde(default)]
+    pub manual_enabled: Option<bool>,
     /// Values the user chose for this saver's catalog `configOptions`,
     /// keyed by option key. Absent keys mean "never chosen" (the option's
     /// default, or whatever the saver's own config file already says).
     #[serde(default)]
     pub config: BTreeMap<String, String>,
+}
+
+impl SaverState {
+    /// True when the user has taken manual control of this saver, pinning it out
+    /// of per-saver rotation. Keys on `manual_enabled` (the durable resting
+    /// choice) so a transient all-off holdout override — which stamps
+    /// `last_toggle_source = "holdout"` for one session — does not read as
+    /// un-pinned. Falls back to the source for a legacy pin whose
+    /// `manual_enabled` has not been backfilled yet.
+    pub fn is_pinned(&self) -> bool {
+        self.manual_enabled.is_some()
+            || self.last_toggle_source.as_deref() == Some(crate::store::source::MANUAL)
+    }
 }
 
 /// One Sweep-disabled item (MCP server / plugin / skill) plus what to restore.

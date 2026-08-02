@@ -19,6 +19,18 @@ const EMBEDDED: &str = include_str!("../data/pricing.json");
 const CACHE_READ_MULT: f64 = 0.1;
 const CACHE_WRITE_5M_MULT: f64 = 1.25;
 const CACHE_WRITE_1H_MULT: f64 = 2.0;
+
+/// Output rate as a multiple of input, used only when a model has no price
+/// entry at all.
+///
+/// Unlike an absolute rate — which this module refuses to guess, on purpose —
+/// the RATIO is stable: every Claude model in the embedded table prices output
+/// at exactly 5x input, and every GPT model at 8x. That makes a cost-WEIGHTED
+/// comparison computable for an unpriced model even though its dollar cost is
+/// not, which is what lets the headroom multiplier stay correct while
+/// `claude-opus-5` is missing from the table.
+const DEFAULT_OUTPUT_RATIO_CLAUDE: f64 = 5.0;
+const DEFAULT_OUTPUT_RATIO_OTHER: f64 = 8.0;
 const PER_MTOK: f64 = 1_000_000.0;
 
 /// Per-MTok input/output rates for one model.
@@ -75,6 +87,63 @@ impl Pricing {
         }
         p
     }
+
+    /// Relative cost of one token of each stream, in **input-token
+    /// equivalents**, summed for `t`.
+    ///
+    /// A unitless weight, not money: it needs no absolute rate, so it works for
+    /// a model missing from the table. Use it to compare streams against each
+    /// other (what share of spend is cache writes?), never to show dollars.
+    pub fn cost_units(&self, model: &str, t: &ModelTokens) -> f64 {
+        let ratio = self.output_ratio(model);
+        let write_5m = t
+            .cache_creation_tokens
+            .saturating_sub(t.cache_creation_1h_tokens);
+        t.input_tokens as f64
+            + t.output_tokens as f64 * ratio
+            + write_5m as f64 * CACHE_WRITE_5M_MULT
+            + t.cache_creation_1h_tokens as f64 * CACHE_WRITE_1H_MULT
+            + t.cache_read_tokens as f64 * CACHE_READ_MULT
+    }
+
+    /// Output-to-input price ratio for `model`: exact when priced, otherwise the
+    /// family default.
+    ///
+    /// This module refuses to guess an absolute rate, and that stays true. A
+    /// RATIO is a different thing: every Claude model in the table prices output
+    /// at exactly 5x input and every GPT model at 8x, so a cost-WEIGHTED
+    /// comparison survives an unpriced model even though its dollar cost does
+    /// not. That is what keeps the headroom multiplier correct while
+    /// `claude-opus-5` is missing from the table.
+    pub fn output_ratio(&self, model: &str) -> f64 {
+        if let Some(p) = self.price_for(model) {
+            if p.input > 0.0 {
+                return p.output / p.input;
+            }
+        }
+        if model.starts_with("claude") {
+            DEFAULT_OUTPUT_RATIO_CLAUDE
+        } else {
+            DEFAULT_OUTPUT_RATIO_OTHER
+        }
+    }
+
+    /// Blended cost weight of one cache-write token for `t`, between the 1.25x
+    /// 5-minute and 2.0x 1-hour rates. Falls back to the 5-minute rate when
+    /// nothing was written.
+    pub fn write_blend(t: &ModelTokens) -> f64 {
+        let write_5m = t
+            .cache_creation_tokens
+            .saturating_sub(t.cache_creation_1h_tokens);
+        let total = write_5m + t.cache_creation_1h_tokens;
+        if total == 0 {
+            return CACHE_WRITE_5M_MULT;
+        }
+        (write_5m as f64 * CACHE_WRITE_5M_MULT
+            + t.cache_creation_1h_tokens as f64 * CACHE_WRITE_1H_MULT)
+            / total as f64
+    }
+
 
     /// Longest matching key that is a prefix of `model` (so date-suffixed ids
     /// like `claude-haiku-4-5-20251001` resolve to `claude-haiku-4-5`).

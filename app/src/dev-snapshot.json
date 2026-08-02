@@ -1,0 +1,601 @@
+{
+  "generatedAt": "2026-08-02T19:26:49.199Z",
+  "since": "2026-07-26T19:26:46.804Z",
+  "ledger": {
+    "periodLabel": "Last 7 days",
+    "totalTokens": 278506910,
+    "removableTokens": 102923512,
+    "overhead": 0.8188762246509431,
+    "headroom": 1.340609077890068,
+    "removableShare": 0.2540703949477495,
+    "sessions": 7778,
+    "sources": [
+      {
+        "kind": "__floor",
+        "label": "session floor (system prompt + tool schemas)",
+        "tokens": 129512787,
+        "share": 0.465025399190275,
+        "removable": false,
+        "isFloor": true,
+        "estimated": false
+      },
+      {
+        "kind": "floor:skill_listing",
+        "label": "skill_listing (startup)",
+        "tokens": 47203938,
+        "share": 0.16948928843453112,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "__conversation",
+        "label": "conversation growth",
+        "tokens": 46070611,
+        "share": 0.1654199926314216,
+        "removable": false,
+        "isFloor": false,
+        "estimated": false
+      },
+      {
+        "kind": "floor:hook_success",
+        "label": "hook_success (startup)",
+        "tokens": 30357436,
+        "share": 0.10900065639304964,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "floor:agent_listing_delta",
+        "label": "agent_listing_delta (startup)",
+        "tokens": 15457861,
+        "share": 0.05550261212549448,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "floor:deferred_tools_delta",
+        "label": "deferred_tools_delta (startup)",
+        "tokens": 4700753,
+        "share": 0.016878407074352304,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "deferred_tools_delta",
+        "label": "deferred_tools_delta",
+        "tokens": 1840943,
+        "share": 0.006610044253480102,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_success",
+        "label": "hook_success",
+        "tokens": 1681662,
+        "share": 0.006038133847379227,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "floor:hook_additional_context",
+        "label": "hook_additional_context (startup)",
+        "tokens": 664941,
+        "share": 0.002387520654334932,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "edited_text_file",
+        "label": "edited_text_file",
+        "tokens": 299066,
+        "share": 0.001073818958387783,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "async_hook_response",
+        "label": "async_hook_response",
+        "tokens": 181216,
+        "share": 0.0006506696727919605,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "floor:mcp_instructions_delta",
+        "label": "mcp_instructions_delta (startup)",
+        "tokens": 163931,
+        "share": 0.0005886065807128448,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "mcp_instructions_delta",
+        "label": "mcp_instructions_delta",
+        "tokens": 131601,
+        "share": 0.0004725232849698415,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "skill_listing",
+        "label": "skill_listing",
+        "tokens": 71578,
+        "share": 0.00025700619061839433,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "task_reminder",
+        "label": "task_reminder",
+        "tokens": 47487,
+        "share": 0.00017050564382765224,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_additional_context",
+        "label": "hook_additional_context",
+        "tokens": 45665,
+        "share": 0.0001639636158399086,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "queued_command",
+        "label": "queued_command",
+        "tokens": 30917,
+        "share": 0.00011100981300607587,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "goal_status",
+        "label": "goal_status",
+        "tokens": 14311,
+        "share": 0.000051384721477826167,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_error_during_execution",
+        "label": "hook_error_during_execution",
+        "tokens": 14298,
+        "share": 0.00005133804400041636,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "agent_listing_delta",
+        "label": "agent_listing_delta",
+        "tokens": 11391,
+        "share": 0.000040900241936546566,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_system_message",
+        "label": "hook_system_message",
+        "tokens": 1534,
+        "share": 0.000005507942334357162,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "command_permissions",
+        "label": "command_permissions",
+        "tokens": 756,
+        "share": 0.0000027144748401395138,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "floor:file",
+        "label": "file (startup)",
+        "tokens": 520,
+        "share": 0.0000018670990963922582,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "floor:goal_status",
+        "label": "goal_status (startup)",
+        "tokens": 471,
+        "share": 0.0000016911609123091417,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "read_truncation_notice",
+        "label": "read_truncation_notice",
+        "tokens": 433,
+        "share": 0.000001554719055265092,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_non_blocking_error",
+        "label": "hook_non_blocking_error",
+        "tokens": 325,
+        "share": 0.0000011669369352451614,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "date_change",
+        "label": "date_change",
+        "tokens": 225,
+        "share": 8.078794167081887e-7,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "ultra_effort_enter",
+        "label": "ultra_effort_enter",
+        "tokens": 204,
+        "share": 7.324773378154244e-7,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "floor:command_permissions",
+        "label": "command_permissions (startup)",
+        "tokens": 32,
+        "share": 1.1489840593183128e-7,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "floor:ultra_effort_enter",
+        "label": "ultra_effort_enter (startup)",
+        "tokens": 17,
+        "share": 6.103977815128536e-8,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      }
+    ],
+    "projects": [
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/eval/qwen_bench",
+        "name": "qwen_bench",
+        "sessions": 5657,
+        "msgsPerSession": 1.1171999292911436,
+        "floorTokens": 196598592,
+        "workTokens": 1955018,
+        "overhead": 0.9901537020656537
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev",
+        "name": "getnadir.dev",
+        "sessions": 116,
+        "msgsPerSession": 31.224137931034484,
+        "floorTokens": 6816262,
+        "workTokens": 27163898,
+        "overhead": 0.2005953474027197
+      },
+      {
+        "project": "/private/tmp/claude-501/-Users-dor-Documents-code-Nadir-getnadir-dev/819fbd25-6ba9-48f1-bdb4-ba9ad95e2cce/scratchpad/qwen_bench",
+        "name": "qwen_bench",
+        "sessions": 1926,
+        "msgsPerSession": 1.346313603322949,
+        "floorTokens": 21985088,
+        "workTokens": 1473119,
+        "overhead": 0.9372024042587739
+      },
+      {
+        "project": "/Users/dor/Documents/code/Stacked",
+        "name": "Stacked",
+        "sessions": 26,
+        "msgsPerSession": 67.8076923076923,
+        "floorTokens": 1092682,
+        "workTokens": 9406151,
+        "overhead": 0.10407651974271807
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber",
+        "name": "barber",
+        "sessions": 34,
+        "msgsPerSession": 33.6764705882353,
+        "floorTokens": 963815,
+        "workTokens": 4250814,
+        "overhead": 0.18482906454131254
+      },
+      {
+        "project": "/Users/dor/Documents/code/comma",
+        "name": "comma",
+        "sessions": 3,
+        "msgsPerSession": 282.3333333333333,
+        "floorTokens": 102936,
+        "workTokens": 4442076,
+        "overhead": 0.022648125021452088
+      },
+      {
+        "project": "/Users/dor/Documents/code/echo",
+        "name": "echo",
+        "sessions": 1,
+        "msgsPerSession": 148,
+        "floorTokens": 11831,
+        "workTokens": 514475,
+        "overhead": 0.022479318115316945
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/app/src",
+        "name": "src",
+        "sessions": 2,
+        "msgsPerSession": 95,
+        "floorTokens": 107951,
+        "workTokens": 416610,
+        "overhead": 0.20579303455651488
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a317238e4d97c1382",
+        "name": "agent-a317238e4d97c1382",
+        "sessions": 2,
+        "msgsPerSession": 50.5,
+        "floorTokens": 46677,
+        "workTokens": 290338,
+        "overhead": 0.13850125365339822
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/NadirClaw",
+        "name": "NadirClaw",
+        "sessions": 5,
+        "msgsPerSession": 5.4,
+        "floorTokens": 187143,
+        "workTokens": 22244,
+        "overhead": 0.8937660886301442
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a0f82557655178dad",
+        "name": "agent-a0f82557655178dad",
+        "sessions": 1,
+        "msgsPerSession": 89,
+        "floorTokens": 19911,
+        "workTokens": 173416,
+        "overhead": 0.10299130488757391
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-adde144976a78db40",
+        "name": "agent-adde144976a78db40",
+        "sessions": 1,
+        "msgsPerSession": 28,
+        "floorTokens": 20289,
+        "workTokens": 138836,
+        "overhead": 0.12750353495679498
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/.claude/worktrees/inspiring-cerf-edeebe",
+        "name": "inspiring-cerf-edeebe",
+        "sessions": 1,
+        "msgsPerSession": 88,
+        "floorTokens": 40123,
+        "workTokens": 97378,
+        "overhead": 0.291801514170806
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a8529349accde18de",
+        "name": "agent-a8529349accde18de",
+        "sessions": 1,
+        "msgsPerSession": 62,
+        "floorTokens": 20368,
+        "workTokens": 86196,
+        "overhead": 0.1911339664427011
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/.claude/worktrees/objective-sanderson-4d119b",
+        "name": "objective-sanderson-4d119b",
+        "sessions": 1,
+        "msgsPerSession": 19,
+        "floorTokens": 41282,
+        "workTokens": 13654,
+        "overhead": 0.7514562399883501
+      },
+      {
+        "project": "/Users/dor/Documents/code/Stacked/app",
+        "name": "app",
+        "sessions": 1,
+        "msgsPerSession": 1,
+        "floorTokens": 7737,
+        "workTokens": 0,
+        "overhead": 1
+      }
+    ],
+    "empty": false
+  },
+  "insights": [
+    {
+      "id": "floor-dominates",
+      "severity": "high",
+      "title": "82% of your tokens went to starting sessions",
+      "detail": "228,062,687 of 278,506,910 cache-write tokens were the session floor, across 7,778 sessions (29,321 per session before you typed anything).",
+      "tokens": 228062687,
+      "action": "Fewer, longer sessions pay this once instead of many times. The per-project table shows which ones churn."
+    },
+    {
+      "id": "churn:/Users/dor/Documents/code/Nadir/getnadir.dev/eval/qwen_bench",
+      "severity": "high",
+      "title": "qwen_bench ran 5,657 sessions averaging 1.1 messages",
+      "detail": "196,598,592 tokens of session floor bought 1,955,018 tokens of work (99% overhead). Each of those sessions paid the full startup cost for about one exchange.",
+      "tokens": 196598592,
+      "action": "If a script or harness drives this, reuse one session across iterations instead of starting a new one each time."
+    },
+    {
+      "id": "floor-component:skill_listing",
+      "severity": "high",
+      "title": "skill_listing costs ~6,068 tokens every session",
+      "detail": "47,203,938 in total across 7,778 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 47203938,
+      "action": "If you don't need skill_listing in every project, scope or disable it and the floor shrinks by roughly that much per session."
+    },
+    {
+      "id": "floor-component:hook_success",
+      "severity": "high",
+      "title": "hook_success costs ~3,902 tokens every session",
+      "detail": "30,357,436 in total across 7,778 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 30357436,
+      "action": "If you don't need hook_success in every project, scope or disable it and the floor shrinks by roughly that much per session."
+    },
+    {
+      "id": "churn:/private/tmp/claude-501/-Users-dor-Documents-code-Nadir-getnadir-dev/819fbd25-6ba9-48f1-bdb4-ba9ad95e2cce/scratchpad/qwen_bench",
+      "severity": "high",
+      "title": "qwen_bench ran 1,926 sessions averaging 1.3 messages",
+      "detail": "21,985,088 tokens of session floor bought 1,473,119 tokens of work (94% overhead). Each of those sessions paid the full startup cost for about one exchange.",
+      "tokens": 21985088,
+      "action": "If a script or harness drives this, reuse one session across iterations instead of starting a new one each time."
+    },
+    {
+      "id": "floor-component:agent_listing_delta",
+      "severity": "notable",
+      "title": "agent_listing_delta costs ~1,987 tokens every session",
+      "detail": "15,457,861 in total across 7,778 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 15457861,
+      "action": "If you don't need agent_listing_delta in every project, scope or disable it and the floor shrinks by roughly that much per session."
+    },
+    {
+      "id": "floor-component:deferred_tools_delta",
+      "severity": "notable",
+      "title": "deferred_tools_delta costs ~604 tokens every session",
+      "detail": "4,700,753 in total across 7,778 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 4700753,
+      "action": "If you don't need deferred_tools_delta in every project, scope or disable it and the floor shrinks by roughly that much per session."
+    },
+    {
+      "id": "per-turn-injections",
+      "severity": "notable",
+      "title": "Per-turn injections cost 4,373,612 tokens (1.6%)",
+      "detail": "Across 18 kinds, largest is deferred_tools_delta. These are hooks, reminders and listings re-sent during a session rather than at startup.",
+      "tokens": 4373612,
+      "action": "Trim the noisiest hooks if they fire on every tool call."
+    }
+  ],
+  "stats": {
+    "periodLabel": "Last 7 days",
+    "streams": {
+      "input": 237125,
+      "output": 12293012,
+      "cacheWrite": 293951331,
+      "cacheRead": 2252936454
+    },
+    "totalTokens": 2559417922,
+    "sessions": 7785,
+    "costUsdEst": 851.83,
+    "costEstimated": true,
+    "fullyPriced": false,
+    "unpricedTokens": 2041809432,
+    "headline": {
+      "value": null,
+      "label": "not_enough_data",
+      "nHoldout": 151,
+      "note": null,
+      "nFullOn": 9790,
+      "nBaseline": 151,
+      "baselineKind": "holdout",
+      "onRandomized": false,
+      "baselineClean": true,
+      "minGroup": 10,
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 7456,
+          "nOff": 147,
+          "medianOn": 2,
+          "medianOff": 2,
+          "delta": null
+        },
+        {
+          "stream": "output",
+          "kind": "estimated",
+          "nOn": 7456,
+          "nOff": 147,
+          "medianOn": 163,
+          "medianOff": 331.3333333333333,
+          "delta": -0.5080482897384306
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 7456,
+          "nOff": 147,
+          "medianOn": 33293,
+          "medianOff": 13107,
+          "delta": null
+        },
+        {
+          "stream": "cache read",
+          "kind": "estimated",
+          "nOn": 7456,
+          "nOff": 147,
+          "medianOn": 18945,
+          "medianOff": 27361,
+          "delta": -0.30759109681663677
+        }
+      ]
+    }
+  },
+  "sources": {
+    "cells": [
+      {
+        "source": "claude-code",
+        "interface": "gui",
+        "sessions": 7783,
+        "totalTokens": 2559515167,
+        "costUsdEst": 851.82039915,
+        "toolPresent": true
+      },
+      {
+        "source": "claude-code",
+        "interface": "tui",
+        "sessions": 1,
+        "totalTokens": 28418,
+        "costUsdEst": 0,
+        "toolPresent": true
+      },
+      {
+        "source": "codex",
+        "interface": "gui",
+        "sessions": 0,
+        "totalTokens": 0,
+        "costUsdEst": 0,
+        "toolPresent": true
+      },
+      {
+        "source": "codex",
+        "interface": "tui",
+        "sessions": 0,
+        "totalTokens": 0,
+        "costUsdEst": 0,
+        "toolPresent": true
+      }
+    ],
+    "unknownTokens": 19241,
+    "unknownSessions": 1
+  }
+}

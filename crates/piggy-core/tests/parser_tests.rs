@@ -80,3 +80,80 @@ fn empty_file_is_empty_parse() {
     assert!(p.first_ts.is_none());
     assert!(p.last_ts.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Context ledger: every cache-write token is charged to what caused it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn context_ledger_attributes_and_reconciles() {
+    use piggy_core::parser::{CTX_CONVERSATION, CTX_FLOOR};
+
+    let p = parse_file(&fixture("context.jsonl")).unwrap();
+    let ctx = &p.context;
+
+    // req_A is the first assistant message: 100 input + 40 cache write = 140,
+    // the session floor. The skill_listing that preceded it is part of what the
+    // session opens with, so it is charged as a NAMED FLOOR COMPONENT bounded
+    // by its own size, and the unexplained rest stays on the floor residual.
+    // Floor total is still exactly the measured write.
+    let floor_component = ctx["floor:skill_listing"].tokens;
+    assert!(
+        floor_component > 0 && floor_component < 40,
+        "bounded by its own ~43-byte payload, got {floor_component}"
+    );
+    assert_eq!(
+        ctx[CTX_FLOOR].tokens + floor_component,
+        140,
+        "floor residual + components must equal the first write"
+    );
+    assert!(
+        !ctx.contains_key("skill_listing"),
+        "a pre-floor injection is a floor component, not a per-turn injection"
+    );
+
+    // req_B's 300-token write is NOT all caused by the two injections before
+    // it: that write also carries the user's turn. Each injection is charged at
+    // most what it contains, and the residual is conversation growth.
+    //
+    // Regression: charging the whole write to whatever preceded it let a
+    // 480-byte date_change notice absorb 1.1M tokens on a real tree.
+    let hook = ctx["hook_success"].tokens;
+    let date = ctx["date_change"].tokens;
+    assert!(
+        hook > date,
+        "hook_success has the larger payload: {hook} vs {date}"
+    );
+    assert!(
+        hook < 120,
+        "hook_success's payload is ~200 bytes, so it cannot cost {hook} tokens"
+    );
+    assert!(
+        date < 40,
+        "date_change is a few dozen bytes, so it cannot cost {date} tokens"
+    );
+
+    // req_C has nothing pending, so its whole 50-token write is conversation,
+    // plus the residual of req_B's write that the injections did not explain.
+    // Its streaming rewrite is the same message and must not be charged twice.
+    let conv = ctx[CTX_CONVERSATION].tokens;
+    assert_eq!(
+        conv,
+        350 - hook - date,
+        "conversation takes every token the injections did not"
+    );
+    assert_eq!(ctx[CTX_CONVERSATION].n, 2, "req_B's residual and req_C");
+
+    // The whole point: the ledger reconciles against the token totals rather
+    // than estimating alongside them.
+    let ledger: u64 = ctx.values().map(|c| c.tokens).sum();
+    let models: u64 = p
+        .models
+        .values()
+        .map(|m| m.input_tokens + m.cache_creation_tokens)
+        .sum();
+    assert_eq!(
+        ledger, models,
+        "ledger must sum to input + cache_creation exactly"
+    );
+}

@@ -241,6 +241,11 @@ pub fn parse_codex_file(path: &Path) -> io::Result<SessionParse> {
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        // Codex logs carry no attachment records, so there is nothing to
+        // attribute a context ledger from. Empty rather than a fabricated
+        // floor/conversation split: the ledger UI can then say "not available
+        // for this source" instead of showing a number built from nothing.
+        context: BTreeMap::new(),
         parse_errors,
     })
 }

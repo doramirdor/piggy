@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use piggy_core::attribution::{self, median, Badge, Stream};
+use piggy_core::attribution::{self, median, Badge, Stream, MIN_GROUP};
 use piggy_core::rng::XorShift64;
 use piggy_core::store::source;
 use piggy_core::{discovery, Catalog, ModelTokens, Pricing, SaverTag, SessionParse, Store};
@@ -60,6 +60,7 @@ fn insert_session(
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     store
@@ -310,6 +311,7 @@ fn subagent_sessions_are_excluded_from_groups() {
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     store
@@ -504,6 +506,75 @@ fn headline_falls_back_to_pre_install_when_no_holdout() {
 }
 
 #[test]
+fn a_thin_holdout_keeps_the_pre_install_estimate_until_it_can_measure() {
+    // Regression: the first holdout row used to evict a MIN_GROUP-strong
+    // pre-install baseline outright, blanking the "estimated" figure the user was
+    // already seeing and dropping the headline to "measuring" for the whole
+    // 1..MIN_GROUP holdout warm-up (the estimate went backwards as data accrued).
+    // The estimate must survive until the holdout is big enough to back a number,
+    // then hand over.
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    // 12 full-on (cheap) vs 12 pre-install (heavier): a valid observational
+    // estimate that the savers make the plan last longer.
+    for i in 0..12 {
+        let id = format!("fullon-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 500, 500, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+        let id = format!("pre-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 900, 900, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::PRE_INSTALL)])
+            .unwrap();
+    }
+
+    // 3 holdout sessions so far - below MIN_GROUP, cannot back a number alone.
+    for i in 0..3 {
+        let id = format!("hold-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 900, 900, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x11).unwrap();
+    assert_eq!(
+        hl.baseline,
+        attribution::HeadlineBaseline::PreInstall,
+        "a sub-MIN_GROUP holdout must not evict the usable pre-install baseline"
+    );
+    assert_eq!(
+        hl.n_baseline, 12,
+        "the baseline is the 12 pre-install sessions, not the 3 warm-up holdouts"
+    );
+    assert!(
+        hl.multiplier.unwrap() > 1.0,
+        "the estimate the user was already seeing must survive the warm-up"
+    );
+
+    // Warm-up completes: 10 clean holdouts now exist, so the holdout takes over.
+    for i in 3..10 {
+        let id = format!("hold-{i}");
+        insert_session(&mut store, &pricing, &id, "claude-sonnet-4-5", 10, 900, 900, 0, 0);
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x11).unwrap();
+    assert_eq!(
+        hl.baseline,
+        attribution::HeadlineBaseline::Holdout,
+        "once the holdout clears MIN_GROUP it becomes the baseline"
+    );
+    assert_eq!(hl.n_baseline, 10);
+}
+
+#[test]
 fn an_observational_cost_more_estimate_is_suppressed_but_a_measured_one_shows() {
     // An estimate that the savers made things *worse* cannot be trusted from an
     // observational pre-install baseline (confounded by heavier recent work), so
@@ -535,6 +606,11 @@ fn an_observational_cost_more_estimate_is_suppressed_but_a_measured_one_shows() 
         "a cost-more observational estimate must publish no number, got {:?}",
         hl.multiplier
     );
+    assert_eq!(
+        hl.multiplier_state,
+        attribution::MultiplierState::WithheldCostMore,
+        "the reason is carried out so the UI can say 'withheld', not 'still gathering'"
+    );
     assert!(
         hl.streams.iter().all(|s| s.badge != Badge::Estimated),
         "a >100%-more stream must stay measuring, never estimated"
@@ -560,6 +636,11 @@ fn an_observational_cost_more_estimate_is_suppressed_but_a_measured_one_shows() 
     assert_eq!(hl.baseline, attribution::HeadlineBaseline::Holdout);
     let m = hl.multiplier.expect("a measured regression must still surface");
     assert!(m < 1.0, "savers genuinely cost more against the holdout (m={m:.2})");
+    assert_eq!(
+        hl.multiplier_state,
+        attribution::MultiplierState::Shown,
+        "a measured regression is shown, not withheld"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +739,7 @@ fn insert_at(store: &mut Store, pricing: &Pricing, id: &str, ts: &str) {
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     store
@@ -709,17 +791,24 @@ fn discovery_parses_and_filters_against_catalog() {
         .map(|r| r.full_name.as_str())
         .collect();
     assert_eq!(names, vec!["other/claude-tokens", "someone/token-saver"]);
-    // The listed-only catalog entry appears with its exclusion reason.
-    let listed = merged
-        .iter()
-        .find(|r| r.listed_only)
-        .expect("listed_only entry surfaced");
-    assert_eq!(listed.full_name, "token-optimizer-mcp");
-    assert!(listed
+    // The listed-only catalog entries appear with their exclusion reasons.
+    let find_listed = |name: &str| {
+        merged
+            .iter()
+            .find(|r| r.listed_only && r.full_name == name)
+            .unwrap_or_else(|| panic!("listed_only entry {name} surfaced"))
+    };
+    assert!(find_listed("token-optimizer-mcp")
         .exclusion_reason
         .as_ref()
         .unwrap()
         .contains("uninstall"));
+    // boost is listed-only under its repo name, excluded for telemetry/permission.
+    assert!(find_listed("jfrog/boost")
+        .exclusion_reason
+        .as_ref()
+        .unwrap()
+        .contains("telemetry"));
 }
 
 #[test]
@@ -771,6 +860,7 @@ fn session_without_model_rows_does_not_break_rate_map() {
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     store
@@ -783,4 +873,182 @@ fn session_without_model_rows_does_not_break_rate_map() {
     assert_eq!(empty.input, 0);
     assert_eq!(empty.output, 0);
     assert_eq!(empty.turns, 0);
+}
+// ---------------------------------------------------------------------------
+// Isolation: a hand-pinned saver must not delete every other saver's groups.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_manually_pinned_off_saver_does_not_break_isolation_for_the_others() {
+    // Regression: `others_on` counted ANY other saver being off, whatever the
+    // source. `controlled_savers` drops a hand-toggled saver from rotation, so
+    // one saver pinned off by hand was off in every session, `others_on` was
+    // false everywhere, and every saver's ON and OFF groups came out empty — the
+    // per-saver table read "not enough data yet" forever at any session count.
+    // Seen on a real profile: sweep had 245 randomized on / 45 off and the table
+    // showed 52 / 0.
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    for i in 0..MIN_GROUP {
+        // Spread the arms: identical sessions bootstrap to a zero-width CI, which
+        // never earns a badge (by design). Medians stay 445 vs 890 → a 50% cut.
+        let (on, off) = (400 + 10 * i as u64, 800 + 20 * i as u64);
+        // `sweep` rotates; `rtk` is pinned off by hand in BOTH arms.
+        let id = format!("sweep-on-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            10,
+            on,
+            on,
+            0,
+            0,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("sweep", true, source::ROTATION),
+                    SaverTag::new("rtk", false, source::MANUAL),
+                ],
+            )
+            .unwrap();
+        let id = format!("sweep-off-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            10,
+            off,
+            off,
+            0,
+            0,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("sweep", false, source::ROTATION),
+                    SaverTag::new("rtk", false, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    let att = attribution::attribute(&store, &pricing, "sweep", 0x5EED).unwrap();
+    assert_eq!(
+        att.n_on, MIN_GROUP,
+        "the pinned saver must not empty the ON group"
+    );
+    assert_eq!(att.n_off, MIN_GROUP, "nor the OFF group");
+    let out = att.output().unwrap();
+    assert_eq!(out.badge, Badge::Measured, "both arms randomized for sweep");
+    assert!(
+        (out.delta.unwrap() - 0.5).abs() < 0.05,
+        "planted 50% output cut, got {:?}",
+        out.delta
+    );
+
+    // A scheduler-driven off on the other saver still breaks isolation: that
+    // slot changes two things at once.
+    let id = "two-off".to_string();
+    insert_session(
+        &mut store,
+        &pricing,
+        &id,
+        "claude-sonnet-4-5",
+        10,
+        800,
+        800,
+        0,
+        0,
+    );
+    store
+        .set_session_savers(
+            &id,
+            &[
+                SaverTag::new("sweep", false, source::ROTATION),
+                SaverTag::new("rtk", false, source::ROTATION),
+            ],
+        )
+        .unwrap();
+    let att = attribution::attribute(&store, &pricing, "sweep", 0x5EED).unwrap();
+    assert_eq!(
+        att.n_off, MIN_GROUP,
+        "the double-off slot must stay excluded"
+    );
+}
+
+#[test]
+fn a_stream_the_baseline_barely_uses_reports_no_percentage() {
+    // Regression: `delta_of` only refused `median_off == 0.0`. With every prompt
+    // served from cache the input stream medians at ~2 tokens/turn, and the ratio
+    // against it printed -20071%. The floor is continuous, not a case at zero.
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    for i in 0..MIN_GROUP {
+        // input: 20 tokens over 10 turns = 2/turn in BOTH arms — under the floor.
+        // output: a real 50% cut, so the guard is shown to be per-stream.
+        let id = format!("on-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            10,
+            20,
+            400,
+            0,
+            0,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("sweep", true, source::ROTATION)])
+            .unwrap();
+        let id = format!("off-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            10,
+            20,
+            800,
+            0,
+            0,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("sweep", false, source::ROTATION)])
+            .unwrap();
+    }
+
+    let att = attribution::attribute(&store, &pricing, "sweep", 0x5EED).unwrap();
+    let input = att
+        .streams
+        .iter()
+        .find(|s| s.stream == Stream::Input)
+        .unwrap();
+    assert!(
+        input.delta.is_none(),
+        "2 tokens/turn is not a stream to take a ratio against, got {:?}",
+        input.delta
+    );
+    assert_eq!(input.badge, Badge::Measuring);
+    assert!(
+        input.shown_pct().is_none(),
+        "no point estimate below the floor"
+    );
+
+    let out = att.output().unwrap();
+    assert!(
+        (out.delta.unwrap() - 0.5).abs() < 0.05,
+        "the busy stream still measures, got {:?}",
+        out.delta
+    );
 }

@@ -64,6 +64,7 @@ fn insert_session(
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     let path = if subagent {
@@ -111,6 +112,7 @@ fn insert_session_at(
         n_tool_results: 0,
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
+        context: BTreeMap::new(),
         parse_errors: 0,
     };
     store

@@ -1,19 +1,58 @@
-// Canvas2D renderer for the share card - draws docs/mockups/sharecard.html at
-// 2400×1260 (4× the 600×315 mockup) with no html2canvas dependency. All text
-// comes from shareCardText() so the honesty rules live in one place.
+// Canvas2D renderer for the share card, drawn in the v2 "Statement" identity:
+// cool stock, hairline rules, a Hoefler figure carrying the whole composition.
+// All text comes from shareCardText() so the honesty rules live in one place.
+//
+// The exported PNG is deliberately the LIGHT variant. The card is the one
+// artefact that leaves the machine, cool statement stock is the distinctive half
+// of the identity, and a pale card reads better in a feed of dark ones.
 
 import type { ShareCardData } from "../types";
 import { shareCardText } from "./sharecard";
 
 export const CARD_W = 2400;
 export const CARD_H = 1260;
-const S = 4; // scale vs the 600×315 mockup
+const S = 4; // scale vs the 600x315 mockup
 
-const FONT_STACK =
-  '"Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif';
+// Native macOS faces, matching the app. Canvas needs real family names.
+const SERIF = '"Hoefler Text", "Baskerville", Georgia, serif';
+const SANS = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif';
+const MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace';
+
+const STOCK = "#e6ebef";
+const SHEET = "#f4f7f9";
+const INK = "#0d1b26";
+const INK_2 = "#4d5c68";
+const INK_3 = "#5b6873";
+const RULE = "#6b7a87";
+const MEASURED = "#1c6b48";
 
 function px(n: number): number {
   return n * S;
+}
+
+/** Tracked-out uppercase, the margin voice. Canvas has no letter-spacing on
+ *  older WKWebView builds, so this draws glyph by glyph and returns the width. */
+function folio(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  align: "left" | "right" = "left",
+): number {
+  const chars = text.toUpperCase().split("");
+  const track = size * 0.18;
+  ctx.font = `600 ${size}px ${MONO}`;
+  const total = chars.reduce((w, c) => w + ctx.measureText(c).width + track, 0) - track;
+  let cx = align === "right" ? x - total : x;
+  ctx.fillStyle = color;
+  ctx.textAlign = "left";
+  for (const c of chars) {
+    ctx.fillText(c, cx, y);
+    cx += ctx.measureText(c).width + track;
+  }
+  return total;
 }
 
 /** Render the card to a fresh canvas element. */
@@ -25,105 +64,70 @@ export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const ctx = canvas.getContext("2d");
   if (!ctx) return canvas;
 
-  // --- background: base + two corner glows (v1.0: green + brand pink) ----
-  ctx.fillStyle = "#06080b";
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-
-  const glowGreen = ctx.createRadialGradient(
-    CARD_W * 0.85,
-    -CARD_H * 0.1,
-    0,
-    CARD_W * 0.85,
-    -CARD_H * 0.1,
-    CARD_W * 0.85,
-  );
-  glowGreen.addColorStop(0, "rgba(34,197,94,0.30)");
-  glowGreen.addColorStop(0.55, "rgba(34,197,94,0)");
-  ctx.fillStyle = glowGreen;
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-
-  const glowPink = ctx.createRadialGradient(
-    -CARD_W * 0.05,
-    CARD_H * 1.1,
-    0,
-    -CARD_W * 0.05,
-    CARD_H * 1.1,
-    CARD_W * 0.9,
-  );
-  glowPink.addColorStop(0, "rgba(255,125,168,0.18)");
-  glowPink.addColorStop(0.55, "rgba(255,125,168,0)");
-  ctx.fillStyle = glowPink;
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-
-  // --- subtle dot grain --------------------------------------------------
-  ctx.fillStyle = "rgba(255,255,255,0.045)";
-  const step = px(22);
-  const r = 1.6;
-  for (let y = 0; y < CARD_H; y += step) {
-    for (let x = 0; x < CARD_W; x += step) {
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
   const padX = px(38);
-  const padTop = px(34);
-  const padBottom = px(34);
+  const padY = px(32);
 
-  // --- top row: pig + name + week ---------------------------------------
+  // --- the sheet: flat stock, one inset sheet, no glow and no grain ------
+  ctx.fillStyle = STOCK;
+  ctx.fillRect(0, 0, CARD_W, CARD_H);
+  ctx.fillStyle = SHEET;
+  ctx.fillRect(px(14), px(14), CARD_W - px(28), CARD_H - px(28));
+  ctx.strokeStyle = RULE;
+  ctx.lineWidth = Math.max(1, px(0.4));
+  ctx.strokeRect(px(14), px(14), CARD_W - px(28), CARD_H - px(28));
+
   ctx.textBaseline = "middle";
-  const topY = padTop + px(11);
-  ctx.textAlign = "left";
-  // Vector piggy mark (same shape as components/PiggyMark) instead of the 🐷
-  // emoji, so the share card renders identically on every platform.
-  const u = px(1.55);
+
+  // --- nameplate row: mark + Hoefler wordmark, week in the right margin ---
+  const topY = padY + px(14);
+  const u = px(1.35);
   drawPiggyMark(ctx, padX - 4.6 * u, topY - 12.3 * u, u);
-  const pigW = 16.6 * u + px(9);
-  ctx.font = `700 ${px(16)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.94)";
-  ctx.fillText("Piggy", padX + pigW, topY);
-  ctx.textAlign = "right";
-  ctx.font = `500 ${px(12)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.45)";
-  ctx.fillText(t.week, CARD_W - padX, topY);
-
-  // --- middle block: kicker / big / sub ---------------------------------
+  const markW = 16.6 * u + px(8);
   ctx.textAlign = "left";
-  const midCenter = CARD_H / 2;
+  ctx.font = `400 ${px(21)}px ${SERIF}`;
+  ctx.fillStyle = INK;
+  ctx.fillText("Piggy", padX + markW, topY);
+  folio(ctx, t.week, CARD_W - padX, topY, px(10.5), INK_3, "right");
 
-  ctx.font = `500 ${px(14)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.55)";
-  ctx.fillText(t.kicker, padX, midCenter - px(46));
+  // rule under the nameplate, the way a masthead is ruled off
+  const ruleY = topY + px(20);
+  ctx.fillStyle = INK;
+  ctx.fillRect(padX, ruleY, CARD_W - padX * 2, Math.max(2, px(0.6)));
 
-  // big headline with a green gradient fill
-  setLetterSpacing(ctx, px(-2.5));
-  ctx.font = `800 ${px(64)}px ${FONT_STACK}`;
-  const bigY = midCenter + px(6);
-  const grad = ctx.createLinearGradient(padX, 0, padX + px(360), 0);
-  grad.addColorStop(0, "#22c55e");
-  grad.addColorStop(1, "#4ade80");
-  ctx.fillStyle = grad;
-  ctx.fillText(t.big, padX, bigY);
-  setLetterSpacing(ctx, 0);
+  // --- the figure IS the picture -----------------------------------------
+  // Piggy can never have imagery, so the number carries the scale contrast a
+  // magazine gets from a full-bleed photograph.
+  const midY = CARD_H / 2 + px(10);
+  folio(ctx, t.kicker, padX, midY - px(64), px(11), INK_3);
 
-  ctx.font = `500 ${px(15)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.62)";
-  ctx.fillText(t.sub, padX, midCenter + px(52));
-
-  // --- bottom row: proof + url ------------------------------------------
-  const botY = CARD_H - padBottom - px(6);
-  ctx.beginPath();
-  ctx.fillStyle = "#22c55e";
-  ctx.arc(padX + px(2.5), botY, px(2.6), 0, Math.PI * 2);
-  ctx.fill();
   ctx.textAlign = "left";
-  ctx.font = `400 ${px(11.5)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.45)";
-  ctx.fillText(t.proof, padX + px(11), botY);
+  // Fit to the column rather than trusting one size: `t.big` swings from "1.7x
+  // longer" to "1.2M tokens" depending on what Piggy can honestly claim, and a
+  // fixed size clipped the longer strings off the edge of the card.
+  const bigMax = CARD_W - padX * 2;
+  let bigSize = px(112);
+  do {
+    ctx.font = `400 ${bigSize}px ${SERIF}`;
+    if (ctx.measureText(t.big).width <= bigMax) break;
+    bigSize -= px(2);
+  } while (bigSize > px(40));
+  // Green is spent here only when a randomised holdout stands behind the
+  // number. Everything else on this card is ink.
+  ctx.fillStyle = data.headlineLabel === "measured" ? MEASURED : INK;
+  ctx.fillText(t.big, padX, midY);
+
+  ctx.font = `400 ${px(15)}px ${SANS}`;
+  ctx.fillStyle = INK_2;
+  ctx.fillText(t.sub, padX, midY + px(74));
+
+  // --- footer: ruled off, proof credit left, url right -------------------
+  const botY = CARD_H - padY - px(12);
+  ctx.fillStyle = RULE;
+  ctx.fillRect(padX, botY - px(24), CARD_W - padX * 2, Math.max(1, px(0.3)));
+  folio(ctx, t.proof, padX, botY, px(10.5), INK_3);
   ctx.textAlign = "right";
-  ctx.font = `600 ${px(12)}px ${FONT_STACK}`;
-  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.font = `600 ${px(12)}px ${SANS}`;
+  ctx.fillStyle = INK_2;
   ctx.fillText(t.url, CARD_W - padX, botY);
 
   return canvas;
@@ -238,14 +242,6 @@ function roundRectPath(
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
-}
-
-/** Some engines gate `letterSpacing`; set it only when supported. */
-function setLetterSpacing(ctx: CanvasRenderingContext2D, value: number): void {
-  const c = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
-  if ("letterSpacing" in c) {
-    c.letterSpacing = `${value}px`;
-  }
 }
 
 /** Base64 PNG (no data-URL prefix) - the payload for the save-to-Desktop command. */

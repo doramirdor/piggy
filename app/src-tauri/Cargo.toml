@@ -38,3 +38,8 @@ tauri-plugin-updater = "2"
 [features]
 # This feature is used to produce the Tauri app bundle metadata.
 custom-protocol = ["tauri/custom-protocol"]
+# The local advisor. OFF by default, which is also the shipping default: Piggy's
+# findings are arithmetic and do not need a model. Turning this on links
+# llama.cpp, so it puts cmake and a C++ toolchain on the critical path of the
+# build and adds roughly ten megabytes to the bundle.
+local-llm = ["piggy-core/local-llm", "piggy-core/metal"]

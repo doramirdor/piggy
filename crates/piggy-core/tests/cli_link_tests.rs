@@ -67,6 +67,7 @@ impl Sandbox {
                 installed_files: vec![path.to_string_lossy().into_owned()],
                 pre_install_backup: None,
                 last_toggle_source: None,
+                manual_enabled: None,
                 config: Default::default(),
             },
         );

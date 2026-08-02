@@ -10,6 +10,8 @@
 //!   * `on` / `off` - fast toggle without uninstalling (the A/B path).
 //!   * `sweep`  - find unused add-ons that cost tokens; `--apply N` disables one.
 //!   * `report` - measured savings: per-saver attribution table + honest headline.
+//!   * `ledger` - where context tokens come from; exact, needs no A/B.
+//!   * `insights` - ledger findings, each with the lever that acts on it.
 //!   * `holdout` - view or change the share of sessions that run with savers off.
 //!   * `discover` - token-savers found on GitHub (cached; `--refresh` pulls).
 //!   * `watch`  - index and tag new sessions live, in the foreground.
@@ -103,6 +105,25 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Findings from the ledger: what your tokens went to, and the lever for each.
+    Insights {
+        /// Only consider sessions started on/after this date (e.g. `2026-07-01`).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Where your context tokens come from: exact per-source ledger, no A/B needed.
+    Ledger {
+        /// Only count sessions started on/after this date (e.g. `2026-07-01`).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// How many projects to show (default 10; the rest are summarized).
+        #[arg(long, value_name = "N")]
+        projects: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
     /// View or change the holdout fraction (the share of sessions run all-off).
     Holdout {
         /// Set the holdout fraction (0.0–0.5), e.g. `--fraction 0.1`.
@@ -181,6 +202,12 @@ fn main() -> Result<()> {
         Cmd::RestoreDefaults => cmd_restore_defaults(),
         Cmd::Backups => cmd_backups(),
         Cmd::Report { json } => cmd_report(json),
+        Cmd::Insights { since, json } => cmd_insights(since.as_deref(), json),
+        Cmd::Ledger {
+            since,
+            projects,
+            json,
+        } => cmd_ledger(since.as_deref(), projects.unwrap_or(10), json),
         Cmd::Holdout { fraction, on, off } => cmd_holdout(fraction, on, off),
         Cmd::Discover { refresh, json } => cmd_discover(refresh, json),
         Cmd::Watch { once } => cmd_watch(once),
@@ -960,6 +987,182 @@ fn time_seed() -> u64 {
         | 1
 }
 
+// ---------------------------------------------------------------------------
+// insights
+// ---------------------------------------------------------------------------
+
+/// Print ledger findings. Arithmetic on observed tokens only — no predictions,
+/// and an empty list is a real answer, not a failure.
+fn cmd_insights(since: Option<&str>, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let pricing = Pricing::load(&home);
+    let store = Store::open(&home)?;
+    let found = store.insights(since, &pricing)?;
+
+    if json {
+        let out: Vec<_> = found
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "id": i.id, "severity": i.severity.as_str(), "title": i.title,
+                    "detail": i.detail, "tokens": i.tokens, "action": i.action,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        println!("Piggy insights - nothing worth flagging.");
+        println!();
+        println!("Your floor is a reasonable share of spend and no project is churning");
+        println!("short sessions. Run `piggy ledger` for the full breakdown.");
+        return Ok(());
+    }
+
+    println!("Piggy insights - {} findings, loudest first", found.len());
+    for i in &found {
+        println!();
+        println!("[{}] {}", i.severity.as_str().to_uppercase(), i.title);
+        println!("  {}", i.detail);
+        println!("  → {}", i.action);
+    }
+    println!();
+    println!("Every figure is measured tokens from your session logs. Injection and");
+    println!("floor-component figures are bounded by content size; floor and");
+    println!("conversation totals are exact.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ledger
+// ---------------------------------------------------------------------------
+
+/// Print the context ledger: what is in your context window and what it cost.
+///
+/// Unlike `report`, this needs no holdout, no rotation, and no waiting. Every
+/// token was charged to a cause at parse time, so the table is exact from the
+/// first indexed session.
+fn cmd_ledger(since: Option<&str>, top_projects: usize, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let pricing = Pricing::load(&home);
+    let store = Store::open(&home)?;
+    let l = store.ledger(since, &pricing)?;
+
+    if json {
+        let out = serde_json::json!({
+            "total_tokens": l.total_tokens(),
+            "removable_tokens": l.removable_tokens(),
+            "overhead": l.overhead(),
+            "headroom": l.headroom(),
+            "removable_cost_share": l.removable_cost_share(),
+            "cost_units": l.cost_units,
+            "sources": l.rows.iter().map(|r| serde_json::json!({
+                "kind": r.kind,
+                "label": r.label(),
+                "tokens": r.tokens,
+                "charged_on": r.n,
+                "share": l.share(r),
+                "removable": r.removable(),
+                "is_floor": r.is_floor(),
+                "estimated": r.estimated(),
+            })).collect::<Vec<_>>(),
+            "projects": l.projects.iter().map(|p| serde_json::json!({
+                "project": p.project,
+                "sessions": p.sessions,
+                "msgs_per_session": p.msgs_per_session(),
+                "floor_tokens": p.floor_tokens,
+                "work_tokens": p.work_tokens,
+                "overhead": p.overhead(),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let total = l.total_tokens();
+    if total == 0 {
+        println!("Piggy ledger - nothing indexed yet. Run `piggy index` first.");
+        return Ok(());
+    }
+    let sessions: u64 = l.projects.iter().map(|p| p.sessions).sum();
+    match since {
+        Some(d) => println!("Piggy ledger - where your context tokens come from ({sessions} sessions since {d})"),
+        None => println!("Piggy ledger - where your context tokens come from ({sessions} sessions)"),
+    }
+    println!();
+    println!("{:<52} {:>16} {:>7}", "source", "tokens", "share");
+    println!("{}", "-".repeat(78));
+    for r in &l.rows {
+        println!(
+            "{:<52} {:>16} {:>6.1}%",
+            truncate(&r.label(), 52),
+            commafy(r.tokens),
+            l.share(r) * 100.0
+        );
+    }
+    println!("{}", "-".repeat(78));
+    println!("{:<52} {:>16}", "TOTAL cache-write tokens", commafy(total));
+
+    let removable = l.removable_tokens();
+    println!();
+    println!(
+        "Removable by configuration: {} tokens ({:.1}%) - injections you control, \
+         not the floor or the work.",
+        commafy(removable),
+        removable as f64 / total as f64 * 100.0
+    );
+    println!(
+        "Session overhead: {:.1}% of cache writes bought session startup rather than work.",
+        l.overhead() * 100.0
+    );
+
+    println!();
+    println!("Per project (heaviest first)");
+    println!(
+        "{:<44} {:>8} {:>9} {:>14} {:>14} {:>9}",
+        "project", "sessions", "msg/sess", "floor", "work", "overhead"
+    );
+    println!("{}", "-".repeat(102));
+    for p in l.projects.iter().take(top_projects) {
+        println!(
+            "{:<44} {:>8} {:>9.1} {:>14} {:>14} {:>8.1}%",
+            truncate_path(&p.project, 44),
+            p.sessions,
+            p.msgs_per_session(),
+            commafy(p.floor_tokens),
+            commafy(p.work_tokens),
+            p.overhead() * 100.0
+        );
+    }
+    // Never let a display cap read as "that was everything".
+    if l.projects.len() > top_projects {
+        let rest = &l.projects[top_projects..];
+        let tok: u64 = rest.iter().map(|p| p.floor_tokens + p.work_tokens).sum();
+        println!(
+            "{:<44} {:>8} {:>9} {:>14} {:>14}",
+            format!("... and {} more projects", rest.len()),
+            rest.iter().map(|p| p.sessions).sum::<u64>(),
+            "",
+            "",
+            commafy(tok)
+        );
+    }
+    Ok(())
+}
+
+/// Trim a path to `max` columns from the LEFT, so the leaf directory survives.
+/// `truncate` keeps the head, which is right for prose and useless for paths:
+/// every project under one tree truncates to the same prefix.
+fn truncate_path(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep: String = s.chars().skip(s.chars().count() - (max - 1)).collect();
+    format!("…{keep}")
+}
+
 fn cmd_report(json: bool) -> Result<()> {
     let home = config::piggy_home();
     let pricing = Pricing::load(&home);
@@ -1162,6 +1365,9 @@ fn headline_json(hl: &piggy_core::Headline) -> serde_json::Value {
         "baselineClean": hl.baseline_clean,
         "multiplier": hl.multiplier,
         "multiplierEstimated": true,
+        // Sessions needed on EACH arm before a measured claim, so a consumer can
+        // draw honest progress against the real bar instead of hard-coding 10.
+        "minGroup": piggy_core::attribution::MIN_GROUP,
         "streams": hl.streams.iter().map(stream_json).collect::<Vec<_>>(),
     })
 }
@@ -1191,6 +1397,13 @@ fn stream_json(s: &piggy_core::StreamStat) -> serde_json::Value {
         "ci": s.ci.map(|(lo, hi)| [lo * 100.0, hi * 100.0]),
         "nOn": s.n_on,
         "nOff": s.n_off,
+        // The two medians the delta is a ratio of (tokens per assistant turn).
+        // A percentage alone is a number the reader has to take on faith; with
+        // both sides a consumer can show the comparison it came from, and an arm
+        // with no sessions is visibly empty rather than silently absent. Always
+        // present, including while `deltaPct` is null.
+        "medianOn": s.median_on,
+        "medianOff": s.median_off,
     })
 }
 

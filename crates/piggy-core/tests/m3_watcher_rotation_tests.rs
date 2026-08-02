@@ -164,6 +164,22 @@ fn rotation_plan_is_deterministic_and_covers_every_slot() {
 }
 
 #[test]
+fn every_block_has_a_full_on_slot_however_many_savers() {
+    // Full-on is the ON arm of every per-saver comparison. At 9 savers the block
+    // used to be exactly holdout + 9 single-off, so no session ever ran with
+    // everything on and no saver could be promoted past `estimated`, at any
+    // session count.
+    for n in 1..=15 {
+        let savers: Vec<String> = (0..n).map(|i| format!("s{i}")).collect();
+        let plan = RotationPlan::new(savers, 0.1, true);
+        let full_on = (0..plan.block_len())
+            .filter(|&pos| plan.assignment_at(pos).kind == rotation::SlotKind::FullOn)
+            .count();
+        assert!(full_on >= 1, "{n} savers: block has no full-on slot");
+    }
+}
+
+#[test]
 fn manual_savers_are_excluded_from_the_rotation_set() {
     let catalog = Catalog::embedded();
     let mut state = PiggyState::default();
@@ -195,6 +211,7 @@ fn saver(id: &str, enabled: bool, src: Option<&str>) -> SaverState {
         installed_files: Vec::new(),
         pre_install_backup: None,
         last_toggle_source: src.map(String::from),
+        manual_enabled: None,
         config: BTreeMap::new(),
     }
 }
@@ -268,14 +285,29 @@ fn rotation_applies_when_idle_then_manual_pauses_it() {
         Some(source::MANUAL)
     );
 
-    let outcome = rotation::tick(&catalog, &mut store, &sb.projects(), far_future, 600).unwrap();
-    assert!(
-        matches!(outcome, RotationOutcome::NothingToRotate),
-        "the only saver is manually pinned → nothing left to rotate"
+    // With holdout enabled, a hand-pinned saver is no longer "nothing to rotate":
+    // the per-saver single-off rotation leaves it alone, but the all-off holdout
+    // still turns it off for its sampled sessions, so even a fully-pinned setup can
+    // be measured. Drive the cursor to the holdout slot and confirm the override.
+    store.set_rotation_state(0, None).unwrap();
+    rotation::tick(&catalog, &mut store, &sb.projects(), far_future, 600).unwrap();
+    let st = PiggyState::load().unwrap();
+    assert!(!st.savers["rtk"].enabled, "the all-off holdout overrides the pin");
+    assert_eq!(
+        st.savers["rtk"].last_toggle_source.as_deref(),
+        Some(source::HOLDOUT),
+        "tagged holdout, so the session is a clean all-off baseline even for a pin"
     );
-    // rtk untouched (still on), cursor NOT advanced.
-    assert!(PiggyState::load().unwrap().savers["rtk"].enabled);
-    assert_eq!(store.rotation_state().unwrap().0, 1);
+
+    // The next (non-holdout) slot restores the user's pinned ON, as a manual pin.
+    rotation::tick(&catalog, &mut store, &sb.projects(), far_future, 600).unwrap();
+    let st = PiggyState::load().unwrap();
+    assert!(st.savers["rtk"].enabled, "restored to the user's ON after the holdout");
+    assert_eq!(
+        st.savers["rtk"].last_toggle_source.as_deref(),
+        Some(source::MANUAL),
+        "restored as a manual pin, not rotation-controlled"
+    );
 }
 
 #[test]

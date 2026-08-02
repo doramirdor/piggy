@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import { Switch } from "../components/Switch";
+import { AdvisorSettings } from "../components/AdvisorSettings";
 import type { Doctor, Settings as SettingsData, UpdateInfo } from "../types";
 
 // Single source of truth for the version shown in the UI (the sidebar imports it
@@ -104,7 +105,9 @@ export function Settings() {
           <div className="smeta">
             <div className="sname">Holdout for measuring</div>
             <div className="sdesc">
-              Piggy runs {holdoutPct}% of sessions with savers off, so it can prove real savings.
+              Piggy runs {holdoutPct}% of sessions with every saver off — including ones you've
+              pinned on — then switches them back, so it can prove real savings even for a pinned
+              setup.
             </div>
           </div>
           <input
@@ -132,6 +135,8 @@ export function Settings() {
             label="Rotate savers"
           />
         </div>
+
+        <AdvisorSettings />
 
         <div className="setrow">
           <div className="smeta">

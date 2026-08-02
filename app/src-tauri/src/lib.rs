@@ -10,6 +10,7 @@
 //! session goes idle, and emits `piggy://stats-updated` so the panel and
 //! menu-bar stay live.
 
+mod advisor;
 mod backend;
 mod commands;
 mod tray;
@@ -53,10 +54,19 @@ pub fn run() {
             commands::stats_overview,
             commands::sources_overview,
             commands::usage_series,
+            commands::ledger_overview,
+            commands::ledger_insights,
+            commands::advisor_status,
+            commands::advisor_select,
+            commands::advisor_download,
+            commands::advisor_cancel,
+            commands::advisor_remove,
+            commands::advisor_annotate,
             commands::savers_list,
             commands::saver_config_get,
             commands::saver_config_set,
             commands::saver_toggle,
+            commands::saver_unpin,
             commands::master_toggle,
             commands::sweep_report,
             commands::sweep_apply,
