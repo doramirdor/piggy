@@ -19,7 +19,16 @@ fn v1_savers_are_installable_and_deferred_ones_are_not() {
     // that it ships venv+wrapper steps (require_python / create_venv /
     // pip_install / write_launcher). token-optimizer is a claude_plugin saver
     // wired with require_binary + marketplace add/install.
-    for id in ["rtk", "caveman", "ponytail", "sweep", "headroom", "token-optimizer"] {
+    for id in [
+        "rtk",
+        "caveman",
+        "ponytail",
+        "sweep",
+        "headroom",
+        "token-optimizer",
+        "barber",
+        "nadir-route",
+    ] {
         assert!(
             c.get(id).unwrap().installable().is_ok(),
             "{id} should be installable"
@@ -32,9 +41,15 @@ fn v1_savers_are_installable_and_deferred_ones_are_not() {
             "{id} should be refused (catalog newer than app / deferred)"
         );
     }
-    // A listed-only entry with no steps is not installable-with-steps.
-    let mcp = c.get("token-optimizer-mcp").unwrap();
-    assert!(!mcp.has_install_steps());
+    // Listed-only entries have no steps → shown in Discover, never installable.
+    // boost: mechanically an rtk-style hook, but excluded upstream (auto-allows
+    // Bash + telemetry with no opt-out) — see its exclusionReason.
+    for id in ["token-optimizer-mcp", "boost"] {
+        assert!(
+            !c.get(id).unwrap().has_install_steps(),
+            "{id} is listed-only (no install steps)"
+        );
+    }
 }
 
 #[test]
@@ -79,7 +94,16 @@ fn rtk_asset_names_are_the_real_release_filenames() {
 #[test]
 fn every_v1_step_kind_is_known() {
     let c = Catalog::embedded();
-    for id in ["rtk", "caveman", "ponytail", "sweep", "headroom", "token-optimizer"] {
+    for id in [
+        "rtk",
+        "caveman",
+        "ponytail",
+        "sweep",
+        "headroom",
+        "token-optimizer",
+        "barber",
+        "nadir-route",
+    ] {
         let e = c.get(id).unwrap();
         for kind in e.install.kinds().iter().chain(e.uninstall.kinds().iter()) {
             assert!(
@@ -87,6 +111,51 @@ fn every_v1_step_kind_is_known() {
                 "{id}: step '{kind}' must be a known kind"
             );
         }
+    }
+}
+
+#[test]
+fn nadir_route_is_pinned_to_the_file_the_site_tells_users_to_curl() {
+    // getnadir.com/skill documents exactly one install:
+    //   mkdir -p ~/.claude/skills/nadir-route &&
+    //   curl -fsSL https://getnadir.com/skills/nadir-route/SKILL.md -o …/SKILL.md
+    // Piggy must land the same path from the same URL, and — because that URL
+    // is unversioned — must carry a sha256, or an upstream edit would install
+    // whatever Nadir last published straight into ~/.claude.
+    let c = Catalog::embedded();
+    let e = c.get("nadir-route").unwrap();
+    assert_eq!(e.install_type, "claude_skill");
+    let dl = e
+        .install
+        .steps
+        .iter()
+        .find(|s| step_kind(s) == "download_file")
+        .expect("nadir-route installs one downloaded file");
+    assert_eq!(
+        dl["url"], "https://getnadir.com/skills/nadir-route/SKILL.md",
+        "the URL the site publishes"
+    );
+    assert_eq!(dl["dest"], "${CLAUDE_SKILLS}/nadir-route/SKILL.md");
+    assert_eq!(
+        dl["sha256"].as_str().map(str::len),
+        Some(64),
+        "an unversioned URL must be hash-pinned"
+    );
+    assert_eq!(
+        e.skill_file(),
+        Some("${CLAUDE_SKILLS}/nadir-route/SKILL.md"),
+        "the engine's on/off rename keys on this"
+    );
+    // The router and the skill both decide the same thing; running both makes
+    // either one's measurement unreadable.
+    assert!(e.conflicts_with.iter().any(|x| x == "nadirclaw"));
+}
+
+#[test]
+fn skill_file_is_exposed_for_skill_savers_only() {
+    let c = Catalog::embedded();
+    for id in ["rtk", "caveman", "barber", "headroom", "sweep"] {
+        assert_eq!(c.get(id).unwrap().skill_file(), None, "{id}");
     }
 }
 

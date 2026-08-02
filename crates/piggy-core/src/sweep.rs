@@ -215,11 +215,19 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(());
     };
+    let piggy_owned = piggy_owned_skill_dirs();
     for entry in entries.filter_map(|e| e.ok()) {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
+        // A skill Piggy installed as a saver is managed by the saver's own
+        // on/off (and its rotation), so sweeping it would park a file the
+        // engine still believes it owns and leave the two disagreeing. Skipped
+        // entirely, like Piggy-owned hooks.
+        if piggy_owned.contains(&name) {
+            continue;
+        }
         let skill_md = entry.path().join("SKILL.md");
         let est = std::fs::metadata(&skill_md)
             .map(|m| (m.len() / 4).max(50))
@@ -244,6 +252,29 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Names of skill directories under `~/.claude/skills` that a Piggy saver
+/// installed, taken from the files each installed saver recorded in
+/// `state.json`. Empty when state is unreadable — a scan never fails on it.
+fn piggy_owned_skill_dirs() -> std::collections::BTreeSet<String> {
+    let skills_dir = config::claude_skills_dir();
+    let Ok(state) = PiggyState::load() else {
+        return Default::default();
+    };
+    state
+        .savers
+        .values()
+        .flat_map(|s| s.installed_files.iter())
+        .filter_map(|f| {
+            Path::new(f)
+                .strip_prefix(&skills_dir)
+                .ok()?
+                .components()
+                .next()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 /// Surface the user's own hooks from `settings.json` (a spec'd data source).

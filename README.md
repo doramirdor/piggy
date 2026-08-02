@@ -94,7 +94,7 @@ Three things in that screenshot are the whole product:
 ## What's inside
 
 Flip the master switch and Piggy sets up a curated stack of savers, in the right order, backing up
-your Claude settings first. Six install in v0.1.0; two more (marked &sup2;) are curated but their
+your Claude settings first. Most install today; the two marked &sup2; are curated but their
 install path lands in a later update:
 
 | Saver | What it does | License |
@@ -104,6 +104,7 @@ install path lands in a later update:
 | **Headroom** | Deep compression on the sessions you start with `piggy-claude` | Apache-2.0 |
 | **Caveman** | Nudges Claude to answer in fewer words, same code | MIT |
 | **Ponytail** | Nudges Claude to build only what you asked for, no gold-plating | MIT |
+| **Nadir Route** | Claude asks [getnadir.com](https://getnadir.com/skill) which tier a task needs, then runs subagents on the cheapest capable model | Proprietary &sup1; |
 | **Claude Token Optimizer** &sup2; | Restructures your `CLAUDE.md` so sessions start lighter | MIT |
 | **Token Optimizer** | Sends Claude only what changed in files it already saw | PolyForm-Noncommercial &sup1; |
 | **Context Mode** &sup2; | Keeps huge tool outputs out of context until you need them | Elastic-2.0 &sup1; |
@@ -141,7 +142,11 @@ Turning a saver on is the one exception, and it's worth stating plainly: Piggy r
 saver's official installer, which fetches from that saver's own home rather than from GitHub.
 Headroom comes from PyPI at a pinned version, into an isolated venv; the plugin savers come
 from the Claude plugin marketplace, fetched by your own `claude` binary, at whatever version the
-marketplace currently serves. Normal either way, but it isn't Piggy talking to GitHub. Separately, once Headroom is on,
+marketplace currently serves; Nadir Route is one markdown file fetched from `getnadir.com`, checked
+against a hash pinned in the catalog before it is written. Normal either way, but it isn't Piggy
+talking to GitHub. Nadir Route is also the one saver whose *running* sends anything out: while it is
+on, Claude posts a truncated, secret-stripped copy of the task text to `api.getnadir.com` to pick a
+model tier, which is why its row carries that warning before you touch the toggle. Separately, once Headroom is on,
 `piggy-claude` runs your session through its local proxy, which relays to Anthropic the same
 way plain `claude` already does.
 

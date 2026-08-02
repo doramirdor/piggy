@@ -1,7 +1,7 @@
 {
   "$schema": "./catalog.schema.json",
   "registryVersion": 1,
-  "updated": "2026-07-16",
+  "updated": "2026-08-02",
   "minAppVersion": "0.1.0",
   "entries": [
     {
@@ -65,6 +65,114 @@
       "claimedSavings": "~80% on shell output (author estimate, TypeScript/Rust projects)",
       "risk": "low",
       "notes": "Hook only intercepts the Bash tool; Read/Grep/Glob untouched. rtk telemetry is opt-in only (off by default unless the user turns it on), so Piggy's hook runs it with no telemetry and sets nothing extra."
+    },
+    {
+      "id": "boost",
+      "name": "Boost",
+      "plainLabel": null,
+      "description": "JFrog CLI that compacts terminal output before Claude reads it (shell-wrapper, like RTK)",
+      "layer": "tool_output",
+      "installType": "binary+hook",
+      "status": "listed_only",
+      "defaultOn": false,
+      "license": "Proprietary-Beta",
+      "licenseNote": "JFrog product in public beta under a BETA_AGREEMENT (not an OSI open-source license). Source-available at github.com/jfrog/boost.",
+      "source": { "type": "github_release", "repo": "jfrog/boost", "pinnedVersion": "v0.9.19" },
+      "install": { "steps": [] },
+      "uninstall": { "steps": [] },
+      "healthCheck": { "checks": [] },
+      "conflictsWith": ["rtk"],
+      "ordering": 11,
+      "behaviorChanging": true,
+      "claimedSavings": "up to 89.6% claimed (JFrog landing page); ~12% measured in Boost's own README (Terminal-Bench 2.0)",
+      "risk": "high",
+      "exclusionReason": "VERIFIED 2026-07-21 against v0.9.19. LICENSE blocker (decisive): Boost is proprietary beta under the JFrog Online Preview Agreement (LICENSE is All Rights Reserved; github.com/jfrog/boost is a binary-distribution repo, no source). Its terms forbid a third party from distributing, making available, proxying, or installing a plug-in / means-of-access to the Beta Service without JFrog's prior written approval - which is exactly what bundling or auto-installing it in Piggy would be. So Piggy cannot ship or wire it regardless of the tech (individuals may install it themselves under that agreement). Technical concerns confirm the fit is wrong anyway, from running its Claude hook: (1) the rewrite sets permissionDecision \"allow\" on every Bash command, silently bypassing Claude Code's own permission prompts; (2) telemetry with no opt-out - one hook run creates ~/Library/Application Support/boost/{history.db,install_id}, and `boost init` also registers a Stop hook that drains agent transcripts via a background `boost sync`, with no documented clean uninstall (the agreement's own data clause lets JFrog retain your Input). Both break Piggy's no-silent-telemetry and reversibility principles (same bucket as token-optimizer-mcp). Shown for transparency; installable by Piggy only if JFrog grants written approval AND ships a telemetry-free, permission-neutral mode. Install it yourself: `curl -fsSL https://boost.jfrog.com/install.sh | bash && boost init`."
+    },
+    {
+      "id": "barber",
+      "name": "barber",
+      "plainLabel": "Trim tool output",
+      "description": "Drops the irrelevant lines out of Read/Grep/Bash output before Claude reads it",
+      "layer": "tool_output",
+      "installType": "venv+hook",
+      "status": "curated_v1",
+      "defaultOn": false,
+      "license": "MIT",
+      "source": { "type": "pip", "package": "barber-llm", "repo": "NadirRouter/barber", "pinnedVersion": "0.4.1" },
+      "install": {
+        "steps": [
+          {
+            "step": "require_python",
+            "python": "python3",
+            "minVersion": "3.10",
+            "reason": "barber is a Python package (barber-llm) and its hook runs on that interpreter"
+          },
+          {
+            "step": "create_venv",
+            "python": "python3",
+            "dir": "${PIGGY_HOME}/venvs/barber",
+            "note": "Isolated venv so Piggy never touches the user's global site-packages; uninstall deletes the whole tree. Same model as headroom."
+          },
+          {
+            "step": "pip_install",
+            "venv": "${PIGGY_HOME}/venvs/barber",
+            "package": "barber-llm",
+            "version": "0.4.1",
+            "note": "Zero runtime dependencies. The [semantic] extra (sentence-transformers) is deliberately NOT installed: the hook imports barber.embedders.lexical only, and pulling torch for a per-tool-call hook would cost more latency than the trim saves."
+          },
+          {
+            "step": "download_file",
+            "url": "https://raw.githubusercontent.com/NadirRouter/barber/v0.4.1/contrib/claude_code_hook.py",
+            "sha256": "c864a7ab249f9fe6de006b1913697a771b56a03898928d0dfe02d2ca5b6247a7",
+            "dest": "${PIGGY_HOME}/hooks/barber_claude_code_hook.py",
+            "note": "VERIFIED 2026-07-31: the hook lives in contrib/, which pyproject excludes from the wheel (packages = [\"barber\"]), so pip install never lands it. Pinned to tag v0.4.1, not main, and the sha256 above is checked before the file is written. Re-pin BOTH fields together on every version bump."
+          },
+          {
+            "step": "merge_hooks",
+            "hooks": {
+              "PostToolUse": [
+                {
+                  "matcher": "Read|Grep|Glob|Bash|WebFetch|WebSearch|NotebookRead|BashOutput",
+                  "hooks": [
+                    {
+                      "type": "command",
+                      "command": "BARBER_HOOK_KEEP=0.8 ${PIGGY_HOME}/venvs/barber/bin/python ${PIGGY_HOME}/hooks/barber_claude_code_hook.py"
+                    }
+                  ]
+                }
+              ]
+            },
+            "note": "The matcher is the hook's own TRIMMABLE set (Edit/Write/TodoWrite/Task are excluded upstream: short status payloads, nothing to trim, shape-mismatch risk). KEEP=0.8 rather than barber's 0.6 default is the author's own advice for real work: tool output is acted on, not just read, and a trim is not reversible from the model's side. The venv interpreter is named absolutely, so nothing needs to be on PATH."
+          }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "remove_hooks", "ownedOnly": true },
+          { "step": "delete_file", "path": "${PIGGY_HOME}/hooks/barber_claude_code_hook.py" },
+          { "step": "delete_dir", "dir": "${PIGGY_HOME}/venvs/barber" }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          {
+            "check": "binary_runs",
+            "cmd": ["${PIGGY_HOME}/venvs/barber/bin/python", "-c", "import barber"]
+          },
+          {
+            "check": "hook_present",
+            "event": "PostToolUse",
+            "commandContains": "barber_claude_code_hook.py"
+          }
+        ]
+      },
+      "conflictsWith": ["headroom"],
+      "ordering": 12,
+      "behaviorChanging": true,
+      "warning": "Removes lines from tool results before Claude sees them, so it can drop the one grep hit or the one line of a file that the next step needed. Installed at keep=0.8 (drops the weakest 20% of a result, and only on results over 800 characters). The hook fails open: any error and the output passes through untouched.",
+      "claimedSavings": "21.5% of tool-output tokens (author, replay of 12 Claude Code sessions / 958K tokens of tool output)",
+      "risk": "medium",
+      "notes": "VERIFIED 2026-07-31 against v0.4.1 (MIT, repo created 2026-07-24). PostToolUse hook that rewrites tool output via updatedToolOutput, scoring chunks lexically against the last user prompt plus this call's own args (grep pattern, file path, command) and keeping the top fraction. Trims at admission, before anything enters context, so unlike a compaction pass it costs no prompt-cache re-prime. Kill switch without uninstalling: BARBER_HOOK_DISABLE=1. Tunables the hook reads from the environment: BARBER_HOOK_KEEP (Piggy sets 0.8), BARBER_HOOK_MIN_CHARS (default 800). Two caveats the author states and Piggy repeats in the warning: the file is marked EXPERIMENTAL and is not covered by barber's published 31.8-34.1% HotpotQA benchmark (that measured RAG passages a reader consumes, not tool output an agent acts on), and the hook uses the lexical scorer, which matches words rather than meaning. conflictsWith headroom: headroom already compresses everything the session reads, so stacking a second trimmer on the same bytes is double jeopardy for no measured gain. Does NOT conflict with rtk: rtk rewrites the Bash command before execution and barber trims the result after, which compose. The pinned-hash download exists because contrib/ is excluded from the wheel; see the download_file step."
     },
     {
       "id": "caveman",
@@ -332,6 +440,55 @@
       "claimedSavings": "40–70% by routing to cheaper models (author, getnadir.com)",
       "risk": "medium",
       "notes": "LLM router / proxy. Sets ANTHROPIC_BASE_URL + ANTHROPIC_MODEL via `nadirclaw claude onboard`. conflictsWith headroom. Two proxies can't both own ANTHROPIC_BASE_URL. Does NOT conflict with rtk (rtk's Bash-output hook is an orthogonal layer). Repo NadirRouter/NadirClaw; pip package `nadirclaw`."
+    },
+    {
+      "id": "nadir-route",
+      "name": "Nadir Route",
+      "plainLabel": "Right-size the model",
+      "description": "Claude asks Nadir which tier a task needs, then runs subagents on the cheapest capable model",
+      "layer": "routing",
+      "installType": "claude_skill",
+      "status": "curated_v1",
+      "defaultOn": false,
+      "license": "proprietary",
+      "licenseNote": "The skill file carries no open-source license, and the decision it follows comes from a hosted service (api.getnadir.com). Free, and no account is required; a NADIR_API_KEY only raises rate limits and adds a savings dashboard. Piggy shows this label before install.",
+      "source": {
+        "type": "https",
+        "url": "https://getnadir.com/skills/nadir-route/SKILL.md",
+        "homepage": "https://getnadir.com/skill"
+      },
+      "install": {
+        "steps": [
+          { "step": "download_file",
+            "url": "https://getnadir.com/skills/nadir-route/SKILL.md",
+            "sha256": "f5d741af675ab3a40324a0d5bd4b1093242d148ec5a9c73202f2f59abc72514a",
+            "dest": "${CLAUDE_SKILLS}/nadir-route/SKILL.md",
+            "note": "VERIFIED 2026-08-02 against the exact file getnadir.com/skill tells users to fetch by hand (`mkdir -p ~/.claude/skills/nadir-route && curl -fsSL https://getnadir.com/skills/nadir-route/SKILL.md -o ~/.claude/skills/nadir-route/SKILL.md`). Piggy writes the same bytes to the same path, so a hand-installed skill and a Piggy-installed one are indistinguishable, and uninstall leaves ~/.claude/skills as it found it. The URL is UNVERSIONED - the site serves the current skill - so unlike a tag-pinned GitHub asset this sha256 rots the moment Nadir edits the file: a mismatch refuses the install (never silently takes new bytes), so re-pin the hash on every catalog refresh. getnadir.com is on the engine's short non-GitHub pinned-file allowlist because the site repo is private and there is no raw.githubusercontent URL to pin instead."
+          }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          { "step": "delete_file", "path": "${CLAUDE_SKILLS}/nadir-route/SKILL.md" },
+          { "step": "delete_file", "path": "${CLAUDE_SKILLS}/nadir-route/SKILL.md.piggy-off",
+            "note": "The parked copy, present only when the saver was off when it was uninstalled." },
+          { "step": "delete_dir", "dir": "${CLAUDE_SKILLS}/nadir-route", "onlyIfEmpty": true,
+            "note": "Named files first, directory last and only when empty: ~/.claude/skills is the user's tree, not Piggy's, so anything they put beside the SKILL.md survives uninstall (the directory is then kept, with a warning). This saver never touches settings.json, so there is nothing else to reverse."
+          }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "file_present", "path": "${CLAUDE_SKILLS}/nadir-route/SKILL.md" }
+        ]
+      },
+      "conflictsWith": ["nadirclaw"],
+      "ordering": 92,
+      "behaviorChanging": true,
+      "warning": "Sends the task text (truncated to 2000 characters, secrets stripped by the skill's own instructions) to api.getnadir.com to pick a tier, then runs the work on a cheaper model - so your prompts leave the machine and answer quality is in play, not just token count. The skill fails open: on any error, timeout, or rate-limit, Claude proceeds on the model it would have used anyway.",
+      "claimedSavings": "60% lower cost than always-Opus at 98% of top-model quality (author, getnadir.com/skill)",
+      "risk": "medium",
+      "notes": "One markdown file in ~/.claude/skills - no binary, no proxy, no account - which is why it is installable today where nadirclaw (the same author's router) is still deferred_v2. It teaches Claude to POST the task text to https://api.getnadir.com/v1/bucket and follow the returned plan: a tier (simple/medium/complex, mapped to haiku/sonnet/opus), a reasoning effort, and a delegate-or-inline call. Anonymous calls are documented as never stored (aggregate counters only). The saving is a cheaper MODEL rather than fewer tokens, so this saver's output-token badge will usually read flat - the win lands in cost and in the ledger's model mix, and Piggy should not be read as saying it did nothing. On/off renames SKILL.md to SKILL.md.piggy-off, which is what lets rotation measure it. conflictsWith nadirclaw: the proxy already routes every request, so running both classifies the same task twice and makes either one's measurement unreadable. Does NOT conflict with the hook or reply-style savers."
     },
     {
       "id": "token-optimizer-mcp",

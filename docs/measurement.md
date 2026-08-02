@@ -31,7 +31,8 @@ With master switch on, sessions are assigned (round-robin over a repeating block
 
 - ~10% **holdout**: all savers off (configurable, `holdout_fraction`).
 - For each installed saver X: ~10% **single-off**: everything on except X.
-- Remainder: **full-on**.
+- Remainder: **full-on**, and the block is always long enough for at least one of these.
+  Full-on is the ON arm of every per-saver comparison, so a block without one measures nothing.
 
 "All savers off" is the intent, not a guarantee. Rotation only controls savers it manages,
 so a saver the user has pinned on keeps running through the holdout slot. A holdout with a
@@ -116,6 +117,14 @@ Per saver X:
   `measured`. Show the measured percentages first.
 - Added latency per saver: median wall-clock gap between consecutive message timestamps in ON
   vs OFF sessions, only if measurable; otherwise omit (never guess).
+- **Routing savers move price, not token count.** A saver whose whole effect is running work
+  on a cheaper model (`nadir-route`, and `nadirclaw` when it lands) can send the *same* number
+  of tokens and still cut the bill, so its four per-stream deltas legitimately settle near
+  zero. That is a true measurement of the streams, not a null result for the saver, and the
+  per-stream badge must not be read as "it did nothing" — the win is in cost and shows up in
+  the ledger's model mix. Nothing here is changed for them: the A/B is run and reported the
+  same way, and a cost-side contrast is future work rather than something the badge implies
+  today.
 
 ## Storage
 
@@ -123,10 +132,64 @@ Per saver X:
 - `rotation_state` (block position, planned next set, updated_at)
 - Attribution queries computed on read; no materialized stats to go stale.
 
+## Status chip states (Savers row)
+
+The chip carries the *state*; the SAVINGS column carries the number. They are never merged
+into one string, so a state can never smuggle in a figure it has not earned.
+Mapping lives in `app/src/lib/badge.ts` (`statusView`), rendering in `StatusChip.tsx`.
+
+| Chip | Leading mark | Savings column | Means |
+| --- | --- | --- | --- |
+| **Measured** | check | signed % | Randomized holdout evidence, CI clears zero. The only green claim. |
+| **Estimating** | dot | signed % | Same math, observational baseline (your history, or pooled rows). Hedged. |
+| **Measuring** | progress bar | `-` | Sessions are accruing, no trustworthy delta yet. |
+| **Claimed** | dot | `-` | The author's own number. Marketing until Piggy measures it. |
+| **No data** | chart icon | `-` | Nothing observed for this saver at all (`n == 0`). |
+
+The **Measuring** bar is deliberate: a determinate `n / 10` fill, not an endless spinner, so
+"still working" is distinguishable from "stuck". Caveat worth knowing: `n` is
+`n_on + n_off` (`saver_badge` in `app/src-tauri/src/backend.rs`), while the promotion gate
+below needs 10 on **each** side. A saver with 14 ON and 0 OFF sessions therefore paints a full
+bar and still reads Measuring. The honest fill would be `min(n_on, n_off) / 10`, which needs
+the backend to send both counts instead of their sum.
+
+## When Estimating becomes Measured
+
+Promotion is not a session count on the chip, it is `stream_stat` + `pick_group` in
+`attribution.rs`. All four must hold:
+
+1. **Both** sides ≥ `MIN_GROUP` (10) sessions. Not 10 combined.
+2. Both sides stand on **randomized** rows alone (`rotation` / `holdout`). A side with fewer
+   than 10 randomized rows pools in observational ones for a usable figure and is capped at
+   `Estimated`. The weaker side governs, so a randomized OFF group cannot launder an
+   observational ON group into a measured claim.
+3. The Bonferroni-corrected CI excludes zero and has positive width. The *displayed* interval
+   is the spec's 90% (`CI_ALPHA = 0.10`); the *gate* uses `CI_ALPHA / STREAM_FAMILY` = 0.025,
+   a 97.5% interval, so four per-stream badges do not inflate the family-wise error rate.
+4. The delta exists at all (`MIN_RATE_DENOM`: a stream the baseline barely uses has no
+   meaningful ratio).
+
+What that costs in wall time: rotation runs one single-off slot per saver per block, and
+`block_len = max(round(1/holdout_fraction), n_savers + 1)`, so 10 at the default 10% holdout.
+X's OFF group gains one session per block, meaning **~100 sessions** before the OFF side hits
+the bar. The ON side (full-on slots) fills at `block_len - 1 - n_savers` per block, and the
+block is sized to keep that at 1 or more however many savers are installed: without the `+ 1`
+in `block_len`, 9 rotation-controlled savers at the default fraction produced a block of
+holdout + 9 single-off and **no full-on session at all**, so the ON arm never filled and
+nothing was promotable at any session count.
+
+Two ways promotion stalls indefinitely, both by design:
+
+- **Hand-toggled saver.** `rotation::controlled_savers` drops it, so no new randomized rows
+  ever accrue. The badge keeps whatever the randomized era before the toggle earned, and decays
+  to `Estimated` once that era is too thin. This is what the row's
+  "Let Piggy rotate & measure this" button undoes.
+- **Holdout disabled in Settings.** No randomized OFF rows at all, so `Estimated` is the
+  permanent ceiling.
+
 ## UI copy rules
 
-- `measured 22% · 41 sessions` - green badge, only when CI excludes zero.
-- `not enough data yet · 6 sessions` - neutral badge.
+- Savings column: signed %, negative is a saving. Never a point estimate without its n.
 - `claimed 60–90% (author)` - gray, install card only.
 - Holdout explainer, one line: "Piggy occasionally runs a session with savers off to measure
   honestly. You can turn this off in Settings (your badges will say 'estimated')."

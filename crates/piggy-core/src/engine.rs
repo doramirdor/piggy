@@ -317,8 +317,15 @@ pub fn set_enabled_src(
         // Already in the requested state — but still record who asked, so a
         // manual "confirm on/off" pins the saver against rotation.
         if let Some(s) = state.savers.get_mut(id) {
-            if s.last_toggle_source.as_deref() != Some(source) {
-                s.last_toggle_source = Some(source.to_string());
+            let mut dirty = s.last_toggle_source.as_deref() != Some(source);
+            s.last_toggle_source = Some(source.to_string());
+            // A manual toggle records the user's resting choice, so a later
+            // holdout override knows what to restore this saver to.
+            if source == crate::store::source::MANUAL && s.manual_enabled != Some(on) {
+                s.manual_enabled = Some(on);
+                dirty = true;
+            }
+            if dirty {
                 state.save()?;
             }
         }
@@ -356,8 +363,7 @@ pub fn set_enabled_src(
         }
     }
 
-    let is_plugin = entry.install_type == "claude_plugin";
-    if is_plugin {
+    if entry.install_type == "claude_plugin" {
         // Enable/disable via claude CLI (keeps the plugin installed). Backup
         // settings before AND after — the CLI writes enabledPlugins itself.
         let plugin = plugin_ref(entry);
@@ -366,6 +372,8 @@ pub fn set_enabled_src(
         set_plugin_enabled_via_cli(&settings_path, &plugin, on)?;
         snapshot(&settings_path, &format!("post-{verb}:{id}"), &mut state)?;
         resync_settings_hash(&settings_path, &mut state)?;
+    } else if entry.install_type == "claude_skill" {
+        set_skill_enabled(entry, on)?;
     } else {
         // Hook saver: remove or re-add the exact owned hooks.
         if on {
@@ -407,6 +415,12 @@ pub fn set_enabled_src(
     if let Some(s) = state.savers.get_mut(id) {
         s.enabled = on;
         s.last_toggle_source = Some(source.to_string());
+        // A manual toggle records the user's resting choice (see the no-flip path
+        // above); rotation/holdout sources leave it untouched so an override can
+        // be restored.
+        if source == crate::store::source::MANUAL {
+            s.manual_enabled = Some(on);
+        }
     }
     state.save()?;
     messages.push(format!(
@@ -482,6 +496,8 @@ fn disable_saver_in_place(
         set_plugin_enabled_via_cli(settings_path, &plugin, false)?;
         snapshot(settings_path, &format!("post-disable:{id}"), state)?;
         resync_settings_hash(settings_path, state)?;
+    } else if entry.install_type == "claude_skill" {
+        set_skill_enabled(entry, false)?;
     } else {
         let injected: Map<String, Value> = saver
             .injected_hooks
@@ -497,6 +513,46 @@ fn disable_saver_in_place(
         s.enabled = false;
         s.last_toggle_source = Some(source.to_string());
     }
+    Ok(())
+}
+
+/// Suffix a parked (turned-off) skill file carries.
+const SKILL_OFF_SUFFIX: &str = ".piggy-off";
+
+/// Turn a `claude_skill` saver on or off without uninstalling it.
+///
+/// Claude Code loads a skill directory only when it contains `SKILL.md`, so
+/// renaming that one file to `SKILL.md.piggy-off` (and back) is the whole
+/// mechanism: no re-download, no `settings.json` write, and rotation can flip it
+/// per session as cheaply as it flips a hook. Called with the saver already
+/// known to be installed and in the *other* state.
+fn set_skill_enabled(entry: &Entry, on: bool) -> Result<()> {
+    let dest = entry.skill_file().ok_or_else(|| {
+        anyhow!(
+            "'{}' is a claude_skill saver with no download_file step to toggle",
+            entry.id
+        )
+    })?;
+    let live = expand_path(dest);
+    let parked = live.with_file_name(format!(
+        "{}{SKILL_OFF_SUFFIX}",
+        live.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let (from, to) = if on {
+        (&parked, &live)
+    } else {
+        (&live, &parked)
+    };
+    if !from.exists() {
+        // Already where it needs to be (a hand-edited tree, or a retried
+        // toggle) — only a genuinely missing skill is an error.
+        if to.exists() {
+            return Ok(());
+        }
+        bail!("{} is missing — reinstall '{}'", from.display(), entry.id);
+    }
+    std::fs::rename(from, to)
+        .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
     Ok(())
 }
 
@@ -649,6 +705,7 @@ impl From<SaverStateBuilder> for SaverState {
             // Freshly installed: enabled as-installed, never explicitly toggled,
             // no per-saver options chosen yet.
             last_toggle_source: None,
+            manual_enabled: None,
             config: BTreeMap::new(),
         }
     }
@@ -658,6 +715,7 @@ impl InstallCtx<'_> {
     fn run_install_step(&mut self, step: &Value, state: &mut PiggyState) -> Result<()> {
         match step_kind(step) {
             "download_release_asset" => self.step_download(step),
+            "download_file" => self.step_download_file(step),
             "extract_binary" => self.step_extract(step),
             "merge_hooks" => self.step_merge_hooks(step, state),
             "claude_cli" => self.step_claude_cli(step, state),
@@ -699,6 +757,47 @@ impl InstallCtx<'_> {
         self.warnings
             .push(format!("verified {asset} (sha256 {})", &actual[..16]));
         self.saver.asset_bytes = Some(asset_bytes);
+        Ok(())
+    }
+
+    /// Download one pinned file from GitHub and write it to `dest`. For savers
+    /// whose integration lives in a repo file that their package does not ship
+    /// (barber's `contrib/claude_code_hook.py` is excluded from the wheel), so
+    /// `download_release_asset` + `extract_binary` has nothing to extract.
+    ///
+    /// This writes code Piggy then wires into a hook, so unlike a release asset
+    /// (which carries a signed-ish `checksums.txt` alongside it) the expected
+    /// hash is declared in the catalog and is **mandatory**: no `sha256`, no
+    /// install. Pin the URL to a tag, never a branch, or the hash rots.
+    fn step_download_file(&mut self, step: &Value) -> Result<()> {
+        let url = step
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("download_file: missing 'url'"))?;
+        let expected = step.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+            anyhow!("download_file: missing 'sha256' - fetched code is never installed unverified")
+        })?;
+        let dest = step
+            .get("dest")
+            .and_then(Value::as_str)
+            .map(expand_path)
+            .ok_or_else(|| anyhow!("download_file: missing 'dest'"))?;
+
+        let bytes = fetch_pinned_file(url)?;
+        let actual = settings::hash_bytes(&bytes);
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!("checksum mismatch for {url}: expected {expected}, got {actual}");
+        }
+        write_file_atomic(&dest, &bytes)
+            .with_context(|| format!("writing {}", dest.display()))?;
+        self.saver
+            .installed_files
+            .push(dest.to_string_lossy().into_owned());
+        self.warnings.push(format!(
+            "verified {} (sha256 {})",
+            dest.display(),
+            &actual[..16]
+        ));
         Ok(())
     }
 
@@ -1062,13 +1161,33 @@ fn run_uninstall_step(
                 .and_then(Value::as_str)
                 .map(expand_path)
                 .ok_or_else(|| anyhow!("delete_dir: missing 'dir'"))?;
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)
-                    .with_context(|| format!("deleting {}", dir.display()))?;
-                Ok(Some(format!("deleted {}", dir.display())))
-            } else {
-                Ok(None)
+            if !dir.exists() {
+                return Ok(None);
             }
+            // `onlyIfEmpty` is for directories Piggy shares with the user rather
+            // than owns outright (a skill dir under ~/.claude/skills): the
+            // preceding delete_file steps remove Piggy's own files, and the
+            // directory goes only if nothing of the user's was in it.
+            if step
+                .get("onlyIfEmpty")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let empty = std::fs::read_dir(&dir)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                if !empty {
+                    warnings.push(format!(
+                        "kept {} — it still holds files Piggy did not install",
+                        dir.display()
+                    ));
+                    return Ok(None);
+                }
+                std::fs::remove_dir(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+                return Ok(Some(format!("deleted {}", dir.display())));
+            }
+            std::fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+            Ok(Some(format!("deleted {}", dir.display())))
         }
         "remove_dir_from_path" => {
             // Keep the ${PIGGY_BIN} PATH line if another installed saver still
@@ -1192,6 +1311,20 @@ fn run_health_checks(entry: &Entry, settings_path: &Path) -> Result<HealthReport
             }
             "builtin" => {
                 report.push("builtin module", true, "ok");
+            }
+            "file_present" => {
+                // A file saver's whole install is the file: present means armed.
+                // A parked `.piggy-off` copy is deliberately NOT accepted, which
+                // makes a turned-off skill read as not-armed here — the same way
+                // `hook_present` reads for a turned-off hook saver.
+                let raw = check.get("path").and_then(Value::as_str).unwrap_or("");
+                let path = expand_path(raw);
+                let ok = path.is_file();
+                report.push(
+                    format!("file present: {}", path.display()),
+                    ok,
+                    if ok { "found" } else { "not found" },
+                );
             }
             "path_configured" => {
                 let profile = config::shell_profile_path();
@@ -1376,15 +1509,55 @@ fn fetch_asset(
     Ok((asset_bytes, checksums))
 }
 
+/// Hosts a `download_file` step may fetch from besides GitHub.
+///
+/// The sha256 gate in [`InstallCtx::step_download_file`] is what makes the
+/// *bytes* safe; this list is about which servers Piggy will talk to at all, so
+/// it lives in code rather than in the catalog — a catalog that could name its
+/// own host would make the check no check. Nadir publishes its `SKILL.md` only
+/// on its own site (the site repo is private, so there is no GitHub raw URL to
+/// pin), which is the one case in v1.
+const EXTRA_PINNED_FILE_HOSTS: &[&str] = &["getnadir.com"];
+
+/// Fetch a single pinned file by URL, honouring the offline asset cache (keyed
+/// on the URL's last path segment) so tests never hit the network. The host is
+/// checked here, not just on redirect: the catalog is data, and a `download_file`
+/// step pointing outside the allowed hosts is refused rather than fetched.
+fn fetch_pinned_file(url: &str) -> Result<Vec<u8>> {
+    let name = url.rsplit('/').next().unwrap_or_default();
+    if let Ok(dir) = std::env::var(ASSET_CACHE_ENV) {
+        let path = PathBuf::from(dir).join(name);
+        if path.exists() {
+            return std::fs::read(&path)
+                .with_context(|| format!("reading cached file {}", path.display()));
+        }
+    }
+    let host = reqwest::Url::parse(url)
+        .with_context(|| format!("download_file: bad url {url}"))?
+        .host_str()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    if !is_pinned_file_host(&host) {
+        bail!(
+            "download_file: refusing to fetch from '{host}' (allowed: GitHub, {})",
+            EXTRA_PINNED_FILE_HOSTS.join(", ")
+        );
+    }
+    http_get_bytes_allowing(url, is_pinned_file_host)
+}
+
 /// HTTP GET following redirects only to GitHub-owned hosts (github.com,
 /// githubusercontent.com), returning the body bytes.
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
-    let policy = reqwest::redirect::Policy::custom(|attempt| {
-        let ok = attempt
-            .url()
-            .host_str()
-            .map(is_github_host)
-            .unwrap_or(false);
+    http_get_bytes_allowing(url, is_github_host)
+}
+
+/// As [`http_get_bytes`], but with the caller deciding which hosts a redirect
+/// may land on — a pinned-file fetch allows its own host, a release-asset fetch
+/// stays GitHub-only.
+fn http_get_bytes_allowing(url: &str, allow: fn(&str) -> bool) -> Result<Vec<u8>> {
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        let ok = attempt.url().host_str().map(allow).unwrap_or(false);
         if attempt.previous().len() > 10 {
             attempt.error("too many redirects")
         } else if ok {
@@ -1412,6 +1585,13 @@ fn is_github_host(host: &str) -> bool {
         || host.ends_with(".github.com")
         || host == "githubusercontent.com"
         || host.ends_with(".githubusercontent.com")
+}
+
+/// Hosts a hash-pinned `download_file` may be fetched from: GitHub, plus the
+/// short [`EXTRA_PINNED_FILE_HOSTS`] allowlist. Exact host match only — no
+/// subdomain wildcard, so a `evil.getnadir.com.example.com` cannot slip in.
+fn is_pinned_file_host(host: &str) -> bool {
+    is_github_host(host) || EXTRA_PINNED_FILE_HOSTS.contains(&host)
 }
 
 /// Find the sha256 for `asset` in a `sha  filename` checksum file.
@@ -1799,7 +1979,8 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Expand `${PIGGY_BIN}`, `${PIGGY_HOME}`, and a leading `~` in a path string.
+/// Expand `${PIGGY_BIN}`, `${PIGGY_HOME}`, `${CLAUDE_SKILLS}`, and a leading `~`
+/// in a path string.
 fn expand_path(s: &str) -> PathBuf {
     PathBuf::from(expand_str(s))
 }
@@ -1807,9 +1988,14 @@ fn expand_path(s: &str) -> PathBuf {
 fn expand_str(s: &str) -> String {
     let piggy_bin = config::piggy_bin_dir().to_string_lossy().into_owned();
     let piggy_home = config::piggy_home().to_string_lossy().into_owned();
+    let claude_skills = config::claude_skills_dir().to_string_lossy().into_owned();
     let mut out = s
         .replace("${PIGGY_BIN}", &piggy_bin)
-        .replace("${PIGGY_HOME}", &piggy_home);
+        .replace("${PIGGY_HOME}", &piggy_home)
+        // Skill savers write inside Claude's own config tree, not Piggy's, so
+        // they need the (env-overridable) skills dir — never a literal ~/.claude,
+        // which would escape a sandboxed test.
+        .replace("${CLAUDE_SKILLS}", &claude_skills);
     // Defensive: map any literal `~/.piggy` to the (env-overridable) piggy home,
     // so a catalog that hard-codes `~/.piggy/...` can never escape the sandbox in
     // tests or write outside PIGGY_HOME in production.

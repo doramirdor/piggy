@@ -24,6 +24,7 @@ const EMBEDDED: &str = include_str!("../../../registry/catalog.json");
 /// binary, and installing that saver is refused (never guessed).
 pub const KNOWN_STEP_KINDS: &[&str] = &[
     "download_release_asset",
+    "download_file",
     "extract_binary",
     "merge_hooks",
     "claude_cli",
@@ -262,6 +263,20 @@ impl Entry {
             .filter(|s| step_kind(s) == "write_launcher")
             .find_map(|s| s.get("name").and_then(Value::as_str))
             .map(String::from)
+    }
+
+    /// The `SKILL.md` a `claude_skill` saver installs (the `dest` of its
+    /// `download_file` step, unexpanded). `None` for every other install type —
+    /// the engine keys its file-rename enable/disable on exactly this.
+    pub fn skill_file(&self) -> Option<&str> {
+        if self.install_type != "claude_skill" {
+            return None;
+        }
+        self.install
+            .steps
+            .iter()
+            .filter(|s| step_kind(s) == "download_file")
+            .find_map(|s| s.get("dest").and_then(Value::as_str))
     }
 
     /// Each `require_binary` install step as `(binary, reason)`. A *soft* require
