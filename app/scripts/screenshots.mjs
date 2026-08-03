@@ -22,9 +22,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const SCHEME = process.env.PIGGY_SCHEME === "light" ? "light" : "dark";
 const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(appDir, "..");
-const outDir = join(repoRoot, "docs", "screenshots");
+const outDir = join(repoRoot, "docs", "screenshots", SCHEME === "light" ? "light" : ".");
 
 const URL_BASE = process.env.PIGGY_MOCK_URL || "http://localhost:5173";
 const PORT = 9222;
@@ -152,7 +153,10 @@ async function main() {
     await cdp.send("Emulation.setDeviceMetricsOverride", { ...VIEWPORT, mobile: false });
     // The mock's dark desktop backdrop is part of the shot; keep it opaque.
     await cdp.send("Emulation.setEmulatedMedia", {
-      features: [{ name: "prefers-color-scheme", value: "dark" }],
+      // Both variants ship: the identity is authored on paper, so the light
+      // shots are the ones the brand sheets actually sell, and until now they
+      // were the variant nobody outside the app ever saw.
+      features: [{ name: "prefers-color-scheme", value: SCHEME }],
     });
     await cdp.send("Page.navigate", { url: URL_BASE });
     await sleep(2500); // fonts + first data paint
