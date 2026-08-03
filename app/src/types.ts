@@ -60,6 +60,12 @@ export interface Headline {
   /** Sessions needed on EACH arm before a measured claim (MIN_GROUP). */
   minGroup: number;
   streams: HeadlineStream[];
+  /** Turns per session, on vs off. NOT one of `streams`: it is the denominator
+   *  they are divided by. A negative delta means the savers made the agent take
+   *  MORE turns, which every per-turn figure is blind to, so a saver can look
+   *  green on all four streams while costing more in total. Null when the store
+   *  had no attribution bundle. */
+  turns: HeadlineStream | null;
 }
 
 export interface StatsOverview {

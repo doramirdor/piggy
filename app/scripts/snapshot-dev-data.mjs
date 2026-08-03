@@ -159,6 +159,18 @@ const snapshot = {
       onRandomized: report.headline.onRandomized,
       baselineClean: report.headline.baselineClean,
       minGroup: report.headline.minGroup,
+      turns: report.headline.turns
+        ? {
+            stream: report.headline.turns.stream,
+            kind: report.headline.turns.badge,
+            nOn: report.headline.turns.nOn,
+            nOff: report.headline.turns.nOff,
+            medianOn: report.headline.turns.medianOn,
+            medianOff: report.headline.turns.medianOff,
+            delta:
+              report.headline.turns.deltaPct == null ? null : -report.headline.turns.deltaPct / 100,
+          }
+        : null,
       streams: report.headline.streams.map((s) => ({
         stream: s.stream,
         kind: s.badge,

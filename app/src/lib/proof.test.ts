@@ -14,6 +14,7 @@ const HEADLINE: Headline = {
   baselineClean: false,
   minGroup: 10,
   streams: [],
+  turns: null,
 };
 
 function headline(over: Partial<Headline> = {}): Headline {

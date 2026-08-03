@@ -4,10 +4,13 @@ import { formatTokens } from "../lib/format";
 // Four-stream palette from the mockup. cacheRead uses a neutral gray (instead of
 // the mockup's translucent white) so the swatch stays visible in light mode too.
 const COLORS = {
-  input: "#3b82f6",
-  output: "#8b5cf6",
-  cacheWrite: "#22c55e",
-  cacheRead: "#6b7280",
+  // The four streams are CATEGORIES, not verdicts, so they take the neutral
+  // ramp. The old palette spent a saturated green on cache write, which is a
+  // quantity nobody proved anything about.
+  input: "var(--cat-1)",
+  output: "var(--cat-2)",
+  cacheWrite: "var(--cat-warm)",
+  cacheRead: "var(--cat-4)",
 };
 
 export function StreamBars({ streams, tall }: { streams: Streams; tall?: boolean }) {

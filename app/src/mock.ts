@@ -375,6 +375,7 @@ function statsOverview(period: Period): StatsOverview {
         baselineClean: false,
         minGroup: 10,
         streams: [],
+        turns: null,
       },
     };
   }

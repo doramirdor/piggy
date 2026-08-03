@@ -19,61 +19,54 @@
    work should reach for the v2 names (--ink*, --rule*, --measured, --cat-*).
    ========================================================================== */
 :root {
-  color-scheme: light dark;
+  --stock: #e7ebef;   /* PAPER */
+  --sheet: #ffffff;   /* SURFACE */
+  --sheet-2: #f4f6f8;
+  --ink: #0e1a24;     /* INK */
+  --ink-2: #4d5c68;
+  --ink-3: #5b6873;    /* 5.31:1 on sheet, 4.76:1 on stock */
+  --rule: #c3ced6;
+  --rule-str: #6b7a87; /* 4.10 sheet · 3.68 stock · 3.81 banded */
+  --ink-exact: #0d1b26;
+  --measured: #1e6b4b;  /* EXACT / MEASURED */
+  /* ESTIMATED: hedged claims get their own ink, not a dashed green, so the
+     hedge is chromatic AND structural. Two values: the brand swatch is the
+     fill, and a darkened one carries TEXT, because the swatch measures
+     3.72:1 on white and the chip label runs at 10px. Same hue, AA on all
+     three grounds (5.64 white / 4.71 paper / 5.20 banded). */
+  --estimated-fill: #b07a1a;
+  --estimated: #8a5f10;
+  --wait: #b23c2b;      /* WAITING */
+  --refuse: #b23c2b;    /* REFUSED / destructive */
+  --accent-brand: #e85b6a; /* ACCENT: focus and the coin ring */
+  --coin: #d4a017;      /* COIN: proof, and the mark */
+  --cat-1: #37474f;
+  --cat-2: #62757f;
+  --cat-3: #9aa8b1;
+  --cat-4: #c6d0d6;
+  --cat-warm: #8a6a00;
+  --pink: var(--accent-brand);
+  --gold: var(--coin);
+  --shadow-modal: 0 18px 44px rgba(20, 50, 74, 0.2);
+  --card-hover: #dde3e9;
+  --green-dim: rgba(28, 107, 72, 0.1);
+  --amber-dim: rgba(138, 97, 16, 0.11);
+  --red-dim: rgba(163, 50, 32, 0.09);
+  --accent-dim: rgba(13, 27, 38, 0.08);
+  --teal-dim: rgba(176, 122, 26, 0.12);
 
-  /* --- stock: the paper. Cool blue-grey, the one temperature the category
-     left open (Nadir is cream, Anthropic warm off-white, OpenAI pure white). */
-  --stock: #080c10;
-  --sheet: #111a21;
-  --sheet-2: #17222b;
-
-  /* --- inks --- */
-  --ink: #e9eef2;
-  --ink-2: #9aa8b4;
-  /* Folios carry the honesty labels at 10.5px, so this value is set by
-     measurement, not taste: it must clear 4.5:1 on sheet AND stock. */
-  --ink-3: #7d8d99;
-
-  /* Two rule tokens, because they do different jobs and only one of them is
-     allowed to be nearly invisible. */
-  --rule: #27343d;      /* decorative: zebra banding, leader dots */
-  --rule-str: #697a85;  /* structural: bounds a component or a control (>=3:1) */
-
-  /* --- the semantic ladder, ordered by evidence behind a number --- */
-  --ink-exact: #e9eef2; /* exact arithmetic, no claim. The commonest state. */
-  --measured: #45b285;  /* randomised holdout. Solid fill, three places only. */
-  --wait: #d9a233;      /* waiting, blocked, or a regression not yet provable */
-  --refuse: #e0725a;    /* danger, error, exclusion */
-
-  /* --- categorical data is NOT semantic and must not borrow verdict ink --- */
-  --cat-1: #d3dde3;
-  --cat-2: #9fb0ba;
-  --cat-3: #6d7f8a;
-  --cat-4: #44545e;
-  --cat-warm: #d9a233;
-
-  /* --- brand: ornament and identity, never meaning, never a focus ring --- */
-  --pink: #f27aa8;
-  --gold: #e0b53c;
-
-  /* --- type: all native to macOS, the only platform Piggy ships on --- */
+  /* Theme-independent: v1.0 aliases resolve through the tokens above, and
+     type and shape do not vary by appearance. */
   --serif: "Hoefler Text", "Baskerville", Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-
-  /* --- shape: no rounded rectangles, no drop shadows. Circles for dots and
-     marks are fine; a modal earns the one shadow in the system. --- */
   --radius: 0;
   --radius-ctl: 0;
   --shadow: none;
-  --shadow-modal: 0 18px 44px rgba(0, 0, 0, 0.55);
-
-  /* --- v1.0 aliases (do not use in new code) --- */
   --bg: var(--stock);
   --sidebar: var(--stock);
   --card: var(--sheet);
   --card-2: var(--sheet-2);
-  --card-hover: #1f2c35;
   --hairline: var(--rule);
   --text: var(--ink);
   --text-2: var(--ink-2);
@@ -81,54 +74,83 @@
   --text-inverse: var(--stock);
   --green: var(--measured);
   --green-bright: var(--measured);
-  --green-dim: rgba(69, 178, 133, 0.14);
   --amber: var(--wait);
-  --amber-dim: rgba(217, 162, 51, 0.14);
   --red: var(--refuse);
-  --red-dim: rgba(224, 114, 90, 0.13);
-  /* No blue accent in v2: what used to be "accent" is simply ink. */
   --accent: var(--ink);
   --accent-strong: var(--ink);
-  --accent-dim: rgba(233, 238, 242, 0.1);
-  /* "Estimating" is hedged STRUCTURALLY (dashed border, tilde, dotted
-     underline), so its ink is the second ink, not a fourth hue. */
-  --teal: var(--ink-2);
-  --teal-dim: rgba(154, 168, 180, 0.13);
+  --teal: var(--estimated);
   --switch-off: var(--rule-str);
-  /* A switch position is mechanical, not evidence. Proof green on 13 switches
-     made green the commonest colour in an app that had proven nothing. */
   --switch-on: var(--ink);
   --knob: var(--stock);
 }
 
-@media (prefers-color-scheme: light) {
+/* Dark is the alternative, not the default. The identity is authored on paper
+   and the light variant is what the brand sheets sell, so it leads and this is
+   the carbon print. */
+@media (prefers-color-scheme: dark) {
   :root {
-    --stock: #e6ebef;
-    --sheet: #f4f7f9;
-    --sheet-2: #eaeff3;
-    --ink: #0d1b26;
-    --ink-2: #4d5c68;
-    --ink-3: #5b6873;    /* 5.31:1 on sheet, 4.76:1 on stock */
-    --rule: #c3ced6;
-    --rule-str: #6b7a87; /* 4.10 sheet · 3.68 stock · 3.81 banded */
-    --ink-exact: #0d1b26;
-    --measured: #1c6b48;
-    --wait: #8a6110;
-    --refuse: #a33220;
-    --cat-1: #37474f;
-    --cat-2: #62757f;
-    --cat-3: #9aa8b1;
-    --cat-4: #c6d0d6;
-    --cat-warm: #8a6a00;
-    --pink: #e0568c;
-    --gold: #c8930a;
-    --shadow-modal: 0 18px 44px rgba(20, 50, 74, 0.2);
-    --card-hover: #dde3e9;
-    --green-dim: rgba(28, 107, 72, 0.1);
-    --amber-dim: rgba(138, 97, 16, 0.11);
-    --red-dim: rgba(163, 50, 32, 0.09);
-    --accent-dim: rgba(13, 27, 38, 0.08);
-    --teal-dim: rgba(77, 92, 104, 0.12);
+    color-scheme: light dark;
+
+    /* --- stock: the paper. Cool blue-grey, the one temperature the category
+       left open (Nadir is cream, Anthropic warm off-white, OpenAI pure white). */
+    --stock: #070d13;
+    --sheet: #101a23;
+    --sheet-2: #16222c;
+
+    /* --- inks --- */
+    --ink: #e9eef2;
+    --ink-2: #9aa8b4;
+    /* Folios carry the honesty labels at 10.5px, so this value is set by
+       measurement, not taste: it must clear 4.5:1 on sheet AND stock. */
+    --ink-3: #7d8d99;
+
+    /* Two rule tokens, because they do different jobs and only one of them is
+       allowed to be nearly invisible. */
+    --rule: #27343d;      /* decorative: zebra banding, leader dots */
+    --rule-str: #697a85;  /* structural: bounds a component or a control (>=3:1) */
+
+    /* --- the semantic ladder, ordered by evidence behind a number --- */
+    --ink-exact: #e9eef2; /* exact arithmetic, no claim. The commonest state. */
+    /* The brand inks, lifted onto a dark ground. Same hues as the identity
+       sheet; the values differ because a swatch chosen against white paper is
+       not legible against carbon. */
+    --measured: #3fae7a;     /* EXACT / MEASURED */
+    --estimated-fill: #d9a23a;
+    --estimated: #e0b155;    /* ESTIMATED, text-safe on this ground */
+    --wait: #e0715c;         /* WAITING */
+    --refuse: #e0715c;       /* REFUSED / destructive */
+    --accent-brand: #f07886; /* ACCENT */
+    --coin: #e8b940;         /* COIN */
+
+    /* --- categorical data is NOT semantic and must not borrow verdict ink --- */
+    --cat-1: #d3dde3;
+    --cat-2: #9fb0ba;
+    --cat-3: #6d7f8a;
+    --cat-4: #44545e;
+    --cat-warm: #d9a233;
+
+    /* --- brand: ornament and identity, never meaning, never a focus ring --- */
+    --pink: var(--accent-brand);
+    --gold: var(--coin);
+
+    /* --- type: all native to macOS, the only platform Piggy ships on --- */
+
+    /* --- shape: no rounded rectangles, no drop shadows. Circles for dots and
+       marks are fine; a modal earns the one shadow in the system. --- */
+    --shadow-modal: 0 18px 44px rgba(0, 0, 0, 0.55);
+
+    /* --- v1.0 aliases (do not use in new code) --- */
+    --card-hover: #1f2c35;
+    --green-dim: rgba(69, 178, 133, 0.14);
+    --amber-dim: rgba(217, 162, 51, 0.14);
+    --red-dim: rgba(224, 114, 90, 0.13);
+    /* No blue accent in v2: what used to be "accent" is simply ink. */
+    --accent-dim: rgba(233, 238, 242, 0.1);
+    /* "Estimating" is hedged STRUCTURALLY (dashed border, tilde, dotted
+       underline), so its ink is the second ink, not a fourth hue. */
+    --teal-dim: rgba(217, 162, 58, 0.14);
+    /* A switch position is mechanical, not evidence. Proof green on 13 switches
+       made green the commonest colour in an app that had proven nothing. */
   }
 }
 
@@ -1767,8 +1789,9 @@ button {
   margin-bottom: 11px;
 }
 .status-chip.waiting {
-  color: var(--amber);
-  background: var(--amber-dim);
+  color: var(--estimated);
+  background: transparent;
+  border-color: currentColor;
 }
 .hero .big.claim {
   font-size: 21px;
@@ -2774,8 +2797,12 @@ button {
   letter-spacing: -0.03em;
 }
 .hero .big {
-  font-size: clamp(64px, 11vw, 132px);
-  line-height: 0.82;
+  /* Ceiling pulled down from 132px: at the 940px default the figure wrapped to
+     two lines and its ascenders climbed into the eyebrow above it. The number
+     is the picture, but only while it stays one line. */
+  font-size: clamp(52px, 8.2vw, 96px);
+  line-height: 0.9;
+  margin-top: 6px;
 }
 .hero .big.measuring {
   font-size: clamp(22px, 2.4vw, 30px);
@@ -2833,7 +2860,7 @@ button {
 /* Estimating is hedged structurally, not chromatically: same hue as measured,
    drawn hollow. Survives greyscale, colour blindness and a screenshot. */
 .status-chip.estimated {
-  color: var(--measured);
+  color: var(--estimated);
   background: transparent;
   border-style: dashed;
 }
@@ -2950,4 +2977,15 @@ button {
     animation: none !important;
   }
   .sect::after { transform: none; }
+}
+
+/* The turns row is the only place a green result on every other row can be
+   revealed as a loss, so it gets words, not just a bar colour. */
+.turns-warn {
+  font-size: 11.5px;
+  color: var(--wait);
+  border-left: 2px solid var(--wait);
+  padding: 2px 0 2px 9px;
+  margin: 0 0 9px;
+  max-width: 62ch;
 }

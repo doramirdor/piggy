@@ -22,10 +22,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SCHEME = process.env.PIGGY_SCHEME === "light" ? "light" : "dark";
+// Light is the product default, so it owns docs/screenshots/ and dark is the
+// variant in a subfolder. PIGGY_SCHEME=dark flips it.
+const SCHEME = process.env.PIGGY_SCHEME === "dark" ? "dark" : "light";
 const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(appDir, "..");
-const outDir = join(repoRoot, "docs", "screenshots", SCHEME === "light" ? "light" : ".");
+const outDir = join(repoRoot, "docs", "screenshots", SCHEME === "dark" ? "dark" : ".");
 
 const URL_BASE = process.env.PIGGY_MOCK_URL || "http://localhost:5173";
 const PORT = 9222;

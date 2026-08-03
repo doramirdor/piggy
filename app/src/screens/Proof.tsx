@@ -66,7 +66,7 @@ function Arm({ arm }: { arm: ProofArm }) {
  *  Bars are scaled within the row, not across rows: cache write runs two orders
  *  of magnitude above input, so a shared scale would flatten three of the four
  *  rows into invisible slivers and hide the very comparison the row exists for. */
-function StreamRow({ s }: { s: HeadlineStream }) {
+function StreamRow({ s, invert = false }: { s: HeadlineStream; invert?: boolean }) {
   const badge: Badge = {
     kind: s.kind,
     delta: s.delta,
@@ -87,6 +87,10 @@ function StreamRow({ s }: { s: HeadlineStream }) {
       : s.medianOn < s.medianOff
         ? "on"
         : "worse";
+  // For turns the arithmetic is identical but the stakes are not: this row is
+  // the only place a "saving" on every other row can be revealed as a loss, so
+  // it says so in words rather than leaving it to a bar colour.
+  const regressed = invert && dir === "worse";
   return (
     <div className="srow">
       <div className="srow-top">
@@ -96,6 +100,12 @@ function StreamRow({ s }: { s: HeadlineStream }) {
         )}
         <StatusChip badge={badge} />
       </div>
+      {regressed && (
+        <div className="turns-warn">
+          More turns with your savers on. Every per-turn figure below divides by this, so a
+          saving there can still be a loss overall.
+        </div>
+      )}
       <div className="sbars">
         <div className="sbar">
           <span className="sb-lab">off</span>
@@ -170,6 +180,11 @@ export function Proof() {
   // (docs/measurement.md), so it is not evidence for the claim this screen
   // makes. The payload still carries it for anything that wants all four.
   const streams = (stats?.headline.streams ?? []).filter((s) => s.stream !== "cache read");
+  // The denominator gets its own row ABOVE the streams it divides. A saver that
+  // buys cheaper turns by needing more of them looks green on every stream
+  // below and is a loss overall, so this is the first thing shown, not a
+  // footnote under them.
+  const turns = stats?.headline.turns ?? null;
   const blocker = view?.blocker ?? null;
   const unpinIds = blocker?.unpin ?? [];
   const busy = unpinIds.some((id) => busySavers.includes(id));
@@ -268,6 +283,7 @@ export function Proof() {
             </span>
           </div>
           <div className="streams">
+            {turns && <StreamRow s={turns} invert />}
             {streams.map((s) => (
               <StreamRow key={s.stream} s={s} />
             ))}
