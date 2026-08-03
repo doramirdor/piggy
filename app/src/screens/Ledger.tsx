@@ -45,6 +45,7 @@ function Split({ l }: { l: LedgerOverview }) {
   const inject = l.sources
     .filter((s) => s.removable && !s.isFloor)
     .reduce((n, s) => n + s.tokens, 0);
+  const floorTotal = floor;
   const total = Math.max(l.totalTokens, 1);
   const segs = [
     { tone: "floor", label: "Session floor", tokens: floor, hint: "paid before you type" },
@@ -58,15 +59,20 @@ function Split({ l }: { l: LedgerOverview }) {
 
   return (
     <div className="lsplit">
+      {/* One denominator, stated in full. The old hero said "of your tokens"
+          beside a total labelled "cache writes", so the reader could not tell
+          which of the two numbers the percentage was a share of. */}
       <div className="lsplit-head">
-        <div>
+        <div className="lsplit-claim">
           <span className={`lsplit-big ${overheadTone(l.overhead)}`}>{pct(shownOverhead)}</span>
-          <span className="lsplit-cap">of your tokens bought session startup, not work</span>
+          <span className="lsplit-of">of cache-write tokens</span>
+          <span className="lsplit-cap">were spent before the first message</span>
         </div>
-        <div className="lsplit-total">
-          <b>{formatTokens(l.totalTokens)}</b>
-          <small>cache writes · {commafy(l.sessions)} sessions</small>
-        </div>
+      </div>
+      <div className="lsplit-facts">
+        <span><b>{formatTokens(floorTotal)}</b> startup</span>
+        <span><b>{commafy(l.sessions)}</b> sessions</span>
+        <span><b>{formatTokens(l.sessions ? floorTotal / l.sessions : 0)}</b> per session</span>
       </div>
 
       <div className="lsplit-bar" role="img" aria-label={`${pct(l.overhead)} session floor`}>
@@ -136,25 +142,33 @@ function Insights({ items, notes }: { items: Insight[]; notes: Annotation[] }) {
   return (
     <>
       <div className="sect">
-        What to do about it
+        Top opportunities
         <span className="sect-sub">
-          {items.length} finding{items.length === 1 ? "" : "s"}, each measured from your logs
+          {items.length} finding{items.length === 1 ? "" : "s"}, ranked by avoidable spend
         </span>
       </div>
       <div className="linsights">
-        {shown.map((i) => {
+        {shown.map((i, idx) => {
           const note = noteFor(i.id);
           return (
             <div key={i.id} className={`lins ${i.severity}`}>
-              <span className="lins-sev">{i.severity}</span>
+              {/* Rank, not alarm. Three red HIGH labels in a column say nothing
+                  about relative priority and make a list of opportunities read
+                  as a list of failures. */}
+              <span className="lins-rank">{String(idx + 1).padStart(2, "0")}</span>
               <div className="lins-body">
                 <b>{i.title}</b>
-                <p>{i.detail}</p>
-                <em>{i.action}</em>
+                {/* The two claim types are labelled rather than blended: the
+                    detail is arithmetic on observed tokens, the action is
+                    advice inferred from it. */}
+                <p><span className="lins-tag meas">Measured</span>{i.detail}</p>
+                <em><span className="lins-tag rec">Do</span>{i.action}</em>
                 {note && <Note note={note} />}
               </div>
-              <span className="lins-tok" title={`${commafy(i.tokens)} tokens`}>
-                {formatTokens(i.tokens)}
+              <span className="lins-right">
+                <span className="lins-tok" title={`${commafy(i.tokens)} tokens`}>
+                  {formatTokens(i.tokens)}
+                </span>
               </span>
             </div>
           );
@@ -224,6 +238,8 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 export function Ledger() {
   const ledger = useStore((s) => s.ledger);
+  const period = useStore((s) => s.period);
+  const setPeriod = useStore((s) => s.setPeriod);
   const findings = useStore((s) => s.insights);
   const notes = useStore((s) => s.annotations);
   const loadAnnotations = useStore((s) => s.loadAnnotations);
@@ -273,11 +289,27 @@ export function Ledger() {
 
   return (
     <div className="analytics">
-      <div className="sect">
-        Context ledger
-        <span className="sect-sub">
-          where your tokens come from · {ledger.periodLabel.toLowerCase()}
-        </span>
+      {/* A title, a sentence, and controls. The old single mono line was the
+          heading, the description and the date range at once, and the period
+          was prose the user could not change from here. */}
+      <div className="head">
+        <div>
+          <h1>Spend</h1>
+          <div className="sub">See where your tokens went and what caused them.</div>
+        </div>
+      </div>
+      <div className="viewbar">
+        <div className="views">
+          <span className="on">By cause</span>
+          <span>Over time</span>
+        </div>
+        <div className="periods">
+          {(["today", "week", "month", "all"] as const).map((p) => (
+            <button key={p} className={period === p ? "on" : ""} onClick={() => void setPeriod(p)}>
+              {{ today: "Day", week: "Week", month: "Month", all: "All" }[p]}
+            </button>
+          ))}
+        </div>
       </div>
 
       <Split l={ledger} />

@@ -6,16 +6,10 @@ import { Switch } from "./Switch";
 
 // Line-icon set for the sidebar nav (SF-Symbols-adjacent, 1.7px stroke).
 const ICONS: Record<Tab, JSX.Element> = {
-  ledger: (
+  spend: (
     <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 5h16v14H4z" />
       <path d="M4 9.5h16M9.5 9.5V19" />
-    </svg>
-  ),
-  overview: (
-    <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 10.5 12 3l9 7.5" />
-      <path d="M5 9.5V21h14V9.5" />
     </svg>
   ),
   savers: (
@@ -25,21 +19,10 @@ const ICONS: Record<Tab, JSX.Element> = {
       <circle cx="15" cy="17" r="1.6" fill="currentColor" stroke="none" />
     </svg>
   ),
-  discover: (
-    <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.2-3.2" />
-    </svg>
-  ),
   proof: (
     <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 12.5 11 14.5 15.5 10" />
       <path d="M12 3 4 6.5V11c0 5 3.4 8.3 8 10 4.6-1.7 8-5 8-10V6.5L12 3Z" />
-    </svg>
-  ),
-  reports: (
-    <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 20V10M10 20V4M16 20v-8M21 20H3" />
     </svg>
   ),
   settings: (
@@ -51,16 +34,13 @@ const ICONS: Record<Tab, JSX.Element> = {
 };
 
 const LABELS: Record<Tab, string> = {
-  ledger: "Ledger",
-  overview: "Dashboard",
+  spend: "Spend",
   savers: "Savers",
-  discover: "Discovery",
   proof: "Proof",
-  reports: "Reports",
   settings: "Settings",
 };
 
-const ORDER: Tab[] = ["ledger", "overview", "savers", "discover", "proof", "reports", "settings"];
+const ORDER: Tab[] = ["spend", "savers", "proof", "settings"];
 
 export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
   const savers = useStore((s) => s.savers);
@@ -93,14 +73,20 @@ export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
         ))}
       </nav>
       <div className="foot">
+        {/* "Piggy is OFF" was wrong: the app is open and still reading
+            sessions. What is off is the saver system, and measurement carries
+            on regardless. Conflating the two told the user measurement had
+            stopped when it had not, on the one screen that exists to say
+            what is being measured. */}
         <div className="master-mini">
+          <span className={`mstate ${masterOn && anyEnabled ? "on" : "off"}`} aria-hidden />
           <div className="mtxt">
-            <div className="m1">{masterOn ? "Piggy is ON" : "Piggy is OFF"}</div>
-            <div className="m2">
-              {masterOn ? (anyEnabled ? "Your savers are live" : "No savers on yet") : "Savers are paused"}
+            <div className="m1">
+              {masterOn ? (anyEnabled ? "Savers on" : "No savers on") : "Savers are off"}
             </div>
+            <div className="m2">Measurement continues</div>
           </div>
-          <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Piggy master switch" />
+          <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Turn savers on or off" />
         </div>
         <div className="version">v{APP_VERSION}</div>
       </div>

@@ -4,11 +4,8 @@ import { onStatsUpdated } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { Banner } from "./components/Banner";
 import { Ledger } from "./screens/Ledger";
-import { Overview } from "./screens/Overview";
 import { Savers } from "./screens/Savers";
-import { Discover } from "./screens/Discover";
 import { Proof } from "./screens/Proof";
-import { Reports } from "./screens/Reports";
 import { Settings } from "./screens/Settings";
 import { NoClaude, FirstRun } from "./screens/EmptyStates";
 import { PiggyMark } from "./components/PiggyMark";
@@ -63,21 +60,7 @@ export default function App() {
   if (env && !env.hasData) return <FirstRun />;
 
   const screen =
-    tab === "ledger" ? (
-      <Ledger />
-    ) : tab === "overview" ? (
-      <Overview />
-    ) : tab === "savers" ? (
-      <Savers />
-    ) : tab === "discover" ? (
-      <Discover />
-    ) : tab === "proof" ? (
-      <Proof />
-    ) : tab === "reports" ? (
-      <Reports />
-    ) : (
-      <Settings />
-    );
+    tab === "spend" ? <Ledger /> : tab === "savers" ? <Savers /> : tab === "proof" ? <Proof /> : <Settings />;
 
   return (
     <div className="win">

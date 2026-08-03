@@ -354,6 +354,11 @@ pub struct Headline {
     /// Per-stream comparison, in display order. Empty when the store had no
     /// attribution bundle to read.
     pub streams: Vec<HeadlineStream>,
+    /// Turns per session, on vs off. Not one of `streams`: it is the
+    /// denominator they are divided by. A NEGATIVE delta here means the savers
+    /// made the agent take more turns, which every per-turn figure is blind to,
+    /// so the UI shows it as a regression however good the streams look.
+    pub turns: Option<HeadlineStream>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -396,6 +401,7 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
                 baseline_clean: false,
                 min_group: MIN_GROUP as u64,
                 streams: Vec::new(),
+                turns: None,
             });
         Ok(StatsOverview {
             period: period_key(period).to_string(),
@@ -439,6 +445,25 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
 /// A live holdout always wins the baseline in `piggy-core`, so `baseline ==
 /// Holdout` ⇔ at least one holdout session exists; hence `n_holdout` is the true
 /// holdout count when holding out, and 0 for the pre-install / none cases.
+/// One core `StreamStat` onto the wire shape. Shared by the four token streams
+/// and the turns arm so they cannot drift in sign or gating.
+fn map_stream(s: &piggy_core::attribution::StreamStat) -> HeadlineStream {
+    HeadlineStream {
+        stream: s.stream.label().to_string(),
+        kind: match s.badge {
+            CoreBadge::Measured => "measured",
+            CoreBadge::Estimated => "estimated",
+            CoreBadge::Measuring => "measuring",
+        }
+        .to_string(),
+        n_on: s.n_on as u64,
+        n_off: s.n_off as u64,
+        median_on: s.median_on,
+        median_off: s.median_off,
+        delta: s.shown_pct().map(|p| -p / 100.0),
+    }
+}
+
 fn map_headline(hl: &CoreHeadline) -> Headline {
     let n_holdout = if hl.baseline == HeadlineBaseline::Holdout {
         hl.n_baseline as u64
@@ -568,6 +593,7 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         on_randomized: hl.on_randomized,
         baseline_clean: hl.baseline_clean,
         min_group: MIN_GROUP as u64,
+        turns: Some(map_stream(&hl.turns)),
         streams: hl
             .streams
             .iter()
@@ -2199,6 +2225,16 @@ mod tests {
             multiplier: None,
             multiplier_state: MultiplierState::WithheldCostMore,
             streams: vec![],
+            turns: piggy_core::attribution::StreamStat {
+                stream: piggy_core::attribution::Stream::Turns,
+                n_on: 0,
+                n_off: 0,
+                median_on: 0.0,
+                median_off: 0.0,
+                delta: None,
+                ci: None,
+                badge: Badge::Measuring,
+            },
         };
         let h = map_headline(&cost_more);
         assert_eq!(h.label, "not_enough_data");

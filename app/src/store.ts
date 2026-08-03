@@ -13,7 +13,12 @@ import type {
   UsageSeries,
 } from "./types";
 
-export type Tab = "ledger" | "overview" | "savers" | "discover" | "proof" | "reports" | "settings";
+// Four destinations, one per question a user actually arrives with: where did
+// my tokens go, what do I turn on, did it work, and how do I control Piggy.
+// Dashboard and Reports were folded into Spend (they answered the same
+// question in different cuts) and Discovery became a section of Savers, which
+// is the tab that installs things.
+export type Tab = "spend" | "savers" | "proof" | "settings";
 
 interface AppState {
   tab: Tab;
@@ -82,7 +87,7 @@ export const useStore = create<AppState>((set, get) => {
   };
 
   return {
-  tab: "ledger",
+  tab: "spend",
   period: "week",
   env: null,
   stats: null,

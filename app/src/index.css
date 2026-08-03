@@ -2989,3 +2989,104 @@ button {
   margin: 0 0 9px;
   max-width: 62ch;
 }
+
+/* ==========================================================================
+   Spend: header, view controls, hero statement, ranked findings
+   ========================================================================== */
+.viewbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--rule-str);
+}
+.viewbar .views,
+.viewbar .periods { display: flex; gap: 20px; }
+.viewbar .periods { margin-left: auto; gap: 4px; }
+.viewbar .views span,
+.viewbar .periods button {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: none;
+  border: 0;
+  padding: 0 0 9px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.viewbar .periods button { padding: 0 9px 9px; }
+.viewbar .views span.on,
+.viewbar .periods button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+/* The claim reads as one sentence: figure, denominator, predicate. */
+.lsplit-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; }
+.lsplit-of {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.lsplit-cap { flex-basis: 100%; font-size: 15px; color: var(--ink-2); margin-top: 2px; }
+/* Pulled down from the old ceiling: at 81% of the card the figure crowded out
+   the explanation and the action it is supposed to lead to. */
+.lsplit-big { font-size: clamp(64px, 9vw, 118px) !important; }
+.lsplit-facts {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.lsplit-facts b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+
+/* Findings: a rank, a two-line body, an impact figure. */
+.lins { grid-template-columns: 34px 1fr auto !important; align-items: start; }
+.lins-rank {
+  font-family: var(--serif);
+  font-size: 22px;
+  color: var(--ink-3);
+  line-height: 1.1;
+}
+.lins-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-right: 8px;
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+/* Arithmetic on observed tokens versus advice inferred from it. Piggy's whole
+   claim is that it never blends those, so the list says which is which. */
+.lins-tag.meas { color: var(--ink-2); }
+.lins-tag.rec { color: var(--estimated); }
+.lins-body em { font-style: normal; }
+.lins-right { text-align: right; }
+
+/* Sidebar: narrower, and the status is a control rather than a boxed card. */
+.sidebar { width: 208px !important; }
+.master-mini {
+  display: flex !important;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  background: none !important;
+  border: 0 !important;
+  padding: 6px 0 !important;
+  cursor: pointer;
+  text-align: left;
+}
+.master-mini .mstate {
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid var(--ink-3); flex-shrink: 0;
+}
+.master-mini .mstate.on { background: var(--ink); border-color: var(--ink); }
+.master-mini .m1 { font-size: 12px; font-weight: 600; color: var(--ink); display: block; }
+.master-mini .m2 { font-size: 10.5px; color: var(--ink-3); display: block; }

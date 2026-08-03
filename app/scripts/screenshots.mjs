@@ -34,12 +34,12 @@ const PORT = 9222;
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 /** Sidebar label -> output filename. Order matches the sidebar. */
+// Four destinations since the IA change. Dashboard and Reports folded into
+// Spend; Discovery became a section of Savers.
 const SHOTS = [
-  { label: "Dashboard", file: "dashboard" },
+  { label: "Spend", file: "spend" },
   { label: "Savers", file: "savers" },
-  { label: "Discovery", file: "discovery" },
   { label: "Proof", file: "proof" },
-  { label: "Reports", file: "reports" },
   { label: "Settings", file: "settings" },
 ];
 
