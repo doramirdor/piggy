@@ -85,7 +85,7 @@ export function Discover() {
                 {e.exclusionReason}
               </div>
             ) : (
-              <div className="excl" style={{ background: "rgba(127,127,127,0.14)", color: "var(--text-2)" }}>
+              <div className="excl" style={{ background: "var(--sheet-2)", color: "var(--text-2)" }}>
                 {e.note}
               </div>
             )}

@@ -45,14 +45,18 @@ const pig = (
   </>
 );
 
+// A saver's tile is identity, not evidence. The old set gave Sweep a green tile
+// and RTK a blue one, which on a row that also carries a measured/estimated
+// chip reads as a second, contradictory verdict. The glyph distinguishes them;
+// the colour does not have to, and green in particular is spoken for.
 const ICONS: Record<string, IconDef> = {
-  sweep: { fg: "#22c55e", bg: "rgba(34,197,94,0.14)", node: broom },
-  rtk: { fg: "#3b82f6", bg: "rgba(59,130,246,0.14)", node: monitor },
-  caveman: { fg: "#f59e0b", bg: "rgba(245,158,11,0.15)", node: terseLines },
-  ponytail: { fg: "#8b5cf6", bg: "rgba(139,92,246,0.15)", node: codeFile },
+  sweep: { fg: "var(--ink-2)", bg: "var(--sheet-2)", node: broom },
+  rtk: { fg: "var(--ink-2)", bg: "var(--sheet-2)", node: monitor },
+  caveman: { fg: "var(--ink-2)", bg: "var(--sheet-2)", node: terseLines },
+  ponytail: { fg: "var(--ink-2)", bg: "var(--sheet-2)", node: codeFile },
 };
 
-const FALLBACK: IconDef = { fg: "var(--text-2)", bg: "rgba(127,127,127,0.14)", node: pig };
+const FALLBACK: IconDef = { fg: "var(--ink-3)", bg: "var(--sheet-2)", node: pig };
 
 export function SaverIcon({ id, size = 38 }: { id: string; size?: number }) {
   const def = ICONS[id] ?? FALLBACK;

@@ -6,10 +6,10 @@ import { formatTokens } from "../lib/format";
 // hero's stacked totals. cacheRead is the neutral gray — the cheap, reused
 // portion the analysis highlights.
 const COLORS = {
-  input: "#3b82f6",
-  output: "#8b5cf6",
-  cacheWrite: "#22c55e",
-  cacheRead: "#6b7280",
+  input: "var(--cat-1)",
+  output: "var(--cat-2)",
+  cacheWrite: "var(--cat-warm)",
+  cacheRead: "var(--cat-4)",
 };
 
 // Bottom→top stack order matches the StreamBars legend.

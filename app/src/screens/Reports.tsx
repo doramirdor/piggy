@@ -160,7 +160,7 @@ export function Reports() {
 
       <div className="summary">
         <div className="scard">
-          <span className="sic" style={{ background: "rgba(34,197,94,0.14)", color: "#22c55e" }}>
+          <span className="sic" style={{ background: "var(--sheet-2)", color: "var(--ink-2)" }}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <circle cx="9" cy="8" r="3.2" />
               <path d="M2.5 20v-1a4.5 4.5 0 0 1 4.5-4.5h4a4.5 4.5 0 0 1 4.5 4.5v1" />
@@ -174,7 +174,7 @@ export function Reports() {
           </div>
         </div>
         <div className="scard">
-          <span className="sic" style={{ background: "rgba(245,158,11,0.15)", color: "#f59e0b" }}>
+          <span className="sic" style={{ background: "var(--sheet-2)", color: "var(--ink-2)" }}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M3 12h4l2.5 7 5-14 2.5 7H21" />
             </svg>
@@ -185,7 +185,7 @@ export function Reports() {
           </div>
         </div>
         <div className="scard">
-          <span className="sic" style={{ background: "rgba(59,130,246,0.14)", color: "#3b82f6" }}>
+          <span className="sic" style={{ background: "var(--sheet-2)", color: "var(--ink-2)" }}>
             <span className="chip-spinner" style={{ width: 18, height: 18, borderWidth: 2.4 }} />
           </span>
           <div>
