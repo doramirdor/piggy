@@ -274,6 +274,10 @@ pub fn annotate(period_s: String) -> Result<Vec<AnnotationDto>, ApiError> {
         let home = config::piggy_home();
         let store = Store::open(&home)?;
         let period = crate::backend::period_from(&period_s);
+        // Deliberately the rolling `cutoff`, not `day_cutoff`: this ledger is
+        // model input (a fact sheet), not a number rendered beside a chart, so
+        // it doesn't need to reconcile with drawn bars and the rolling window
+        // is the fresher summary of recent usage.
         let cutoff = period.cutoff();
         let pricing = Pricing::load(&home);
         let ledger = store.ledger(cutoff.as_deref(), &pricing)?;

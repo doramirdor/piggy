@@ -107,6 +107,53 @@ fn today_series_is_a_single_day() {
     assert_eq!(series[0].totals.total_tokens(), 15);
 }
 
+/// A session late on the boundary day — 23:59 on the day just before the
+/// Week/Month calendar window opens — sits inside a rolling `now - 7d/30d`
+/// cutoff but on no bar drawn under the headline. The headline and every
+/// breakdown must window the same way the series does, so all of them agree.
+#[test]
+fn headline_total_equals_series_sum_with_boundary_day_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&tmp.path().join("piggy")).unwrap();
+
+    let late = |n: i64| {
+        let date = chrono::Utc::now().date_naive() - chrono::Duration::days(n);
+        format!("{}T23:59:00.000Z", date.format("%Y-%m-%d"))
+    };
+    seed_day(&mut store, "s_today", &days_ago(0).1, 10, 5);
+    seed_day(&mut store, "s_week_edge", &late(7), 100, 0);
+    seed_day(&mut store, "s_month_edge", &late(30), 1000, 0);
+
+    for period in [Period::Today, Period::Week, Period::Month] {
+        let series_sum: u64 = store
+            .daily_series(period)
+            .unwrap()
+            .iter()
+            .map(|r| r.totals.total_tokens())
+            .sum();
+        assert_eq!(
+            store.totals(period).unwrap().total_tokens(),
+            series_sum,
+            "{period:?}: headline total must equal the sum of its daily bars"
+        );
+        // The Spend breakdowns sit under the same headline: same window.
+        let model_sum: u64 = store
+            .by_model(period)
+            .unwrap()
+            .iter()
+            .map(|r| r.totals.total_tokens())
+            .sum();
+        assert_eq!(model_sum, series_sum, "{period:?}: by_model window drifted");
+        let source_sum: u64 = store
+            .by_source(period)
+            .unwrap()
+            .iter()
+            .map(|r| r.totals.total_tokens())
+            .sum();
+        assert_eq!(source_sum, series_sum, "{period:?}: by_source window drifted");
+    }
+}
+
 #[test]
 fn empty_store_returns_zero_filled_window_not_error() {
     let tmp = tempfile::tempdir().unwrap();
