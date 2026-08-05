@@ -315,6 +315,29 @@ export function Proof() {
             experiment needs {view?.arms[0]?.target ?? 10} sessions on each side, so it is not
             sliced by date.
           </div>
+          {/* The one-time lesson, as a disclosure rather than onboarding: a new
+              user meets "Not proven yet" before anyone has told them the
+              holdout exists, and this is the screen where that question is
+              asked. Native details, so it costs nothing when closed. */}
+          <details className="how-proof">
+            <summary>How proof works</summary>
+            <p>
+              Piggy never takes a saver's word for it. A small share of your sessions runs with
+              every saver off (the holdout, sized in Settings), so your own work keeps producing
+              a with-and-without comparison.
+            </p>
+            <p>
+              A verdict needs enough sessions on each side, and the with side only counts
+              sessions Piggy chose the setup for: a setup you switched on by hand can hide the
+              reason it looks good. When the gap between the sides is too consistent to be
+              chance, the verdict here says Proven.
+            </p>
+            <p>
+              Until then the screen shows the honest in-between: an estimate when the streams
+              support one, and otherwise exactly what is missing, with a card naming anything
+              that waiting will not fix.
+            </p>
+          </details>
         </div>
         <button className="btn primary" onClick={() => setShareOpen(true)}>
           Share

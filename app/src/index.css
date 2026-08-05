@@ -1537,6 +1537,37 @@ button {
 /* "Why this still says measuring". Neutral, not amber: a running experiment is
    not a warning, and painting it like the blocker card next to it would make an
    ordinary warm-up look like something the user broke. */
+/* The Proof screen's one-time lesson. A text disclosure, not a card: it sits
+   under the header sub and should read as a footnote until opened. */
+.how-proof {
+  margin-top: 7px;
+  font-size: 12.5px;
+}
+.how-proof summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--hairline);
+}
+.how-proof summary:hover {
+  color: var(--text);
+}
+.how-proof summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.how-proof[open] summary {
+  color: var(--text);
+}
+.how-proof p {
+  margin: 8px 0 0;
+  max-width: 62ch;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
 .waitbox {
   margin-top: 14px;
   padding: 13px 15px;

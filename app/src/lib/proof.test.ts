@@ -173,6 +173,24 @@ describe("proofView", () => {
     expect(v.blockers[0].unpin).toEqual([]);
   });
 
+  it("drops the gathering panel when both arms are full and the blocker owns the story", () => {
+    // Two cards, two stories: the blocker says why there is no number, and a
+    // "still measuring" panel beside it would promise that waiting fixes what
+    // waiting cannot fix.
+    const v = proofView(
+      headline({
+        onRandomized: true,
+        baselineKind: "holdout",
+        nFullOn: 30,
+        nBaseline: 40,
+        note: "your recent sessions cost more per turn than your history",
+      }),
+      [],
+    )!;
+    expect(v.wait).toBeNull();
+    expect(v.blockers.length).toBeGreaterThan(0);
+  });
+
   it("says nothing has been seen when neither arm has a single session", () => {
     const v = proofView(headline({ onRandomized: true }), [])!;
     expect(v.claim).toBe("Piggy has not seen either side of the comparison yet.");

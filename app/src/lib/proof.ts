@@ -148,7 +148,9 @@ export interface ProofView {
   blockers: ProofBlocker[];
   /** Null when the claim is settled, or when sample size is not what is holding
    *  it up - in which case `blocker` names the real reason and a "still
-   *  gathering" panel would be the wrong story. */
+   *  gathering" panel would be the wrong story. One exception: a hand-pinned ON
+   *  arm keeps the what-sentence (progress and ETA null), because "what is it
+   *  measuring" still deserves an answer while the blocker card owns the fix. */
   wait: ProofWait | null;
 }
 
@@ -340,20 +342,25 @@ export function proofView(h: Headline | null, savers: SaverRow[]): ProofView | n
       : (h.note ?? "Piggy shows nothing here rather than a guess."),
     arms,
     blockers: blockersFor(h, savers, on.usable),
-    // Present for every unsettled verdict, because "what is it measuring" is
-    // always worth answering. The countdown half is not: a hand-pinned ON arm
-    // does not fill by waiting, so it gets the explanation with no progress and
-    // no ETA, and the blocker card next to it names the fix.
+    // A wait panel only where waiting is the story. A rotating arm gets the
+    // real countdown; a hand-pinned arm gets the what-sentence with no progress
+    // and no ETA, because it does not fill by waiting and the blocker card next
+    // to it names the fix. But a rotating claim whose arms are full and whose
+    // backend sent no wait is blocked by something other than sample size, and
+    // a "still gathering" panel beside the blocker that names it would tell two
+    // stories at once - so that case gets none.
     wait:
       measured || estimated
         ? null
-        : h.onRandomized && h.waiting
-          ? waitView(h.waiting)
-          : // Rotating, and short of randomized sessions rather than of sessions.
-            // The payload's own `waiting` cannot see this arm (it reads the
-            // pooled count), so this is the one case the module has to build the
-            // progress itself rather than pass one through.
-            !h.onRandomized && h.nFullOnRandomized > 0
+        : h.onRandomized
+          ? h.waiting
+            ? waitView(h.waiting)
+            : null
+          : // Rotating-in-part, short of randomized sessions rather than of
+            // sessions. The payload's own `waiting` cannot see this arm (it
+            // reads the pooled count), so this is the one case the module has
+            // to build the progress itself rather than pass one through.
+            h.nFullOnRandomized > 0
             ? pooledWait(h)
             : { what: WHAT, progress: null, because: null, eta: null },
   };
