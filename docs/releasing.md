@@ -18,12 +18,23 @@ Manual steps a maintainer runs; nothing here blocks local development.
    - The current key has **no passphrase** (CI-friendly). If you want one, regenerate with
      `-p` and set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` wherever you build.
    - CI secret: `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents or a path to it).
-3. **GitHub repo.** Does not exist yet, and the working copy has no git remote. Until it is
-   created and a release is published, `npx @amirdor/piggybank` and the README's release links resolve
-   to nothing. Create it, then confirm `installer/package.json` → `piggy.repo` matches
-   (currently: `doramirdor/piggy`).
+3. **GitHub repo.** `doramirdor/piggy`, and `installer/package.json` → `piggy.repo` matches.
+   Until the first release is published, `npx @amirdor/piggybank` and the README's release
+   links resolve to nothing.
+4. **CI secrets.** `.github/workflows/release.yml` automates steps 2-5 below on a `vX.Y.Z`
+   tag push; the secrets it needs (Apple signing set, `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`)
+   are listed in its header comment. Unset Apple secrets degrade to an unsigned build;
+   a missing updater key fails the build.
 
 ## Each release
+
+The usual path: do step 1, push the `vX.Y.Z` tag, and let CI run steps 2-5 (it gates on
+tests and clippy, verifies every version stamp agrees with the tag, and stages a **draft**
+release with the .dmg, updater artifacts, `latest.json` and `checksums.txt`). Smoke-test
+the draft's .dmg, write the notes, publish. Publishing is the go-live moment: the updater
+endpoint reads `releases/latest/download`. The manual steps below remain valid as the
+fallback and as documentation of what CI does. A `workflow_dispatch` run of the same
+workflow builds without releasing, as a dry run for the signing setup.
 
 1. Bump versions, all four: `app/src-tauri/tauri.conf.json`, workspace `Cargo.toml` crates,
    `app/package.json`, `installer/package.json`. Also bump `APP_VERSION` in
@@ -55,11 +66,15 @@ Manual steps a maintainer runs; nothing here blocks local development.
        "notes": "…",
        "pub_date": "2026-07-16T00:00:00Z",
        "platforms": {
-         "darwin-aarch64": { "signature": "<contents of .sig>", "url": "https://github.com/doramirdor/piggy/releases/download/vX.Y.Z/Piggy.app.tar.gz" },
-         "darwin-x86_64":  { "signature": "<contents of .sig>", "url": "https://github.com/doramirdor/piggy/releases/download/vX.Y.Z/Piggy.app.tar.gz" }
+         "darwin-aarch64": { "signature": "<contents of .sig>", "url": "https://github.com/doramirdor/piggy/releases/download/vX.Y.Z/Piggy_universal.app.tar.gz" },
+         "darwin-x86_64":  { "signature": "<contents of .sig>", "url": "https://github.com/doramirdor/piggy/releases/download/vX.Y.Z/Piggy_universal.app.tar.gz" }
        }
      }
      ```
+     CI note: tauri-action names the universal updater artifact
+     `Piggy_universal.app.tar.gz`, and the `notes` field is frozen at build
+     time from the workflow's neutral `releaseBody`; the human-written notes
+     go on the release body before publishing and do not reach `latest.json`.
    Skipping `latest.json` doesn't break the app: "Check for updates" just reports that it
    couldn't reach the endpoint.
 6. `cd installer && npm publish` (only when `piggy.repo`/version metadata changed).
