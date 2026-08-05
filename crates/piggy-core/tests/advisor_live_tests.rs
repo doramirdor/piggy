@@ -127,3 +127,77 @@ fn downloads_verifies_and_generates() {
         );
     }
 }
+
+/// The per-saver advice pass, against the real database and the real model.
+///
+/// Separate from the download test above because it needs no network and is the
+/// one that has to be re-read by a human: the guard can prove no number was
+/// invented, but only a reader can tell whether the advice is worth printing.
+///
+/// ```text
+/// cargo test -p piggy-core --features local-llm,metal --test advisor_live_tests \
+///   -- --ignored --nocapture explains_savers
+/// ```
+#[test]
+#[ignore = "runs a real model against the developer's own database"]
+fn explains_savers_from_real_attribution() {
+    let id = std::env::var("PIGGY_ADVISOR_TEST_MODEL")
+        .unwrap_or_else(|_| "qwen3-4b-instruct-2507".to_string());
+    let spec = model(&id).unwrap_or_else(|| panic!("no catalog model named {id}"));
+    download::verify(spec).expect("weights present and verified");
+
+    let home = config::piggy_home();
+    let store = Store::open(&home).expect("open the real store");
+    let pricing = Pricing::load(&home);
+    let catalog = piggy_core::Catalog::embedded();
+    let rate_map = store.session_rate_map(&pricing).expect("rate map");
+
+    // A fixed seed: the bootstrap must not be what makes this run differ from
+    // the last one when the prompt is what changed.
+    let attribs: Vec<_> = catalog
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let a = piggy_core::attribution::attribute_with_map(&store, &rate_map, &e.id, 42).ok()?;
+            Some((e, a))
+        })
+        .collect();
+    let rows: Vec<_> = attribs.iter().map(|(e, a)| (*e, a)).collect();
+    let facts = Facts::savers(&rows);
+    let allow = Allowlist::from_facts(&facts);
+    println!(
+        "saver sheet: {} savers, {} chars, {} allowed numbers",
+        facts.insight_ids.len(),
+        facts.prompt_json().len(),
+        allow.len()
+    );
+    println!("{}", facts.prompt_json());
+    assert!(
+        !facts.insight_ids.is_empty(),
+        "no saver has both arms of a comparison yet"
+    );
+
+    let t = Instant::now();
+    let advisor = Advisor::load(spec).expect("load the model");
+    println!("loaded in {:?}", t.elapsed());
+
+    let t = Instant::now();
+    let raw = advisor.explain_savers_raw(&facts).expect("generate");
+    println!("generated in {:?}\n--- raw ---\n{raw}\n-----------", t.elapsed());
+
+    let accepted = advisor.explain_savers(&facts).expect("guard");
+    println!("\n{} line(s) survived the guard:", accepted.len());
+    for a in &accepted {
+        println!("  [{}] {}\n    {}", a.insight_id, a.headline, a.why);
+    }
+
+    for a in &accepted {
+        assert!(
+            facts.insight_ids.contains(&a.insight_id),
+            "advice named a saver that is not on the sheet: {}",
+            a.insight_id
+        );
+        assert!(allow.offenders(&a.headline).is_empty(), "{}", a.headline);
+        assert!(allow.offenders(&a.why).is_empty(), "{}", a.why);
+    }
+}

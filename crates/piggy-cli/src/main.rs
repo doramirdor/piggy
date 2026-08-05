@@ -124,6 +124,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Per-project task spend and outcomes: what each project cost and how
+    /// often its tool calls failed.
+    Tasks {
+        /// Time window (default `week`). The prior window of the same length is
+        /// the comparison, so `--period all` reports no delta.
+        #[arg(long, value_enum)]
+        period: Option<PeriodArg>,
+        /// How many projects to show (default 10; the rest are summarized).
+        #[arg(long, value_name = "N")]
+        projects: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
     /// View or change the holdout fraction (the share of sessions run all-off).
     Holdout {
         /// Set the holdout fraction (0.0–0.5), e.g. `--fraction 0.1`.
@@ -208,6 +221,15 @@ fn main() -> Result<()> {
             projects,
             json,
         } => cmd_ledger(since.as_deref(), projects.unwrap_or(10), json),
+        Cmd::Tasks {
+            period,
+            projects,
+            json,
+        } => cmd_tasks(
+            period.unwrap_or(PeriodArg::Week).into(),
+            projects.unwrap_or(10),
+            json,
+        ),
         Cmd::Holdout { fraction, on, off } => cmd_holdout(fraction, on, off),
         Cmd::Discover { refresh, json } => cmd_discover(refresh, json),
         Cmd::Watch { once } => cmd_watch(once),
@@ -424,6 +446,9 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                     "estTokens": i.est_tokens,
                     "estimated": true,
                     "recommendDisable": i.recommend_disable,
+                    // The project a user-scope MCP server should move to,
+                    // when its calls all come from one.
+                    "scopeTo": i.scope_to,
                     "reason": i.reason,
                 })
             })
@@ -459,6 +484,8 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                 format!("~{}", commafy(i.est_tokens)),
                 if i.recommend_disable {
                     format!("turn off - {}", i.reason)
+                } else if let Some(project) = &i.scope_to {
+                    format!("scope to {project}")
                 } else {
                     "keep".to_string()
                 },
@@ -475,6 +502,12 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         );
     } else {
         println!("everything here is in use - nothing to sweep.");
+    }
+    let rescope = report.rescope().count();
+    if rescope > 0 {
+        println!(
+            "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. Re-add each from its own project to stop that; Piggy will not move config it did not write."
+        );
     }
     println!("token costs are estimates (config-size heuristic), not measured.");
     println!(
@@ -1152,6 +1185,118 @@ fn cmd_ledger(since: Option<&str>, top_projects: usize, json: bool) -> Result<()
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// tasks
+// ---------------------------------------------------------------------------
+
+/// Print the task table: per-project spend joined to the outcome signal.
+///
+/// The ledger says what the tokens bought. This says which project bought it,
+/// how many prompts it took, and how often the tools failed — the one column
+/// that is an outcome rather than a cost.
+fn cmd_tasks(period: Period, top_projects: usize, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let pricing = Pricing::load(&home);
+    let store = Store::open(&home)?;
+    // `day_cutoff`, NOT `cutoff`: the task table windows on calendar days, and
+    // the rolling instant reaches up to a day further back. Paired with it the
+    // row would report a total its own `daily` series never accounts for.
+    let l = store.ledger(period.day_cutoff().as_deref(), &pricing)?;
+    let rows = store.task_table(period)?;
+    let by_project: std::collections::HashMap<&str, &piggy_core::TaskRow> =
+        rows.iter().map(|t| (t.project.as_str(), t)).collect();
+    let total: u64 = l
+        .projects
+        .iter()
+        .map(|p| p.floor_tokens + p.work_tokens)
+        .sum();
+
+    if json {
+        let out = serde_json::json!({
+            "period": format!("{period:?}").to_lowercase(),
+            "total_tokens": total,
+            // How many days each `daily` series covers. For `all` it is the last
+            // 120 days rather than all of history, so that series does NOT sum
+            // to `total_tokens`; for every other period it does.
+            "daily_days": rows.iter().map(|r| r.daily.len()).max().unwrap_or(0),
+            "projects": l.projects.iter().map(|p| {
+                let t = by_project.get(p.project.as_str());
+                let row_total = p.floor_tokens + p.work_tokens;
+                serde_json::json!({
+                    "project": p.project,
+                    "sessions": p.sessions,
+                    "floor_tokens": p.floor_tokens,
+                    "work_tokens": p.work_tokens,
+                    "total_tokens": row_total,
+                    "share": if total == 0 { 0.0 } else { row_total as f64 / total as f64 },
+                    // 0 tasks means the logs carry no promptId, NOT a clean run.
+                    "tasks": t.map(|t| t.tasks).unwrap_or(0),
+                    "turns": t.map(|t| t.turns).unwrap_or(0),
+                    "turns_per_task": t.and_then(|t| t.turns_per_task()),
+                    "tool_errors": t.map(|t| t.tool_errors).unwrap_or(0),
+                    "failed_tasks": t.map(|t| t.failed_tasks).unwrap_or(0),
+                    "failure_rate": t.and_then(|t| t.failure_rate()),
+                    "daily": t.map(|t| t.daily.clone()).unwrap_or_default(),
+                    "delta": t.and_then(|t| t.delta()),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if l.projects.is_empty() {
+        println!("Piggy tasks - nothing indexed for this window yet. Run `piggy index` first.");
+        return Ok(());
+    }
+
+    println!("Piggy tasks - per-project spend and outcomes ({})", period.label());
+    println!();
+    println!(
+        "{:<40} {:>8} {:>7} {:>13} {:>9} {:>8} {:>9}",
+        "project", "sessions", "tasks", "tokens", "share", "turns/tk", "fail rate"
+    );
+    println!("{}", "-".repeat(100));
+    for p in l.projects.iter().take(top_projects) {
+        let t = by_project.get(p.project.as_str());
+        let row_total = p.floor_tokens + p.work_tokens;
+        let tasks = t.map(|t| t.tasks).unwrap_or(0);
+        println!(
+            "{:<40} {:>8} {:>7} {:>13} {:>8.1}% {:>8} {:>9}",
+            truncate_path(&p.project, 40),
+            p.sessions,
+            // A dash, not a zero: the field did not exist in older logs, and a
+            // zero here reads as "nothing failed" when it means "not recorded".
+            if tasks == 0 { "-".to_string() } else { tasks.to_string() },
+            commafy(row_total),
+            if total == 0 { 0.0 } else { row_total as f64 / total as f64 * 100.0 },
+            t.and_then(|t| t.turns_per_task())
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "-".into()),
+            t.and_then(|t| t.failure_rate())
+                .map(|v| format!("{:.1}%", v * 100.0))
+                .unwrap_or_else(|| "-".into()),
+        );
+    }
+    if l.projects.len() > top_projects {
+        let rest = &l.projects[top_projects..];
+        let tok: u64 = rest.iter().map(|p| p.floor_tokens + p.work_tokens).sum();
+        println!(
+            "{:<40} {:>8} {:>7} {:>13}",
+            format!("... and {} more projects", rest.len()),
+            rest.iter().map(|p| p.sessions).sum::<u64>(),
+            "",
+            commafy(tok)
+        );
+    }
+    if rows.iter().all(|r| r.tasks == 0) {
+        println!();
+        println!("note: no task boundaries recorded in this window - these logs predate the");
+        println!("`promptId` field, so per-task columns show `-` rather than zero.");
+    }
+    Ok(())
+}
+
 /// Trim a path to `max` columns from the LEFT, so the leaf directory survives.
 /// `truncate` keeps the head, which is right for prose and useless for paths:
 /// every project under one tree truncates to the same prefix.
@@ -1250,6 +1395,20 @@ fn cmd_report(json: bool) -> Result<()> {
             }
             _ => {}
         }
+        if hl.n_carried > 0 {
+            println!();
+            println!(
+                "  includes {} sessions from an earlier saver set: {} measured as no change, \
+                 so those sessions are the same treatment (capped at estimated - same \
+                 sessions, different weeks)",
+                hl.n_carried,
+                hl.carried_savers.join(" and "),
+            );
+        }
+        if let Some(w) = hl.waiting() {
+            println!();
+            println!("  {}", waiting_line(&w));
+        }
         if hl.baseline == HeadlineBaseline::PreInstall {
             println!(
                 "  note: baseline is pre-install history (observational - no live holdout yet)."
@@ -1263,6 +1422,17 @@ fn cmd_report(json: bool) -> Result<()> {
         println!("No per-saver data yet. Run sessions with savers rotating on and off.");
         return Ok(());
     }
+    // One line per saver BEFORE the table: the table is the evidence, and a
+    // reader who only wants the finding should not have to derive it from five
+    // rows of medians.
+    println!("What each saver has shown so far");
+    for a in &attribs {
+        println!("  {:<22}{}", a.saver_id, a.summary());
+        if let Some(c) = a.caveat() {
+            println!("  {:<22}  ...but {c}", "");
+        }
+    }
+    println!();
     println!("Per-saver attribution (measured, per-turn rates)");
     let headers = ["Saver", "Stream", "Result", "90% CI", "On", "Off"];
     let mut rows: Vec<Vec<String>> = Vec::new();
@@ -1307,6 +1477,34 @@ fn cmd_report(json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One line saying what the headline is still waiting for and how long it has
+/// left. "Measuring" with no end in sight is indistinguishable from broken, and
+/// the ON arm in particular restarts silently every time the saver set changes -
+/// so the date it restarted is the part that turns a stuck-looking screen back
+/// into a running experiment.
+fn waiting_line(w: &attribution::Waiting) -> String {
+    let what = match w.arm {
+        attribution::WaitingArm::On => "sessions on your current saver set",
+        attribution::WaitingArm::Baseline => "all-off holdout sessions",
+    };
+    let mut s = format!("still measuring: {} of {} {what}", w.have, w.need);
+    if let Some(since) = &w.since {
+        // Date only. The hour a saver set came together is noise; the day is what
+        // the user can match against "oh right, I installed something on Tuesday".
+        let day = since.split('T').next().unwrap_or(since);
+        s.push_str(&match w.arm {
+            attribution::WaitingArm::On => format!(" · counting since your saver set last changed on {day}"),
+            attribution::WaitingArm::Baseline => format!(" · counting since {day}"),
+        });
+    }
+    match w.days_left {
+        Some(d) if d < 1.5 => s.push_str(" · about a day to go at your recent pace"),
+        Some(d) => s.push_str(&format!(" · about {:.0} days to go at your recent pace", d.ceil())),
+        None => s.push_str(" · too early to estimate how long"),
+    }
+    s
 }
 
 /// A measured/estimated/measuring result cell for one stream.
@@ -1362,13 +1560,46 @@ fn headline_json(hl: &piggy_core::Headline) -> serde_json::Value {
         // Why it is observational, when it is: the full-on side was pinned on by
         // hand, and/or the holdout had a pinned saver running through it.
         "onRandomized": hl.on_randomized,
+        // How much of `nFullOn` is measured-eligible. `onRandomized: false` with a
+        // non-zero count here is rotation running and still short, which is a wait;
+        // with zero it is nothing rotating at all, which is not. Same flag, opposite
+        // advice, so a consumer needs the count to tell them apart.
+        "nFullOnRandomized": hl.n_full_on_randomized,
         "baselineClean": hl.baseline_clean,
         "multiplier": hl.multiplier,
         "multiplierEstimated": true,
+        // Why `multiplier` is null, when it is. "Enough sessions but the estimate
+        // was withheld as implausible" is not the same story as "still gathering",
+        // and neither the multiplier nor the session counts can say which.
+        "multiplierState": match hl.multiplier_state {
+            attribution::MultiplierState::Shown => "shown",
+            attribution::MultiplierState::NoData => "no_data",
+            attribution::MultiplierState::WithheldCostMore => "withheld_cost_more",
+        },
         // Sessions needed on EACH arm before a measured claim, so a consumer can
         // draw honest progress against the real bar instead of hard-coding 10.
         "minGroup": piggy_core::attribution::MIN_GROUP,
         "streams": hl.streams.iter().map(stream_json).collect::<Vec<_>>(),
+        // The denominator, measured as its own arm. A negative delta means the
+        // savers bought cheaper turns by needing more of them.
+        "turns": stream_json(&hl.turns),
+        // What the experiment is still waiting for. Null once both arms are full,
+        // so a consumer can tell "warming up" from "held up by something else"
+        // without re-deriving the sample gate.
+        // Sessions folded in from an earlier saver set that differed only by a
+        // saver measured as null, and the savers that made that legal.
+        "nCarried": hl.n_carried,
+        "carriedSavers": hl.carried_savers,
+        "waiting": hl.waiting().map(|w| serde_json::json!({
+            "arm": match w.arm {
+                attribution::WaitingArm::On => "on",
+                attribution::WaitingArm::Baseline => "baseline",
+            },
+            "have": w.have,
+            "need": w.need,
+            "since": w.since,
+            "daysLeft": w.days_left,
+        })),
     })
 }
 
@@ -1378,7 +1609,16 @@ fn saver_json(a: &piggy_core::SaverAttribution) -> serde_json::Value {
         "nOn": a.n_on,
         "nOff": a.n_off,
         "offBySource": a.off_by_source,
+        // The one-line learning across every arm, so a consumer of the JSON
+        // does not have to re-derive it from the streams.
+        "summary": a.summary(),
+        // What the summary does not cover: a thin arm, or an uncomparable turn
+        // count under a per-turn saving.
+        "caveat": a.caveat(),
         "streams": a.streams.iter().map(stream_json).collect::<Vec<_>>(),
+        // The denominator the streams divide by. A saver can look green on all
+        // four and still cost more by needing extra turns to finish the job.
+        "turns": stream_json(&a.turns),
     })
 }
 
@@ -1394,6 +1634,11 @@ fn stream_json(s: &piggy_core::StreamStat) -> serde_json::Value {
         "estimated": s.badge == Badge::Estimated,
         // Point figure shown for both measured and estimated; null while measuring.
         "deltaPct": s.shown_pct(),
+        // What the stream means when there is no figure: waiting, too small to
+        // compare, flat, or too noisy. `reading` is the key to branch on;
+        // `note` is the sentence to print.
+        "note": s.note(),
+        "reading": s.reading().key(),
         "ci": s.ci.map(|(lo, hi)| [lo * 100.0, hi * 100.0]),
         "nOn": s.n_on,
         "nOff": s.n_off,

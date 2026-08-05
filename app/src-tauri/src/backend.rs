@@ -69,9 +69,9 @@ static ATTR_CACHE: Mutex<Option<(u64, Arc<AttrBundle>)>> = Mutex::new(None);
 /// parallel, competing for the same cores.
 static ATTR_COMPUTE: Mutex<()> = Mutex::new(());
 
-struct AttrBundle {
+pub(crate) struct AttrBundle {
     headline: CoreHeadline,
-    per_saver: std::collections::HashMap<String, SaverAttribution>,
+    pub(crate) per_saver: std::collections::HashMap<String, SaverAttribution>,
 }
 
 /// Invalidate the attribution cache so the next dashboard read recomputes.
@@ -85,18 +85,49 @@ pub fn bump_attr_version() {
 /// The per-saver attribution + headline for the current index version, computed
 /// once and cached. Best-effort: an unreadable store propagates as `Err` and the
 /// caller degrades to an honest "measuring"/"not_enough_data" rather than crash.
-fn attribution_bundle() -> anyhow::Result<Arc<AttrBundle>> {
-    let fresh = |version: u64| -> Option<Arc<AttrBundle>> {
-        let guard = ATTR_CACHE.lock().ok()?;
-        let (v, bundle) = guard.as_ref()?;
-        (*v == version).then(|| bundle.clone())
-    };
-
+pub(crate) fn attribution_bundle() -> anyhow::Result<Arc<AttrBundle>> {
     let version = ATTR_INDEX_VERSION.load(Ordering::Relaxed);
-    if let Some(bundle) = fresh(version) {
+    if let Some(bundle) = attr_cached(Some(version)) {
         return Ok(bundle);
     }
 
+    // Stale-while-revalidate. The watcher bumps the version on every session
+    // write, so a strict cache made the *typical* refresh - the one right after
+    // Claude wrote a line - pay the full rescan while the UI sat on a spinner.
+    // A bundle one index version old is worth far more here than a two-second
+    // wait: serve it, recompute once in the background, and the next refresh
+    // (the watcher fires plenty) picks up the new numbers.
+    if let Some(stale) = attr_cached(None) {
+        // A revalidation already running holds ATTR_COMPUTE, so a burst of
+        // refreshes queues one recompute rather than a thread each. A poisoned
+        // lock reads as idle: `attr_recompute` takes it anyway.
+        let busy = matches!(
+            ATTR_COMPUTE.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        if !busy {
+            std::thread::spawn(|| {
+                let _ = attr_recompute();
+            });
+        }
+        return Ok(stale);
+    }
+
+    // Cold start: nothing to serve, so this one call waits.
+    attr_recompute()
+}
+
+/// The cached bundle, either for `version` specifically or whatever is there.
+fn attr_cached(version: Option<u64>) -> Option<Arc<AttrBundle>> {
+    let guard = ATTR_CACHE.lock().ok()?;
+    let (v, bundle) = guard.as_ref()?;
+    match version {
+        Some(want) if want != *v => None,
+        _ => Some(bundle.clone()),
+    }
+}
+
+fn attr_recompute() -> anyhow::Result<Arc<AttrBundle>> {
     // Single-flight. The second caller blocks here rather than racing the first
     // through the same scan, then finds the finished bundle on the re-check
     // below and returns it. `lock()` only fails if a previous holder panicked
@@ -107,7 +138,7 @@ fn attribution_bundle() -> anyhow::Result<Arc<AttrBundle>> {
     // re-index may have landed while we queued, and computing against a version
     // we already know is stale would cache under it and miss immediately.
     let version = ATTR_INDEX_VERSION.load(Ordering::Relaxed);
-    if let Some(bundle) = fresh(version) {
+    if let Some(bundle) = attr_cached(Some(version)) {
         return Ok(bundle);
     }
 
@@ -306,6 +337,16 @@ pub struct HeadlineStream {
     /// `estimated` figure, which is why `kind` travels alongside: only a
     /// `measured` kind may be labelled measured in the UI.
     pub delta: Option<f64>,
+    /// What the row means when `delta` is null, in one sentence
+    /// (`StreamStat::note`): still gathering, too small to compare, measured
+    /// and flat, or compared and too noisy. `None` when there is a delta, since
+    /// the number says it. Without this the UI printed the same "measuring"
+    /// chip over all four, and a settled null result read as a stuck bar.
+    pub note: Option<String>,
+    /// The state `note` is prose for: `delta` | `waiting` | `quiet` |
+    /// `no_change` | `inconclusive`. The UI branches on this, never on the
+    /// sentence.
+    pub reading: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,9 +386,27 @@ pub struct Headline {
     /// said so). False once it leans on hand-pinned sessions, which is the
     /// blocker the user can actually undo.
     pub on_randomized: bool,
+    /// How much of `n_full_on` is measured-eligible: current saver set, every
+    /// saver on because the scheduler chose it, before observational sessions
+    /// are pooled in.
+    ///
+    /// The screen cannot tell the two `on_randomized == false` cases apart
+    /// without this, and they want opposite words. Zero is "nothing is
+    /// rotating", where waiting fixes nothing and the fix is a button. Non-zero
+    /// and under `min_group` is "rotation is running and this arm is at N of
+    /// 10", where waiting is exactly the fix - and `n_full_on` cannot say so,
+    /// because it is the pooled total and sits in the thousands while the arm
+    /// that decides the badge holds five.
+    pub n_full_on_randomized: u64,
     /// Whether the holdout was a clean all-off one. False when a pinned saver
     /// rode through it, so the no-savers counterfactual was never observed.
     pub baseline_clean: bool,
+    /// `"shown" | "no_data" | "withheld_cost_more"` — why `value` is null, when
+    /// it is. `note` names one blocker in one sentence and the randomization gap
+    /// outranks this one, so without the field the screen could never say that
+    /// the estimate was withheld for costing MORE rather than for still
+    /// gathering.
+    pub multiplier_state: String,
     /// Sessions needed on **each** arm before a measured claim ([`MIN_GROUP`]),
     /// so the UI can draw honest progress instead of hard-coding 10.
     pub min_group: u64,
@@ -359,6 +418,39 @@ pub struct Headline {
     /// made the agent take more turns, which every per-turn figure is blind to,
     /// so the UI shows it as a regression however good the streams look.
     pub turns: Option<HeadlineStream>,
+    /// What the experiment is still waiting for, when it is waiting on sample
+    /// size. `None` once both arms are full — at which point "still gathering"
+    /// would be the wrong story and the UI must fall back to `note`.
+    pub waiting: Option<Waiting>,
+    /// Sessions the ON arm gained from an earlier saver set that differed only
+    /// by savers measured as doing nothing. 0 in the normal case, where the
+    /// current set stands on its own.
+    pub n_carried: u64,
+    /// The null savers that made the fold-in legal, for the sentence explaining
+    /// it. Empty when `n_carried` is 0.
+    pub carried_savers: Vec<String>,
+}
+
+/// The wait, in the terms the Proof screen needs to explain itself: which arm,
+/// how far along, when the count started, and roughly how much longer.
+///
+/// `since` on the ON arm is the one users cannot deduce for themselves. The ON
+/// arm is scoped to the saver set they run *now*, so installing or removing a
+/// single saver silently restarts it at zero — which reads as "Piggy is broken,
+/// it has said measuring for weeks" unless the screen says the count restarted
+/// and when.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Waiting {
+    /// `"on" | "baseline"` — which side is short.
+    pub arm: String,
+    pub have: u64,
+    pub need: u64,
+    /// RFC3339 timestamp this arm's count started from, when known.
+    pub since: Option<String>,
+    /// Days left at the pace observed so far. `None` when there is no pace to
+    /// extrapolate from, and the UI must say so rather than guess.
+    pub days_left: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,10 +490,15 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
                 n_baseline: 0,
                 baseline_kind: "none".to_string(),
                 on_randomized: false,
+                n_full_on_randomized: 0,
                 baseline_clean: false,
+                multiplier_state: "no_data".to_string(),
                 min_group: MIN_GROUP as u64,
                 streams: Vec::new(),
                 turns: None,
+                waiting: None,
+                n_carried: 0,
+                carried_savers: Vec::new(),
             });
         Ok(StatsOverview {
             period: period_key(period).to_string(),
@@ -461,6 +558,8 @@ fn map_stream(s: &piggy_core::attribution::StreamStat) -> HeadlineStream {
         median_on: s.median_on,
         median_off: s.median_off,
         delta: s.shown_pct().map(|p| -p / 100.0),
+        note: s.note(),
+        reading: s.reading().key().to_string(),
     }
 }
 
@@ -510,15 +609,30 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         // which, so the sub-line stops always blaming sample size (it read "10 of 10
         // sessions ... no number faked" while the real blocker was suppression).
         let sample_short = hl.n_full_on < MIN_GROUP || hl.n_baseline < MIN_GROUP;
-        Some(if !hl.on_randomized {
+        Some(if !hl.on_randomized && hl.n_full_on_randomized == 0 {
             // The root blocker, when it applies: nothing is being rotated. A setup
             // with every saver pinned by hand gives Piggy no on/off contrast to
             // measure - and its all-off holdouts get contaminated by the still-on
             // pinned savers - so it sits here forever. Name that and the fix, not a
             // session count that implies it is merely gathering.
-            "your savers are pinned by hand, so Piggy can't rotate them to compare on vs \
-             off · un-pin one in the Savers tab to let it measure"
+            "you turned your savers on by hand, so Piggy never switches them off and has \
+             nothing to compare against · hand one back to Piggy in the Savers tab"
                 .to_string()
+        } else if !hl.on_randomized {
+            // Rotation IS running, and this arm is short of the bar - the pooled
+            // `n_full_on` just hides it, because the sessions Piggy chose the setup
+            // for are a handful inside thousands the user switched on by hand. The
+            // line above is wrong here in the way that matters most: it tells
+            // someone whose experiment is four sessions from settling that nothing
+            // is being switched off, and points them at a Savers tab with nothing
+            // pinned in it.
+            format!(
+                "{} of {} sessions Piggy chose the setup for · the other {} ran a set you \
+                 turned on by hand, so they cannot back a randomized comparison",
+                hl.n_full_on_randomized,
+                MIN_GROUP,
+                hl.n_full_on.saturating_sub(hl.n_full_on_randomized),
+            )
         } else if sample_short {
             // Name the side that is actually short. Hard-coding "N of 10 holdout
             // sessions" reads as nonsense ("15 of 10") whenever the holdout is fine
@@ -551,7 +665,7 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
             "enough sessions, but no comparable spend to measure yet · no number faked"
                 .to_string()
         })
-    } else if !hl.on_randomized {
+    } else if !hl.on_randomized && hl.n_full_on_randomized == 0 {
         // Covers a saver switched on by hand AND one switched off by hand: either
         // way Piggy stopped rotating it, which is the part that matters here.
         Some(
@@ -559,6 +673,25 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
              cannot measure them"
                 .to_string(),
         )
+    } else if !hl.on_randomized {
+        // Rotation is running; this arm just has not filled yet. Same correction as
+        // the no-multiplier branch above: "Piggy is not rotating them" is false here
+        // and hides a count that is nearly at the bar.
+        Some(format!(
+            "estimated: {} of {} sessions so far ran a setup Piggy chose · the rest you turned \
+             on by hand, so they can back an estimate but not a measurement",
+            hl.n_full_on_randomized, MIN_GROUP,
+        ))
+    } else if hl.n_carried > 0 {
+        // The ON arm was topped up from an earlier saver set. That is the reason
+        // this figure is estimated rather than measured, and it outranks the
+        // generic "vs your history" line below, which would name the wrong cause
+        // entirely for a headline whose baseline is a perfectly clean holdout.
+        Some(format!(
+            "estimated: counting {} sessions from before you changed savers, since {} measured as no change · same setup, different weeks",
+            hl.n_carried,
+            hl.carried_savers.join(" and "),
+        ))
     } else if !hl.baseline_clean && hl.baseline == HeadlineBaseline::Holdout {
         // Only a real holdout baseline can be "dirtied" by a saver running through
         // it. A pre-install baseline is `baseline_clean == false` by definition (it
@@ -582,6 +715,19 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         label: label.to_string(),
         n_holdout,
         note,
+        n_carried: hl.n_carried as u64,
+        carried_savers: hl.carried_savers.clone(),
+        waiting: hl.waiting().map(|w| Waiting {
+            arm: match w.arm {
+                piggy_core::attribution::WaitingArm::On => "on",
+                piggy_core::attribution::WaitingArm::Baseline => "baseline",
+            }
+            .to_string(),
+            have: w.have as u64,
+            need: w.need as u64,
+            since: w.since,
+            days_left: w.days_left,
+        }),
         n_full_on: hl.n_full_on as u64,
         n_baseline: hl.n_baseline as u64,
         baseline_kind: match hl.baseline {
@@ -591,32 +737,20 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
         }
         .to_string(),
         on_randomized: hl.on_randomized,
+        n_full_on_randomized: hl.n_full_on_randomized as u64,
         baseline_clean: hl.baseline_clean,
+        multiplier_state: match hl.multiplier_state {
+            CoreMultiplierState::Shown => "shown",
+            CoreMultiplierState::NoData => "no_data",
+            CoreMultiplierState::WithheldCostMore => "withheld_cost_more",
+        }
+        .to_string(),
         min_group: MIN_GROUP as u64,
         turns: Some(map_stream(&hl.turns)),
-        streams: hl
-            .streams
-            .iter()
-            .map(|s| HeadlineStream {
-                stream: s.stream.label().to_string(),
-                kind: match s.badge {
-                    CoreBadge::Measured => "measured",
-                    CoreBadge::Estimated => "estimated",
-                    CoreBadge::Measuring => "measuring",
-                }
-                .to_string(),
-                n_on: s.n_on as u64,
-                n_off: s.n_off as u64,
-                median_on: s.median_on,
-                median_off: s.median_off,
-                // Gate on the badge, not on `delta` being Some: a stream below
-                // the bar has a delta the core computed and deliberately will
-                // not stand behind, and the UI must not be the place that
-                // decides to print it anyway. Negated to match `Badge.delta`'s
-                // negative-is-a-saving convention, exactly as `saver_badge` does.
-                delta: s.shown_pct().map(|p| -p / 100.0),
-            })
-            .collect(),
+        // Through `map_stream` like every other stream on the wire: this was a
+        // second hand-rolled copy of it, which is how the two came to disagree
+        // about a field.
+        streams: hl.streams.iter().map(map_stream).collect(),
     }
 }
 
@@ -833,6 +967,24 @@ pub struct SaverRow {
     pub license_note: Option<String>,
     pub ordering: i64,
     pub badge: Badge,
+    /// The same four token streams the headline breaks out, for this saver alone
+    /// (`badge` is only the output one). Same wire shape and same per-stream
+    /// gating, so a stream still `measuring` sends no number here either. Empty
+    /// when the saver has no attribution yet.
+    pub streams: Vec<HeadlineStream>,
+    /// Turns per session, on vs off - the denominator the four streams divide
+    /// by. Separate for the same reason as on the headline: a saver that buys
+    /// cheaper turns by needing more of them looks green on every stream above.
+    pub turns: Option<HeadlineStream>,
+    /// The one-line learning across all five arms (`SaverAttribution::summary`),
+    /// so the panel leads with the finding instead of making the reader derive
+    /// it from five rows of medians. `None` with no attribution yet.
+    pub summary: Option<String>,
+    /// What the summary does not cover (`SaverAttribution::caveat`): a thin arm,
+    /// or an uncomparable turn count under a per-turn saving. `None` when the
+    /// comparison hides nothing. Deterministic, so it renders whether or not the
+    /// local advisor is switched on.
+    pub caveat: Option<String>,
     /// True when the saver exposes user-tunable options (a Configure control).
     pub configurable: bool,
     /// Wrapper-model savers only: the command that starts a Claude session
@@ -927,6 +1079,12 @@ fn saver_row(
             }
             b
         },
+        streams: attr
+            .map(|a| a.streams.iter().map(map_stream).collect())
+            .unwrap_or_default(),
+        turns: attr.map(|a| map_stream(&a.turns)),
+        summary: attr.map(|a| a.summary()),
+        caveat: attr.and_then(|a| a.caveat()),
         configurable: !e.config_options.is_empty(),
         launch_command: e.launch_command(),
     }
@@ -1002,7 +1160,8 @@ fn measuring_note(
     }
     if toggle_source == Some(piggy_core::store::source::MANUAL) {
         return Some(
-            "Pinned on by you, so it sits out rotation. It still runs; Piggy just can't measure it."
+            "You turned this on by hand, so Piggy never switches it off and has nothing to \
+             compare it against. It keeps working; Piggy just can't tell you what it saves."
                 .to_string(),
         );
     }
@@ -2196,7 +2355,7 @@ mod tests {
         // Rotating but hand-pinned: excluded from the A/B.
         assert!(measuring_note(true, Some(source::MANUAL), true, None)
             .unwrap()
-            .contains("Pinned on by you"));
+            .contains("turned this on by hand"));
         // Rotating, not pinned, binaries present: ordinary warm-up, chip covers it.
         assert_eq!(
             measuring_note(true, Some(source::ROTATION), true, None),
@@ -2221,6 +2380,7 @@ mod tests {
             n_baseline: 7515,
             ceiling: Badge::Estimated,
             on_randomized: true,
+            n_full_on_randomized: 10,
             baseline_clean: false,
             multiplier: None,
             multiplier_state: MultiplierState::WithheldCostMore,
@@ -2235,6 +2395,14 @@ mod tests {
                 ci: None,
                 badge: Badge::Measuring,
             },
+            // Both arms are full here, so `waiting()` is None regardless and the
+            // pace never gets read. Present so the struct is complete.
+            on_pace: None,
+            baseline_pace: None,
+            // No fold-in here: this fixture is about cost-more suppression, and a
+            // carried arm would take the note branch above it.
+            n_carried: 0,
+            carried_savers: Vec::new(),
         };
         let h = map_headline(&cost_more);
         assert_eq!(h.label, "not_enough_data");
@@ -2258,17 +2426,36 @@ mod tests {
             "a short full-on side stays a count, not the suppression note"
         );
 
-        // The root blocker: nothing is randomized (savers pinned by hand). This must
-        // beat both the count and the cost-more message - it is the actual cause,
-        // and the only one the user can act on - and point to the fix.
+        // The root blocker: NOTHING is randomized (savers pinned by hand, so the
+        // scheduler never chose a single session). This must beat both the count and
+        // the cost-more message - it is the actual cause, and the only one the user
+        // can act on - and point to the fix.
         let pinned = CoreHeadline {
             on_randomized: false,
+            n_full_on_randomized: 0,
             ..cost_more.clone()
         };
         let note = map_headline(&pinned).note.expect("a reason");
         assert!(
-            note.contains("pinned") && note.contains("un-pin") && !note.contains(" of 10"),
-            "a hand-pinned setup must be named as the blocker with the un-pin fix, got {note:?}"
+            note.contains("by hand") && note.contains("Savers tab") && !note.contains(" of 10"),
+            "a hand-pinned setup must be named as the blocker with the hand-back fix, got {note:?}"
+        );
+
+        // Rotation running, ON arm short of the bar: the same `on_randomized: false`
+        // flag, and the opposite advice. `n_full_on` is the POOLED count and sits in
+        // the thousands, so the sample-size branch below cannot see this arm at all -
+        // which is how a screen four sessions from settling came to say "Piggy never
+        // switches them off" and point at a Savers tab with nothing pinned in it.
+        let rotating = CoreHeadline {
+            on_randomized: false,
+            n_full_on: 9792,
+            n_full_on_randomized: 5,
+            ..cost_more.clone()
+        };
+        let note = map_headline(&rotating).note.expect("a reason");
+        assert!(
+            note.contains("5 of 10") && !note.contains("Savers tab"),
+            "a filling randomized arm must show its own count, not the pin fix, got {note:?}"
         );
     }
 
@@ -2314,7 +2501,7 @@ mod tests {
                 .note
                 .as_deref()
                 .unwrap_or("")
-                .contains("Pinned on by you"),
+                .contains("turned this on by hand"),
             "expected the pin note on the row, got {:?}",
             row.badge.note
         );
@@ -2393,7 +2580,11 @@ pub fn ledger_overview(period_s: String) -> Result<LedgerOverview, ApiError> {
         let store = Store::open(&home)?;
         let period = period_from(&period_s);
         let pricing = Pricing::load(&home);
-        let l = store.ledger(period.cutoff().as_deref(), &pricing)?;
+        // `day_cutoff`, NOT `cutoff`: calendar days are what every chart on the
+        // Ledger screen draws, and this overview shares its period selector with
+        // the task table. Windowed on the rolling instant it would reach up to a
+        // day further back and quote a project a different total per tab.
+        let l = store.ledger(period.day_cutoff().as_deref(), &pricing)?;
         let total = l.total_tokens();
         let sources = l
             .rows
@@ -2443,6 +2634,124 @@ pub fn ledger_overview(period_s: String) -> Result<LedgerOverview, ApiError> {
     .map_err(|e| ApiError::new("Could not build the context ledger", e.to_string(), true))
 }
 
+/// One row of the task table: a project's spend, its outcome, and its history.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRowDto {
+    pub project: String,
+    /// Trailing path component, for a readable label.
+    pub name: String,
+    pub sessions: u64,
+    pub floor_tokens: u64,
+    pub work_tokens: u64,
+    pub total_tokens: u64,
+    /// Share of the window's cache-write tokens, 0.0–1.0.
+    pub share: f64,
+    /// User prompts recorded. `0` means the logs carry no task boundary, which
+    /// the UI must render as missing rather than as zero work.
+    pub tasks: u64,
+    pub turns: u64,
+    /// `null` when no tasks were recorded, so the column shows "no data"
+    /// instead of a fabricated average.
+    pub turns_per_task: Option<f64>,
+    pub tool_errors: u64,
+    pub failed_tasks: u64,
+    /// Share of tasks that hit at least one tool error, or `null` when none
+    /// were recorded.
+    pub failure_rate: Option<f64>,
+    /// Cache-write tokens per day, oldest first. Drawn as-is: the sparkline is
+    /// this series or it is absent, never inferred from anything else.
+    ///
+    /// It sums to `total_tokens` for every window except all-time, where it
+    /// covers the most recent 120 days only. The UI has to label that rather
+    /// than let the two figures read as one measurement.
+    pub daily: Vec<u64>,
+    /// Change against the prior equal-length window, as a fraction. `null` when
+    /// there is no prior window or it held nothing.
+    pub delta: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTable {
+    pub period: String,
+    pub period_label: String,
+    pub rows: Vec<TaskRowDto>,
+    /// True when the window recorded no task boundaries at all — the logs
+    /// predate `promptId`. The UI explains that rather than showing empty
+    /// outcome columns.
+    pub tasks_unrecorded: bool,
+    pub empty: bool,
+}
+
+/// The task table: per-project spend joined to the outcome signal.
+///
+/// Reads the ledger for the floor/work split (so this table and the By cause
+/// view cannot disagree) and the task rows for turns, failures and history.
+pub fn task_table(period_s: String) -> Result<TaskTable, ApiError> {
+    (|| -> anyhow::Result<TaskTable> {
+        let home = config::piggy_home();
+        let store = Store::open(&home)?;
+        let period = period_from(&period_s);
+        let pricing = Pricing::load(&home);
+        // `day_cutoff`, NOT `cutoff`: the task table windows on calendar days,
+        // and the rolling instant reaches up to a day further back. Paired with
+        // it the row would show a total the sparkline beside it never draws.
+        let ledger = store.ledger(period.day_cutoff().as_deref(), &pricing)?;
+        let tasks = store.task_table(period)?;
+
+        // Keyed by project path: both reads now cover the same calendar days,
+        // so a row present in one is expected in the other.
+        let by_project: std::collections::HashMap<&str, &piggy_core::TaskRow> =
+            tasks.iter().map(|t| (t.project.as_str(), t)).collect();
+        let total: u64 = ledger.projects.iter().map(|p| p.floor_tokens + p.work_tokens).sum();
+
+        let rows: Vec<TaskRowDto> = ledger
+            .projects
+            .iter()
+            .map(|p| {
+                let t = by_project.get(p.project.as_str());
+                let row_total = p.floor_tokens + p.work_tokens;
+                TaskRowDto {
+                    project: p.project.clone(),
+                    name: p
+                        .project
+                        .rsplit('/')
+                        .find(|s| !s.is_empty())
+                        .unwrap_or(&p.project)
+                        .to_string(),
+                    sessions: p.sessions,
+                    floor_tokens: p.floor_tokens,
+                    work_tokens: p.work_tokens,
+                    total_tokens: row_total,
+                    share: if total == 0 {
+                        0.0
+                    } else {
+                        row_total as f64 / total as f64
+                    },
+                    tasks: t.map(|t| t.tasks).unwrap_or(0),
+                    turns: t.map(|t| t.turns).unwrap_or(0),
+                    turns_per_task: t.and_then(|t| t.turns_per_task()),
+                    tool_errors: t.map(|t| t.tool_errors).unwrap_or(0),
+                    failed_tasks: t.map(|t| t.failed_tasks).unwrap_or(0),
+                    failure_rate: t.and_then(|t| t.failure_rate()),
+                    daily: t.map(|t| t.daily.clone()).unwrap_or_default(),
+                    delta: t.and_then(|t| t.delta()),
+                }
+            })
+            .collect();
+
+        Ok(TaskTable {
+            period: period_key(period).to_string(),
+            period_label: period.label().to_string(),
+            tasks_unrecorded: !rows.is_empty() && rows.iter().all(|r| r.tasks == 0),
+            empty: rows.is_empty(),
+            rows,
+        })
+    })()
+    .map_err(|e| ApiError::new("Could not build the task table", e.to_string(), true))
+}
+
 /// One ledger finding for the UI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2461,8 +2770,11 @@ pub fn ledger_insights(period_s: String) -> Result<Vec<InsightDto>, ApiError> {
         let home = config::piggy_home();
         let store = Store::open(&home)?;
         let period = period_from(&period_s);
+        // `day_cutoff`, NOT `cutoff`: these findings are quoted beside the same
+        // tables and charts, which are all cut on calendar days. A rolling
+        // instant would let a headline count spend no tab on the screen shows.
         Ok(store
-            .insights(period.cutoff().as_deref(), &Pricing::load(&home))?
+            .insights(period.day_cutoff().as_deref(), &Pricing::load(&home))?
             .into_iter()
             .map(|i| InsightDto {
                 id: i.id,

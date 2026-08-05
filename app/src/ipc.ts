@@ -24,6 +24,8 @@ import type {
   SourcesOverview,
   StatsOverview,
   SweepReport,
+  SystemInfo,
+  TaskTable,
   UpdateInfo,
   UsageSeries,
 } from "./types";
@@ -47,6 +49,7 @@ export const api = {
   usageSeries: (period: Period) => call<UsageSeries>("usage_series", { period }),
   ledgerOverview: (period: Period) => call<LedgerOverview>("ledger_overview", { period }),
   ledgerInsights: (period: Period) => call<Insight[]>("ledger_insights", { period }),
+  taskTable: (period: Period) => call<TaskTable>("task_table", { period }),
   advisorStatus: () => call<AdvisorStatus>("advisor_status"),
   /** `null` switches the advisor off. Weights stay on disk; use `advisorRemove`
    *  to reclaim the space. */
@@ -59,6 +62,10 @@ export const api = {
   /** Empty whenever the advisor is off, not downloaded, or produced nothing that
    *  survived the guard. None of those is an error. */
   advisorAnnotate: (period: Period) => call<Annotation[]>("advisor_annotate", { period }),
+  /** Per-saver advice from the local model, keyed by `saver:<id>`. Empty
+   *  whenever the advisor is off, not downloaded, or wrote nothing that
+   *  survived the guard. */
+  advisorSavers: () => call<Annotation[]>("advisor_savers"),
   saversList: () => call<SaversState>("savers_list"),
   saverConfigGet: (id: string) => call<ConfigOption[]>("saver_config_get", { id }),
   saverConfigSet: (id: string, key: string, value: string) =>
@@ -79,6 +86,8 @@ export const api = {
   doctor: () => call<Doctor>("doctor"),
   reindex: () => call<ReindexResult>("reindex"),
   openExternal: (url: string) => call<void>("open_external", { url }),
+  openDataFolder: () => call<void>("open_data_folder"),
+  systemInfo: () => call<SystemInfo>("system_info"),
   checkForUpdate: () => call<UpdateInfo | null>("check_for_update"),
   installUpdate: () => call<void>("install_update"),
 };

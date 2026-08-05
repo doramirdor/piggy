@@ -80,7 +80,7 @@
   --accent-strong: var(--ink);
   --teal: var(--estimated);
   --switch-off: var(--rule-str);
-  --switch-on: var(--ink);
+  --switch-on: var(--measured);
   --knob: var(--stock);
 }
 
@@ -149,8 +149,8 @@
     /* "Estimating" is hedged STRUCTURALLY (dashed border, tilde, dotted
        underline), so its ink is the second ink, not a fourth hue. */
     --teal-dim: rgba(217, 162, 58, 0.14);
-    /* A switch position is mechanical, not evidence. Proof green on 13 switches
-       made green the commonest colour in an app that had proven nothing. */
+    /* Green means 'on' on a switch and nowhere else: the toggle sheet asks for
+       one instantly readable state, and no number is being claimed by it. */
   }
 }
 
@@ -1062,6 +1062,67 @@ button {
 .row + .row {
   border-top: 0.5px solid var(--hairline);
 }
+
+/* Loading state: a header rule that says work is happening, over skeleton rows
+   sized like the real ones so the list does not jump when data lands. */
+.load-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 13px;
+  padding: 14px 15px;
+  border-bottom: 0.5px solid var(--hairline);
+  color: var(--text-2);
+}
+.load-head .load-txt {
+  min-width: 0;
+}
+.load-head .progress {
+  margin-top: 7px;
+}
+.row.skel {
+  pointer-events: none;
+}
+.sk {
+  background: var(--rule);
+  animation: sk-pulse 1.3s ease-in-out infinite;
+}
+.sk-ic {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+}
+.sk-line {
+  height: 10px;
+  width: 62%;
+}
+.sk-line + .sk-line {
+  margin-top: 8px;
+}
+.sk-short {
+  width: 38%;
+}
+.sk-chip {
+  width: 74px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.sk-sw {
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+@keyframes sk-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk {
+    animation: none;
+  }
+}
 .row .ic {
   width: 34px;
   height: 34px;
@@ -1126,8 +1187,8 @@ button {
   line-height: 1.4;
 }
 
-/* "Let Piggy rotate & measure this" - hands a hand-pinned saver back to the
-   scheduler so it stops being excluded from the A/B. */
+/* "Let Piggy switch it on and off to measure it" - hands a hand-pinned saver
+   back to the scheduler so it stops being excluded from the A/B. */
 .row .unpin-cta {
   display: inline-block;
   margin-top: 5px;
@@ -1393,14 +1454,16 @@ button {
   opacity: 0.7;
 }
 
-/* ---------- macOS switch ---------- */
+/* ---------- macOS switch ----------
+   The one pill in a square system: a toggle is a physical control, and the
+   capsule is what reads as "slide me". Green is 'on' here and nowhere else. */
 .switch {
-  width: 42px;
-  height: 25px;
-  border-radius: 0;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
   background: var(--switch-off);
   position: relative;
-  transition: background 0.18s ease;
+  transition: background 0.12s ease-out, box-shadow 0.12s ease-out;
   flex-shrink: 0;
   border: 0;
   padding: 0;
@@ -1412,26 +1475,29 @@ button {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 21px;
-  height: 21px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--knob);
-  box-shadow: none;
-  transition: transform 0.18s cubic-bezier(0.3, 0.8, 0.4, 1.1);
+  box-shadow: 0 1px 2px rgba(13, 27, 38, 0.28);
+  transition: transform 0.12s ease-out;
 }
 .switch.on .knob {
-  transform: translateX(17px);
+  transform: translateX(18px);
 }
-.switch.sm {
-  width: 42px;
-  height: 25px;
+.switch:not(:disabled):hover {
+  box-shadow: 0 0 0 4px var(--green-dim);
 }
-.switch.sm .knob {
+.switch:not(:disabled):active .knob {
   width: 21px;
-  height: 21px;
 }
-.switch.sm.on .knob {
-  transform: translateX(17px);
+.switch.on:not(:disabled):active .knob {
+  transform: translateX(15px);
+}
+.switch:focus-visible {
+  outline: 2px solid var(--switch-on);
+  outline-offset: 2px;
+  border-radius: 999px;
 }
 .switch:disabled {
   opacity: 0.45;
@@ -1466,6 +1532,46 @@ button {
 }
 .hint.launch {
   background: var(--accent-dim);
+}
+
+/* "Why this still says measuring". Neutral, not amber: a running experiment is
+   not a warning, and painting it like the blocker card next to it would make an
+   ordinary warm-up look like something the user broke. */
+.waitbox {
+  margin-top: 14px;
+  padding: 13px 15px;
+  border: 0.5px solid var(--hairline);
+  background: var(--card-2);
+  text-align: left;
+}
+.wb-what {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.wb-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 0.5px solid var(--hairline);
+  font-size: 12.5px;
+}
+.wb-row b {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.wb-row span {
+  color: var(--text-2);
+}
+.wb-why {
+  margin-top: 7px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-3);
 }
 
 /* copyable command chip (wrapper-saver launch instruction) */
@@ -1534,12 +1640,14 @@ button {
 .btn.primary:active:not(:disabled) {
   background: #2f6fe0;
 }
-.btn.green {
+.btn.solid {
   background: var(--ink);
   border-color: transparent;
-  color: #04120a;
+  /* The reverse of the ground, so it flips with the appearance: near-black ink
+     takes the sheet, and the light ink of dark mode takes the dark sheet. */
+  color: var(--sheet);
 }
-.btn.green:hover:not(:disabled) {
+.btn.solid:hover:not(:disabled) {
   filter: brightness(1.08);
   background: var(--ink);
 }
@@ -1565,28 +1673,6 @@ button {
 /* ==========================================================================
    proof / attribution
    ========================================================================== */
-.period-picker {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  background: var(--card);
-  border-radius: 0;
-  margin-bottom: 16px;
-}
-.period-picker button {
-  border: 0;
-  background: none;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 16px;
-  border-radius: 0;
-}
-.period-picker button.active {
-  background: var(--card-hover);
-  color: var(--text);
-}
-
 .attr {
   border-radius: 0;
   background: var(--card);
@@ -1602,9 +1688,74 @@ button {
 .attr .arow + .arow {
   border-top: 0.5px solid var(--hairline);
 }
+/* A saver row with attribution is a disclosure: the row itself is the summary,
+   and opening it drops the same per-stream comparison the headline uses. The
+   hairline lives on whichever element follows, since the rows are now a mix of
+   plain divs and <details>. */
+.attr .adet + .adet > .arow,
+.attr .adet + .arow,
+.attr .arow + .adet > .arow {
+  border-top: 0.5px solid var(--hairline);
+}
+.attr summary.arow {
+  cursor: pointer;
+  list-style: none;
+}
+.attr summary.arow::-webkit-details-marker {
+  display: none;
+}
+.attr summary.arow::after {
+  content: "›";
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+.attr .adet[open] summary.arow::after {
+  transform: rotate(90deg);
+}
+.attr .asub {
+  padding: 0 15px 14px;
+}
+/* The finding, above the evidence it came from. */
+.attr .asum {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-1);
+  padding: 2px 1px 2px 0;
+}
+/* The part the finding leaves out. Not styled as a warning: it is a limit of
+   the measurement, not a fault in the saver. */
+.attr .acav {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+  padding-bottom: 4px;
+}
+
+/* What a row means when it has no percentage to show. Same weight as the
+   medians it sits over: it is a result, not a caption. */
+.snote {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
 .attr .aname {
   flex: 1;
   font-weight: 500;
+}
+/* Skeleton evidence rows: same padding and gaps as `.arow`, so the list keeps
+   its height when the real savers land. */
+.attr .arow.skel {
+  pointer-events: none;
+}
+.attr .arow.skel .aname .sk-line {
+  width: 46%;
+}
+.attr .arow.skel .sk-short {
+  width: 92px;
+  flex-shrink: 0;
 }
 /* Not scoped to `.attr`: the Proof screen reuses both outside it (per-stream
    rows), and a descendant-only rule silently drops the colour the moment the
@@ -2032,6 +2183,13 @@ button {
   }
 }
 
+/* In the hero the bar carries the whole card, so it runs the full width there
+   rather than the 180px a list header wants. */
+.hero .hero-progress {
+  width: 100%;
+  margin-top: 16px;
+}
+
 /* Indeterminate loading bar (booting / long fetches). */
 .progress {
   width: 180px;
@@ -2173,7 +2331,111 @@ button {
   border-radius: 0;
   display: block;
   aspect-ratio: 40 / 21;
-  background: #101013;
+  background: var(--sheet-2);
+  border: 0.5px solid var(--hairline);
+  /* The square preset is as tall as it is wide, so cap the height and let the
+     width follow: the sheet has to stay inside a 660px window. */
+  max-height: 42vh;
+  width: auto;
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+/* --- share sheet: preview left, options rail right --------------------- */
+.share-sheet {
+  max-width: 780px;
+  position: relative;
+}
+.sheet-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: none;
+  border: 0;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px;
+  color: var(--text-2);
+}
+.sheet-close:hover {
+  color: var(--text);
+}
+.sheet .ssub {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.4;
+  margin: -6px 0 14px;
+  max-width: 46ch;
+}
+.share-body {
+  display: grid;
+  grid-template-columns: 1fr 190px;
+  gap: 18px;
+  align-items: start;
+}
+.share-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.share-rail .lp-head {
+  margin-top: 6px;
+}
+.share-rail .lp-head:first-child {
+  margin-top: 0;
+}
+.share-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.share-check input {
+  accent-color: var(--ink);
+  width: 14px;
+  height: 14px;
+}
+.share-check:has(input:disabled) {
+  opacity: 0.55;
+}
+.share-themes {
+  display: flex;
+  gap: 8px;
+}
+.share-theme {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  font-size: 12px;
+  background: var(--card-2);
+  color: var(--text);
+  border: 0.5px solid var(--hairline);
+  border-radius: var(--radius-ctl);
+}
+.share-theme.on {
+  border: 1px solid var(--ink);
+}
+.share-theme .swatch {
+  width: 100%;
+  height: 34px;
+  border: 0.5px solid var(--hairline);
+}
+.share-theme.light .swatch {
+  background: var(--sheet);
+}
+.share-theme.dark .swatch {
+  background: var(--ink);
+}
+.share-size {
+  font-size: 12.5px;
+  padding: 7px 8px;
+  background: var(--card-2);
+  color: var(--text);
+  border: 0.5px solid var(--hairline);
+  border-radius: var(--radius-ctl);
 }
 .sheet .sactions {
   display: flex;
@@ -2392,6 +2654,131 @@ button {
   justify-content: flex-end;
 }
 
+/* ---------------------------------------------------------------------------
+   Tasks: per-project spend joined to the outcome signal.
+
+   Ten columns of tabular figures. They scroll rather than compress, because a
+   number squeezed to three characters has stopped being evidence.
+   --------------------------------------------------------------------------- */
+.ttable-wrap {
+  overflow-x: auto;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  margin-bottom: 22px;
+}
+/* Sized to the 720px reading column: the outcome columns are the reason this
+   view exists, so they must be visible without scrolling at the default width.
+   It still scrolls below that rather than crushing the figures. */
+.ttable {
+  min-width: 616px;
+}
+.trow {
+  display: grid;
+  grid-template-columns:
+    1.45fr 0.62fr 0.55fr 1fr 0.7fr 0.95fr 0.62fr 66px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  font-size: 12.5px;
+}
+.trow + .trow {
+  border-top: 0.5px solid var(--hairline);
+}
+.trow:not(.t-head):hover {
+  background: var(--card-2);
+}
+.t-head {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-3);
+  position: sticky;
+  top: 0;
+  background: var(--card);
+  z-index: 1;
+}
+.t-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Not recorded, which is not zero. Muted so the eye skips it, and never toned
+   as though it were an outcome. */
+.t-none {
+  color: var(--text-3);
+}
+.t-totcell,
+.t-failcell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.t-totcell b,
+.t-failcell b {
+  font-weight: 700;
+}
+/* The denominator, always. A share with no basis under it is the shape this
+   product refuses. */
+.t-totcell i,
+.t-failcell i {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.t-failcell.t-none {
+  display: block;
+}
+.t-failcell b.bad {
+  color: var(--red);
+}
+/* Sortable headers are buttons, so they are reachable and operable by keyboard
+   without a roving handler. */
+.t-sort {
+  all: unset;
+  cursor: pointer;
+  text-align: right;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--text-3);
+}
+.t-sort:hover {
+  color: var(--text);
+}
+.t-sort.on {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.t-sort:focus-visible {
+  outline: 2px solid var(--accent-brand);
+  outline-offset: 2px;
+}
+.t-spark {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 18px;
+}
+.t-head .t-spark {
+  justify-content: flex-end;
+}
+.spark path {
+  stroke: var(--cat-2);
+}
+.spark circle {
+  fill: var(--cat-1);
+}
+
 /* The one-glance split: floor vs work vs configurable injections. */
 .lsplit {
   background: var(--card);
@@ -2430,22 +2817,9 @@ button {
   color: var(--text-2);
   max-width: 42ch;
 }
-.lsplit-total {
-  text-align: right;
-  white-space: nowrap;
-}
-.lsplit-total b {
-  display: block;
-  font-size: 20px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.lsplit-total small {
-  font-size: 11.5px;
-  color: var(--text-3);
-}
 .lsplit-bar {
   display: flex;
+  margin-top: 16px;
   height: 14px;
   border-radius: 0;
   overflow: hidden;
@@ -3004,7 +3378,7 @@ button {
 .viewbar .views,
 .viewbar .periods { display: flex; gap: 20px; }
 .viewbar .periods { margin-left: auto; gap: 4px; }
-.viewbar .views span,
+.viewbar .views button,
 .viewbar .periods button {
   font-family: var(--mono);
   font-size: 10.5px;
@@ -3019,8 +3393,22 @@ button {
   cursor: pointer;
 }
 .viewbar .periods button { padding: 0 9px 9px; }
-.viewbar .views span.on,
+.viewbar .views button.on,
 .viewbar .periods button.on { color: var(--ink); border-bottom-color: var(--ink); }
+
+/* Switching period or view: hold the old slice, dim it, spin beside the control
+   that started it. Blanking the page for a sub-second query reads as a crash. */
+.slice { transition: opacity 0.16s ease; }
+.slice.busy { opacity: 0.38; pointer-events: none; }
+.slice-spin {
+  align-self: center;
+  margin: 0 8px 9px 0;
+  color: var(--ink-3);
+}
+@media (prefers-reduced-motion: reduce) {
+  .slice { transition: none; }
+  .slice-spin { animation: none; }
+}
 
 /* The claim reads as one sentence: figure, denominator, predicate. */
 .lsplit-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; }
@@ -3031,19 +3419,37 @@ button {
   text-transform: uppercase;
   color: var(--ink-2);
 }
-.lsplit-cap { flex-basis: 100%; font-size: 15px; color: var(--ink-2); margin-top: 2px; }
-/* Pulled down from the old ceiling: at 81% of the card the figure crowded out
-   the explanation and the action it is supposed to lead to. */
-.lsplit-big { font-size: clamp(64px, 9vw, 118px) !important; }
-.lsplit-facts {
-  display: flex;
-  gap: 22px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-  font-size: 12.5px;
+.lsplit-cap {
+  flex-basis: 100%;
+  font-size: 14px;
+  line-height: 1.5;
   color: var(--ink-2);
+  margin-top: 6px;
+  max-width: 62ch;
 }
-.lsplit-facts b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+/* Pulled down twice. The figure shares the card with a sentence that has to be
+   read now, not skimmed, so it stops at a size that leads into prose rather than
+   filling the card on its own. */
+.lsplit-big { font-size: clamp(52px, 7vw, 88px) !important; }
+/* The verb. Ink weight, not a muted footnote: this is the only line on the card
+   that tells the reader what to do about the number above it. */
+.lsplit-lever {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 0.5px solid var(--hairline);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 68ch;
+}
+.lsplit-lever b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.lsplit-lever.quiet {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
 
 /* Findings: a rank, a two-line body, an impact figure. */
 .lins { grid-template-columns: 34px 1fr auto !important; align-items: start; }
@@ -3090,3 +3496,163 @@ button {
 .master-mini .mstate.on { background: var(--ink); border-color: var(--ink); }
 .master-mini .m1 { font-size: 12px; font-weight: 600; color: var(--ink); display: block; }
 .master-mini .m2 { font-size: 10.5px; color: var(--ink-3); display: block; }
+
+/* ==========================================================================
+   about
+   ==========================================================================
+   The only screen that talks about Piggy rather than about the user's tokens,
+   so it stays in the same paper: flat sheets, hairline rules, no card the rest
+   of the app does not already use. */
+.ab-eyebrow {
+  margin-top: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* Lockup beside the pitch. The mark gets its own panel so the wordmark is not
+   competing with body text for the same left edge. */
+.ab-hero {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+}
+.ab-lockup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 26px 18px;
+  border-right: 0.5px solid var(--hairline);
+}
+.ab-word {
+  margin-top: 10px;
+  font-family: var(--serif);
+  font-size: 30px;
+  line-height: 1;
+  color: var(--text);
+}
+.ab-tag {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.ab-pitch {
+  padding: 22px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.ab-claim {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Four principles, one rule between them. */
+.ab-principles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  border-top: 0;
+}
+.ab-principle {
+  padding: 16px 12px 18px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+.ab-principle + .ab-principle {
+  border-left: 0.5px solid var(--hairline);
+}
+.ab-principle svg {
+  width: 20px;
+  height: 20px;
+  color: var(--text-2);
+  margin-bottom: 3px;
+}
+.ab-principle b {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ab-principle span {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
+
+.ab-family-note {
+  padding: 14px 15px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  border-bottom: 0.5px solid var(--hairline);
+}
+.ab-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* System table: label/value pairs, values in the mono face and left-aligned on
+   a shared column so a path and a version read as one list. */
+.ab-sys {
+  padding: 6px 0;
+  border-bottom: 0.5px solid var(--hairline);
+}
+.ab-sysrow {
+  display: flex;
+  gap: 14px;
+  padding: 6px 15px;
+  font-size: 12.5px;
+}
+.ab-syslabel {
+  width: 130px;
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.ab-sysval {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.ab-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 15px;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.ab-link + .ab-link {
+  border-top: 0.5px solid var(--hairline);
+}
+.ab-link:hover {
+  background: var(--card-2);
+}
+.ab-link .ab-ext {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--text-3);
+  flex-shrink: 0;
+}

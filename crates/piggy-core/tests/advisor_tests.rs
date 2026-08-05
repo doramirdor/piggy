@@ -6,12 +6,16 @@
 //! laptop. Second, the guard, which is the only thing standing between a small
 //! model and a fabricated number printed next to a receipt.
 
+use std::collections::BTreeMap;
+
 use piggy_core::advisor::facts::Facts;
-use piggy_core::advisor::guard::{accept, Allowlist};
+use piggy_core::advisor::guard::{accept, accept_savers, Allowlist, EXAMPLE_HEADLINE, EXAMPLE_WHY};
 use piggy_core::advisor::{available, budget, fits, model, recommended, AdvisorModel, CATALOG};
+use piggy_core::attribution::{Badge, SaverAttribution, Stream, StreamStat};
 use piggy_core::insights::{Insight, Severity};
 use piggy_core::ledger::{Ledger, LedgerRow, ProjectRow};
 use piggy_core::parser::{CTX_CONVERSATION, CTX_FLOOR};
+use piggy_core::registry::Entry;
 use piggy_core::sweep::{SweepItem, SweepReport};
 
 const GB: u64 = 1024 * 1024 * 1024;
@@ -199,6 +203,7 @@ fn facts_precompute_sums_so_the_model_never_adds() {
                 used: 0,
                 used_windowed: false,
                 est_tokens: 1_200,
+                scope_to: None,
                 recommend_disable: true,
                 reason: "never invoked".into(),
             },
@@ -210,6 +215,7 @@ fn facts_precompute_sums_so_the_model_never_adds() {
                 used: 0,
                 used_windowed: true,
                 est_tokens: 800,
+                scope_to: None,
                 recommend_disable: true,
                 reason: "never invoked".into(),
             },
@@ -223,6 +229,35 @@ fn facts_precompute_sums_so_the_model_never_adds() {
 }
 
 // --- the guard -------------------------------------------------------------
+
+/// One unused add-on, which is all the fact sheet carries now: an item in use
+/// cannot explain a saving, so `sweep_facts` withholds it.
+fn sweep() -> SweepReport {
+    SweepReport {
+        sessions_considered: 200,
+        items: vec![SweepItem {
+            idx: 1,
+            kind: "skill".into(),
+            id: "unused-skill".into(),
+            source: None,
+            used: 0,
+            used_windowed: false,
+            est_tokens: 1_200,
+            scope_to: None,
+            recommend_disable: true,
+            reason: "never invoked".into(),
+        }],
+    }
+}
+
+/// The fact sheet as the model actually receives it, configuration included.
+///
+/// The guard requires an annotation to name a configuration item, so a sheet
+/// without one is not a fixture the guard can be exercised against: every
+/// annotation would drop for the same uninteresting reason.
+fn facts() -> Facts {
+    Facts::build(&ledger(), &findings(), Some(&sweep()))
+}
 
 fn allow() -> Allowlist {
     Allowlist::from_facts(&Facts::build(&ledger(), &findings(), None))
@@ -274,10 +309,10 @@ fn sentence_punctuation_is_not_a_decimal_point() {
 
 #[test]
 fn annotations_must_name_a_real_finding() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[
-      {"insight_id":"floor-dominates","headline":"Startup dominates","why":"Most sessions are short."},
-      {"insight_id":"invented-finding","headline":"Something else","why":"Made up."}
+      {"insight_id":"floor-dominates","headline":"Startup dominates","why":"unused-skill loads in every one."},
+      {"insight_id":"invented-finding","headline":"Something else","why":"unused-skill made up."}
     ]"#;
     let got = accept(raw, &f).unwrap();
     assert_eq!(got.len(), 1);
@@ -286,24 +321,24 @@ fn annotations_must_name_a_real_finding() {
 
 #[test]
 fn annotations_with_invented_numbers_are_dropped_entirely() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[{"insight_id":"floor-dominates","headline":"You burned 88% on startup","why":"Short sessions."}]"#;
     assert!(accept(raw, &f).unwrap().is_empty());
 }
 
 #[test]
 fn a_code_fence_or_preamble_does_not_lose_valid_output() {
-    let f = Facts::build(&ledger(), &findings(), None);
-    let raw = "Sure, here you go:\n```json\n[{\"insight_id\":\"floor-dominates\",\"headline\":\"Startup dominates\",\"why\":\"Short sessions.\"}]\n```";
+    let f = facts();
+    let raw = "Sure, here you go:\n```json\n[{\"insight_id\":\"floor-dominates\",\"headline\":\"Startup dominates\",\"why\":\"unused-skill loads every time.\"}]\n```";
     assert_eq!(accept(raw, &f).unwrap().len(), 1);
 }
 
 #[test]
 fn one_annotation_per_finding() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[
-      {"insight_id":"floor-dominates","headline":"First","why":"One."},
-      {"insight_id":"floor-dominates","headline":"Second","why":"Two."}
+      {"insight_id":"floor-dominates","headline":"First","why":"unused-skill, one."},
+      {"insight_id":"floor-dominates","headline":"Second","why":"unused-skill, two."}
     ]"#;
     let got = accept(raw, &f).unwrap();
     assert_eq!(got.len(), 1);
@@ -312,7 +347,7 @@ fn one_annotation_per_finding() {
 
 #[test]
 fn overlong_or_empty_annotations_are_dropped() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let long = "x".repeat(500);
     let raw = format!(
         r#"[{{"insight_id":"floor-dominates","headline":"ok","why":"{long}"}},
@@ -366,17 +401,17 @@ fn real_data_fact_sheet_fits_the_context_window() {
 /// parse and all three complete annotations were discarded.
 #[test]
 fn a_truncated_array_keeps_its_complete_items() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[
   {
     "insight_id": "floor-dominates",
     "headline": "Startup dominates",
-    "why": "Short sessions."
+    "why": "unused-skill loads every time."
   },
   {
     "insight_id": "floor-dominates",
     "headline": "Duplicate, should be dropped",
-    "why": "Two."
+    "why": "unused-skill, two."
   },
   {
     "insight_id": "churn:/Users/dor/code/qwen_bench",
@@ -388,8 +423,8 @@ fn a_truncated_array_keeps_its_complete_items() {
 
 #[test]
 fn a_bracket_inside_a_string_does_not_end_the_array_early() {
-    let f = Facts::build(&ledger(), &findings(), None);
-    let raw = r#"[{"insight_id":"floor-dominates","headline":"Your [skills] load at startup","why":"See the ] bracket."}]"#;
+    let f = facts();
+    let raw = r#"[{"insight_id":"floor-dominates","headline":"Your [skills] load at startup","why":"See the ] bracket by unused-skill."}]"#;
     let got = accept(raw, &f).unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].headline, "Your [skills] load at startup");
@@ -397,7 +432,7 @@ fn a_bracket_inside_a_string_does_not_end_the_array_early() {
 
 #[test]
 fn a_truncation_before_any_complete_item_yields_nothing() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[{"insight_id":"floor-dominates","headline":"cut off here"#;
     assert!(accept(raw, &f).is_err());
 }
@@ -406,7 +441,7 @@ fn a_truncation_before_any_complete_item_yields_nothing() {
 /// hedged anyway, which is why this is enforced here rather than asked for there.
 #[test]
 fn hedged_guesses_at_a_cause_are_dropped() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[
       {"insight_id":"floor-dominates","headline":"Startup dominates",
        "why":"This suggests the hook is configured to run on every session."},
@@ -418,15 +453,246 @@ fn hedged_guesses_at_a_cause_are_dropped() {
 
 #[test]
 fn a_confident_claim_is_kept() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     let raw = r#"[{"insight_id":"floor-dominates","headline":"Startup dominates",
-                   "why":"Your skill listing is loaded before the first message in every project."}]"#;
+                   "why":"Your unused-skill is loaded before the first message in every project."}]"#;
     assert_eq!(accept(raw, &f).unwrap().len(), 1);
+}
+
+/// Also verbatim from a live run. Told to skip findings nothing explains, the
+/// model wrote an annotation *saying* nothing explained them, which would have
+/// printed under a real finding as though it were the explanation.
+#[test]
+fn an_annotation_naming_no_configuration_item_is_dropped() {
+    let raw = r#"[{"insight_id":"floor-dominates","headline":"No configuration item inflates this",
+                   "why":"Nothing in the report matches this finding."}]"#;
+    assert!(accept(raw, &facts()).unwrap().is_empty());
+}
+
+/// A model refers to `runway-api@claude-plugins-official` as `runway-api` about
+/// half the time, and that is still naming the item.
+#[test]
+fn the_bare_form_of_a_marketplace_name_counts_as_naming_it() {
+    let mut swept = sweep();
+    swept.items[0].kind = "plugin".into();
+    swept.items[0].id = "runway-api@claude-plugins-official".into();
+    let f = Facts::build(&ledger(), &findings(), Some(&swept));
+    let raw = r#"[{"insight_id":"floor-dominates","headline":"runway-api sits in the skill listing",
+                   "why":"It is never invoked and loads at startup."}]"#;
+    assert_eq!(accept(raw, &f).unwrap().len(), 1);
+}
+
+// --- the saver sheet -------------------------------------------------------
+
+/// A minimal catalog entry. `Entry` is only ever built by deserializing the
+/// catalog, and every field the saver sheet does not read defaults.
+fn saver_entry() -> Entry {
+    serde_json::from_value(serde_json::json!({
+        "id": "sweep",
+        "name": "Sweep",
+        "description": "Drops stale context out of the session floor.",
+    }))
+    .expect("a minimal catalog entry")
+}
+
+fn arm(stream: Stream, on: f64, off: f64, delta: f64, ci: (f64, f64), badge: Badge) -> StreamStat {
+    StreamStat {
+        stream,
+        n_on: 400,
+        n_off: 400,
+        median_on: on,
+        median_off: off,
+        delta: Some(delta),
+        ci: Some(ci),
+        badge,
+    }
+}
+
+/// A saver that made a stream **worse**: 12% more output tokens a turn with it
+/// on, measured on both arms, over a turn count that settled on no change.
+fn regressing_saver() -> SaverAttribution {
+    SaverAttribution {
+        saver_id: "sweep".into(),
+        n_on: 400,
+        n_off: 400,
+        off_by_source: BTreeMap::new(),
+        streams: vec![arm(
+            Stream::Output,
+            112.0,
+            100.0,
+            -0.12,
+            (-0.16, -0.08),
+            Badge::Measured,
+        )],
+        turns: arm(Stream::Turns, 20.0, 20.0, 0.0, (-0.01, 0.01), Badge::Measuring),
+    }
+}
+
+fn saver_facts() -> Facts {
+    let entry = saver_entry();
+    let attribution = regressing_saver();
+    Facts::savers(&[(&entry, &attribution)])
+}
+
+/// The sign is the whole meaning, and the model reads the key rather than the
+/// sign. A regression filed under `reduced_by_pct` is a saver that cost the user
+/// tokens, handed over under a name that says it saved them.
+#[test]
+fn a_regression_is_never_filed_under_a_reduction_key() {
+    let f = saver_facts();
+    let output = &f.value["savers"][0]["streams"][0];
+    assert_eq!(output["stream"], "output");
+    assert!(
+        output.get("reduced_by_pct").is_none(),
+        "a 12% regression was offered as a reduction: {output}"
+    );
+    assert_eq!(output["increased_by_pct"].as_f64(), Some(12.0));
+    // Nowhere else on the sheet either. The `note` explains both keys, so the
+    // savers array is what has to be clean.
+    assert!(!f.value["savers"].to_string().contains("reduced_by_pct"));
+}
+
+/// The same figure the other way round still reads as a reduction.
+#[test]
+fn a_genuine_reduction_keeps_the_reduction_key() {
+    let entry = saver_entry();
+    let mut a = regressing_saver();
+    a.streams[0] = arm(
+        Stream::Output,
+        88.0,
+        100.0,
+        0.12,
+        (0.08, 0.16),
+        Badge::Measured,
+    );
+    let f = Facts::savers(&[(&entry, &a)]);
+    let output = &f.value["savers"][0]["streams"][0];
+    assert_eq!(output["reduced_by_pct"].as_f64(), Some(12.0));
+    assert!(output.get("increased_by_pct").is_none());
+}
+
+/// Zero is a reading, not a gap, and two parts of the product print it side by
+/// side. `summary()` puts it on the "more" side; a sheet filing the same arm
+/// under a reduction key contradicts the sentence the reader has on the row.
+#[test]
+fn a_zero_percent_reading_lands_on_the_same_side_in_both_places() {
+    let entry = saver_entry();
+    let mut a = regressing_saver();
+    a.streams[0] = arm(
+        Stream::Output,
+        100.0,
+        100.0,
+        0.0,
+        (-0.02, 0.02),
+        Badge::Measured,
+    );
+    assert!(
+        a.summary().contains("0% more output"),
+        "the row's own sentence changed: {}",
+        a.summary()
+    );
+    let f = Facts::savers(&[(&entry, &a)]);
+    let output = &f.value["savers"][0]["streams"][0];
+    assert!(
+        output.get("reduced_by_pct").is_none(),
+        "the sheet calls a reduction what the row calls an increase: {output}"
+    );
+    assert_eq!(output["increased_by_pct"].as_f64(), Some(0.0));
+}
+
+/// A saver whose **turns** arm settled: the one arm on the sheet whose medians
+/// are counted per session rather than per turn.
+fn saver_that_moved_turns() -> SaverAttribution {
+    let mut a = regressing_saver();
+    // 4 turns a session with it off, 2.6 with it on: 35% fewer.
+    a.turns = arm(Stream::Turns, 2.6, 4.0, 0.35, (0.30, 0.40), Badge::Measured);
+    a
+}
+
+/// `SaverAttribution::arms` chains the turns comparison onto the token streams,
+/// and the sheet lists them together. Under one pair of key names they are not
+/// comparable figures: turns are per session, tokens are per turn. A per-session
+/// median handed over as a per-turn one is a real number with a false label, on
+/// a sheet whose rules tell the model to copy figures verbatim, which is exactly
+/// the class of error the guard cannot catch.
+#[test]
+fn a_settled_turns_arm_is_never_labelled_per_turn() {
+    let entry = saver_entry();
+    let a = saver_that_moved_turns();
+    let f = Facts::savers(&[(&entry, &a)]);
+
+    let turns = &f.value["savers"][0]["streams"][1];
+    assert_eq!(turns["stream"], "turns per session");
+    assert!(
+        turns.get("per_turn_with_it_off").is_none() && turns.get("per_turn_with_it_on").is_none(),
+        "a per-session median was offered as a per-turn one: {turns}"
+    );
+    assert_eq!(turns["per_session_with_it_off"].as_f64(), Some(4.0));
+    assert_eq!(turns["per_session_with_it_on"].as_f64(), Some(2.6));
+    assert_eq!(turns["reduced_by_pct"].as_f64(), Some(35.0));
+
+    // The token arm beside it keeps the unit it does have.
+    let output = &f.value["savers"][0]["streams"][0];
+    assert_eq!(output["per_turn_with_it_off"].as_f64(), Some(100.0));
+    assert_eq!(output["per_turn_with_it_on"].as_f64(), Some(112.0));
+
+    // And the sheet's note no longer claims one unit for the whole sheet.
+    let note = f.value["note"].as_str().expect("the sheet carries a note");
+    assert!(
+        note.contains("per_turn_") && note.contains("per_session_"),
+        "the note has to name both units, not one: {note}"
+    );
+}
+
+/// Renaming a key is only safe because [`Allowlist`] walks values and never key
+/// names. It does, and this is what keeps that true: whatever the turns arm's
+/// keys are called, its two medians and its percentage stay quotable, or the
+/// guard drops the one honest sentence about them.
+#[test]
+fn the_turns_arms_figures_are_quotable_under_the_new_keys() {
+    let entry = saver_entry();
+    let a = saver_that_moved_turns();
+    let allow = Allowlist::from_facts(&Facts::savers(&[(&entry, &a)]));
+    assert!(allow.offenders("2.6 turns a session, down from 4").is_empty());
+    assert!(allow.offenders("35% fewer turns per session").is_empty());
+}
+
+/// The other half of the signed-percentage bug. `Allowlist` admits a figure by
+/// its digits and its scan never consumes a leading minus, so a sheet carrying
+/// `-12` admitted no `12` and the guard dropped the one honest sentence about
+/// the regression as a fabricated number.
+#[test]
+fn the_guard_accepts_a_restatement_of_a_regression() {
+    let f = saver_facts();
+    assert!(Allowlist::from_facts(&f)
+        .offenders("12% more output a turn")
+        .is_empty());
+    let raw = r#"[{"insight_id":"saver:sweep","headline":"Sweep costs you 12% more output",
+                   "why":"Turn it off on this workload: the comparison went the wrong way."}]"#;
+    let got = accept_savers(raw, &f).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].insight_id, "saver:sweep");
+}
+
+/// The prompt shows one worked example of a line that would be rejected, and a
+/// small model pastes it straight back with a real saver's id on it.
+///
+/// Needle and prompt line are now built from the same two constants, so this
+/// cannot go stale the way the hand-copied version did: for a while the guard
+/// was matching a sentence that had been edited out of the prompt entirely, and
+/// nothing failed.
+#[test]
+fn the_prompts_worked_example_pasted_back_is_rejected() {
+    let f = saver_facts();
+    let raw = format!(
+        r#"[{{"insight_id":"saver:sweep","headline":"{EXAMPLE_HEADLINE}","why":"{EXAMPLE_WHY} Sweep is the saver."}}]"#
+    );
+    assert!(accept_savers(&raw, &f).unwrap().is_empty());
 }
 
 #[test]
 fn garbage_fails_closed_rather_than_panicking() {
-    let f = Facts::build(&ledger(), &findings(), None);
+    let f = facts();
     assert!(accept("I refuse to answer.", &f).is_err());
     assert!(accept("", &f).is_err());
     // Valid JSON of the wrong shape is an error, not a silent empty success.

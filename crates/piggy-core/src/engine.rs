@@ -584,10 +584,16 @@ pub struct RestoreReport {
 /// clears the saver ledger. Always safe to run.
 pub fn restore_defaults() -> Result<RestoreReport> {
     let mut state = PiggyState::load()?;
+    let swept = crate::sweep::restore_all(&mut state)?;
     let mut report = RestoreReport {
-        swept_restored: crate::sweep::restore_all(&mut state)?,
+        swept_restored: swept.restored,
         ..Default::default()
     };
+    for f in swept.failures {
+        report
+            .messages
+            .push(format!("could not restore '{}': {}", f.id, f.reason));
+    }
 
     let settings_path = config::claude_settings_path();
     let pre_piggy = config::backups_dir().join("pre-piggy.json");
@@ -725,6 +731,7 @@ impl InstallCtx<'_> {
             "create_venv" => self.step_create_venv(step),
             "pip_install" => self.step_pip_install(step),
             "write_launcher" => self.step_write_launcher(step),
+            "run_plugin_script" => self.step_run_plugin_script(step),
             "builtin_enable" => Ok(()), // sweep: state bookkeeping only (recorded on insert)
             other => bail!("unknown install step '{other}' - catalog is newer than Piggy"),
         }
@@ -913,6 +920,26 @@ impl InstallCtx<'_> {
         )?;
         resync_settings_hash(&self.settings_path, state)?;
         Ok(())
+    }
+
+    /// Run a script the plugin itself ships, after its `claude_cli` install
+    /// steps have put it on disk. For savers that install inert and need their
+    /// own documented activation call (honey's `honey-state.js set <mode>`)
+    /// rather than Piggy writing the saver's private state file itself.
+    fn step_run_plugin_script(&mut self, step: &Value) -> Result<()> {
+        let (runner, script, args) = plugin_script_call(step)?;
+        let ignore = step
+            .get("ignoreFailure")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        match run_plugin_script(self.entry, runner, script, &args) {
+            Ok(()) => Ok(()),
+            Err(e) if ignore => {
+                self.warnings.push(format!("{runner} {script} failed: {e}"));
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn step_require_binary(&mut self, step: &Value) -> Result<()> {
@@ -1236,13 +1263,13 @@ fn run_uninstall_step(
             Ok(Some(format!("ran claude {}", args.join(" "))))
         }
         "run_plugin_script" => {
-            let script = step
-                .get("script")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("run_plugin_script: missing 'script'"))?;
-            let runner = step.get("runner").and_then(Value::as_str).unwrap_or("node");
-            run_plugin_script(entry, runner, script)?;
-            Ok(Some(format!("ran {runner} {script}")))
+            let (runner, script, args) = plugin_script_call(step)?;
+            run_plugin_script(entry, runner, script, &args)?;
+            Ok(Some(
+                format!("ran {runner} {script} {}", args.join(" "))
+                    .trim_end()
+                    .to_string(),
+            ))
         }
         "verify_no_setting" => {
             let key = step.get("path").and_then(Value::as_str).unwrap_or("");
@@ -1261,9 +1288,15 @@ fn run_uninstall_step(
             Ok(None)
         }
         "builtin_disable" => {
-            // Sweep off: restore every item Sweep disabled, then drop them.
-            let restored = crate::sweep::restore_all(state)?;
-            Ok(Some(format!("restored {restored} swept item(s)")))
+            // Sweep off: restore every item Sweep disabled and drop the ones
+            // that came back. Any that fail to restore stay on the list, with
+            // the reason reported, so the snapshot is not lost with them.
+            let outcome = crate::sweep::restore_all(state)?;
+            let mut msg = format!("restored {} swept item(s)", outcome.restored);
+            for f in outcome.failures {
+                msg.push_str(&format!("; could not restore '{}': {}", f.id, f.reason));
+            }
+            Ok(Some(msg))
         }
         other => bail!("unknown uninstall step '{other}' - catalog is newer than Piggy"),
     }
@@ -1704,7 +1737,7 @@ fn set_plugin_enabled_via_cli(settings_path: &Path, plugin: &str, on: bool) -> R
     }
 }
 
-fn run_plugin_script(entry: &Entry, runner: &str, script: &str) -> Result<()> {
+fn run_plugin_script(entry: &Entry, runner: &str, script: &str, args: &[String]) -> Result<()> {
     // Locate the plugin's install dir from installed_plugins.json.
     let plugin = plugin_ref(entry);
     let ledger = config::installed_plugins_path();
@@ -1726,6 +1759,7 @@ fn run_plugin_script(entry: &Entry, runner: &str, script: &str) -> Result<()> {
     let script_path = dir.join(script);
     let status = Command::new(runner)
         .arg(&script_path)
+        .args(args)
         .status()
         .with_context(|| format!("running {runner} {}", script_path.display()))?;
     if !status.success() {
@@ -1736,6 +1770,27 @@ fn run_plugin_script(entry: &Entry, runner: &str, script: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A `run_plugin_script` step's `(runner, script, args)`. `args` is optional -
+/// omitted means invoke the script bare, which is how the pre-args catalogs
+/// (ponytail's uninstall) are written.
+fn plugin_script_call(step: &Value) -> Result<(&str, &str, Vec<String>)> {
+    let script = step
+        .get("script")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("run_plugin_script: missing 'script'"))?;
+    let runner = step.get("runner").and_then(Value::as_str).unwrap_or("node");
+    let args = step
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((runner, script, args))
 }
 
 /// The `plugin@marketplace` reference for a plugin saver.
@@ -1989,13 +2044,18 @@ fn expand_str(s: &str) -> String {
     let piggy_bin = config::piggy_bin_dir().to_string_lossy().into_owned();
     let piggy_home = config::piggy_home().to_string_lossy().into_owned();
     let claude_skills = config::claude_skills_dir().to_string_lossy().into_owned();
+    let claude_dir = config::claude_dir().to_string_lossy().into_owned();
     let mut out = s
         .replace("${PIGGY_BIN}", &piggy_bin)
         .replace("${PIGGY_HOME}", &piggy_home)
         // Skill savers write inside Claude's own config tree, not Piggy's, so
         // they need the (env-overridable) skills dir — never a literal ~/.claude,
         // which would escape a sandboxed test.
-        .replace("${CLAUDE_SKILLS}", &claude_skills);
+        .replace("${CLAUDE_SKILLS}", &claude_skills)
+        // Same reasoning one level up: savers that drop state files directly in
+        // the Claude config root (honey's `.honey-active`) need cleaning up on
+        // uninstall, and the path must stay env-overridable for tests.
+        .replace("${CLAUDE_DIR}", &claude_dir);
     // Defensive: map any literal `~/.piggy` to the (env-overridable) piggy home,
     // so a catalog that hard-codes `~/.piggy/...` can never escape the sandbox in
     // tests or write outside PIGGY_HOME in production.

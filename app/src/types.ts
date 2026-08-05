@@ -15,6 +15,12 @@ export interface Streams {
 
 export type BaselineKind = "holdout" | "pre_install" | "none";
 
+/** Why `Headline.value` is null, when it is. `no_data` is "nothing comparable to
+ *  divide yet"; `withheld_cost_more` is "the data is in, and the estimate was
+ *  deliberately not published because the savers came out behind a baseline
+ *  Piggy did not randomize". Only the second one is a finding. */
+export type MultiplierState = "shown" | "no_data" | "withheld_cost_more";
+
 /** One stream's side of the headline comparison: the two medians the delta is a
  *  ratio of, so Proof can draw the comparison rather than assert its result. */
 export interface HeadlineStream {
@@ -33,6 +39,13 @@ export interface HeadlineStream {
    *  delta is always safe to print; `kind` says whether it may be called
    *  measured. */
   delta: number | null;
+  /** What the row means when there is no delta, in one sentence: still
+   *  gathering, too small to compare, measured and flat, or too noisy to call.
+   *  Null when `delta` is set, because then the number says it. */
+  note?: string | null;
+  /** The state `note` is prose for: "delta" | "waiting" | "quiet" |
+   *  "no_change" | "inconclusive". Branch on this, never on the sentence. */
+  reading?: string;
 }
 
 export interface Headline {
@@ -52,11 +65,23 @@ export interface Headline {
    *  `nHoldout`, which is 0 unless the baseline IS the holdout. */
   nBaseline: number;
   baselineKind: BaselineKind;
-  /** False once the ON arm leans on hand-pinned sessions. This is the blocker
-   *  the user can actually undo, so the UI leads with it. */
+  /** False once the ON arm leans on hand-pinned sessions. Never read it without
+   *  `nFullOnRandomized`: on its own it cannot tell "nothing is rotating" from
+   *  "rotation is running and the arm is at 5 of 10", and those want opposite
+   *  words on screen. */
   onRandomized: boolean;
+  /** How much of `nFullOn` is measured-eligible: current saver set, every saver
+   *  on because the scheduler chose it, before the hand-set sessions are pooled
+   *  in. This is the count the sample gate is applied to, so it is the only
+   *  honest progress figure for a pooled arm - `nFullOn` can sit in the
+   *  thousands while this holds five. */
+  nFullOnRandomized: number;
   /** False when a pinned saver rode through the holdout. */
   baselineClean: boolean;
+  /** Why `value` is null, when it is. `note` names one blocker in one sentence
+   *  and the randomization gap outranks this one, so without this field a
+   *  withheld estimate is indistinguishable from a thin one. */
+  multiplierState: MultiplierState;
   /** Sessions needed on EACH arm before a measured claim (MIN_GROUP). */
   minGroup: number;
   streams: HeadlineStream[];
@@ -66,6 +91,34 @@ export interface Headline {
    *  green on all four streams while costing more in total. Null when the store
    *  had no attribution bundle. */
   turns: HeadlineStream | null;
+  /** What the experiment is still waiting for, when sample size is what is
+   *  holding it up. Null once both arms are full, in which case the blocker is
+   *  something else and `note` is the thing to show. */
+  waiting: Waiting | null;
+  /** Sessions the ON arm gained from an earlier saver set that differed only by
+   *  savers measured as doing nothing. 0 in the normal case. Non-zero always
+   *  means the figure is capped at `estimated`: same treatment, different
+   *  weeks. */
+  nCarried: number;
+  /** The null savers that made the fold-in legal. Empty when `nCarried` is 0. */
+  carriedSavers: string[];
+}
+
+/** The wait, in the terms the Proof screen needs to explain itself.
+ *
+ *  `since` on the ON arm is the fact a user cannot deduce: the ON arm counts
+ *  only sessions running the saver set they have NOW, so installing or removing
+ *  one saver silently restarts it at zero. Without the date, a count that reset
+ *  yesterday is indistinguishable from one that has been stuck for a month. */
+export interface Waiting {
+  arm: "on" | "baseline";
+  have: number;
+  need: number;
+  /** RFC3339 timestamp this arm's count started from. */
+  since: string | null;
+  /** Days left at the pace observed so far, null when there is no pace to
+   *  extrapolate from. The UI says "too early to say" rather than guessing. */
+  daysLeft: number | null;
 }
 
 export interface StatsOverview {
@@ -170,6 +223,18 @@ export interface SaverRow {
   licenseNote: string | null;
   ordering: number;
   badge: Badge;
+  /** This saver's own per-stream breakdown, same shape and gating as the
+   *  headline's (`badge` is only the output stream). Empty until it has
+   *  attribution; absent in fixtures. */
+  streams?: HeadlineStream[];
+  /** Turns per session, on vs off - the denominator the streams divide by. */
+  turns?: HeadlineStream | null;
+  /** The one-line learning across all five arms, so the panel leads with the
+   *  finding rather than five rows of medians. */
+  summary?: string | null;
+  /** What the summary does not cover: a thin arm, or an uncomparable turn count
+   *  under a per-turn saving. Null when the comparison hides nothing. */
+  caveat?: string | null;
   /** True when the saver exposes user-tunable options (shows Configure). */
   configurable: boolean;
   /** Wrapper-model savers only: the command that starts a session through this
@@ -269,6 +334,14 @@ export interface Doctor {
   checks: DoctorCheck[];
 }
 
+/** The About screen's system table. `database` is null before the first index. */
+export interface SystemInfo {
+  version: string;
+  arch: string;
+  dataDir: string;
+  database: string | null;
+}
+
 export interface Environment {
   claudeInstalled: boolean;
   codexInstalled: boolean;
@@ -340,6 +413,45 @@ export interface LedgerOverview {
   sessions: number;
   sources: LedgerSource[];
   projects: LedgerProject[];
+  empty: boolean;
+}
+
+/** One row of the task table: a project's spend, its outcome, and its history. */
+export interface TaskRow {
+  project: string;
+  name: string;
+  sessions: number;
+  floorTokens: number;
+  workTokens: number;
+  totalTokens: number;
+  /** Share of the window's cache-write tokens, 0-1. */
+  share: number;
+  /** User prompts recorded. `0` means the logs carry no task boundary (they
+   *  predate `promptId`), NOT that no work happened - render it as missing. */
+  tasks: number;
+  turns: number;
+  /** Null when no tasks were recorded, so the column reads "no data" rather
+   *  than showing an average over nothing. */
+  turnsPerTask: number | null;
+  toolErrors: number;
+  failedTasks: number;
+  /** Share of tasks that hit at least one tool error, or null when unrecorded. */
+  failureRate: number | null;
+  /** Cache-write tokens per day, oldest first. The sparkline draws THIS or
+   *  draws nothing: it is never inferred from a badge or an aggregate. */
+  daily: number[];
+  /** Change vs the prior equal-length window, as a fraction. Null when there is
+   *  no prior window (all-time) or it held nothing. */
+  delta: number | null;
+}
+
+export interface TaskTable {
+  period: Period;
+  periodLabel: string;
+  rows: TaskRow[];
+  /** The whole window recorded no task boundaries. The UI explains that instead
+   *  of showing a column of dashes with no reason. */
+  tasksUnrecorded: boolean;
   empty: boolean;
 }
 

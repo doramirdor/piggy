@@ -7,6 +7,7 @@ import { Ledger } from "./screens/Ledger";
 import { Savers } from "./screens/Savers";
 import { Proof } from "./screens/Proof";
 import { Settings } from "./screens/Settings";
+import { About } from "./screens/About";
 import { NoClaude, FirstRun } from "./screens/EmptyStates";
 import { PiggyMark } from "./components/PiggyMark";
 import { usePageTurn } from "./lib/motion";
@@ -60,7 +61,11 @@ export default function App() {
   if (env && !env.hasData) return <FirstRun />;
 
   const screen =
-    tab === "spend" ? <Ledger /> : tab === "savers" ? <Savers /> : tab === "proof" ? <Proof /> : <Settings />;
+    tab === "spend" ? <Ledger />
+    : tab === "savers" ? <Savers />
+    : tab === "proof" ? <Proof />
+    : tab === "about" ? <About />
+    : <Settings />;
 
   return (
     <div className="win">

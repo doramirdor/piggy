@@ -1,20 +1,20 @@
 {
-  "generatedAt": "2026-08-02T20:14:32.029Z",
-  "since": "2026-07-26T20:14:29.435Z",
+  "generatedAt": "2026-08-05T11:22:40.394Z",
+  "since": "2026-07-29T11:22:36.715Z",
   "ledger": {
     "periodLabel": "Last 7 days",
-    "totalTokens": 279881293,
-    "removableTokens": 103087264,
-    "overhead": 0.8156001944724472,
-    "headroom": 1.3370016033280148,
-    "removableShare": 0.25205774061090347,
-    "sessions": 7783,
+    "totalTokens": 223919430,
+    "removableTokens": 79121789,
+    "overhead": 0.8767204927236552,
+    "headroom": 1.3470955160998197,
+    "removableShare": 0.25766214195764575,
+    "sessions": 5637,
     "sources": [
       {
         "kind": "__floor",
         "label": "session floor (system prompt + tool schemas)",
-        "tokens": 129599623,
-        "share": 0.46305210902394967,
+        "tokens": 120277930,
+        "share": 0.5371482501540844,
         "removable": false,
         "isFloor": true,
         "estimated": false
@@ -22,8 +22,8 @@
       {
         "kind": "floor:skill_listing",
         "label": "skill_listing (startup)",
-        "tokens": 47254517,
-        "share": 0.1688377114936367,
+        "tokens": 36877306,
+        "share": 0.1646900673157305,
         "removable": true,
         "isFloor": true,
         "estimated": true
@@ -31,8 +31,8 @@
       {
         "kind": "__conversation",
         "label": "conversation growth",
-        "tokens": 47194406,
-        "share": 0.16862293829691577,
+        "tokens": 24519711,
+        "share": 0.10950238217380243,
         "removable": false,
         "isFloor": false,
         "estimated": false
@@ -40,8 +40,8 @@
       {
         "kind": "floor:hook_success",
         "label": "hook_success (startup)",
-        "tokens": 30369251,
-        "share": 0.10850761290430368,
+        "tokens": 22159155,
+        "share": 0.09896039392383234,
         "removable": true,
         "isFloor": true,
         "estimated": true
@@ -49,8 +49,8 @@
       {
         "kind": "floor:agent_listing_delta",
         "label": "agent_listing_delta (startup)",
-        "tokens": 15460270,
-        "share": 0.055238668630847004,
+        "tokens": 13560397,
+        "share": 0.06055926901921821,
         "removable": true,
         "isFloor": true,
         "estimated": true
@@ -58,53 +58,26 @@
       {
         "kind": "floor:deferred_tools_delta",
         "label": "deferred_tools_delta (startup)",
-        "tokens": 4747158,
-        "share": 0.016961326529243953,
+        "tokens": 3174691,
+        "share": 0.014177827265816102,
         "removable": true,
         "isFloor": true,
-        "estimated": true
-      },
-      {
-        "kind": "deferred_tools_delta",
-        "label": "deferred_tools_delta",
-        "tokens": 1842360,
-        "share": 0.006582647879935298,
-        "removable": true,
-        "isFloor": false,
         "estimated": true
       },
       {
         "kind": "hook_success",
         "label": "hook_success",
-        "tokens": 1717170,
-        "share": 0.006135351104012515,
+        "tokens": 1493692,
+        "share": 0.006670667212755946,
         "removable": true,
         "isFloor": false,
         "estimated": true
       },
       {
-        "kind": "floor:hook_additional_context",
-        "label": "hook_additional_context (startup)",
-        "tokens": 672305,
-        "share": 0.002402107667839022,
-        "removable": true,
-        "isFloor": true,
-        "estimated": true
-      },
-      {
-        "kind": "edited_text_file",
-        "label": "edited_text_file",
-        "tokens": 299066,
-        "share": 0.001068545870981095,
-        "removable": true,
-        "isFloor": false,
-        "estimated": true
-      },
-      {
-        "kind": "async_hook_response",
-        "label": "async_hook_response",
-        "tokens": 182739,
-        "share": 0.0006529160918232574,
+        "kind": "deferred_tools_delta",
+        "label": "deferred_tools_delta",
+        "tokens": 1065745,
+        "share": 0.004759502111987334,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -112,26 +85,53 @@
       {
         "kind": "floor:mcp_instructions_delta",
         "label": "mcp_instructions_delta (startup)",
-        "tokens": 167073,
-        "share": 0.0005969423615604062,
+        "tokens": 193394,
+        "share": 0.000863676725150649,
         "removable": true,
         "isFloor": true,
         "estimated": true
       },
       {
-        "kind": "mcp_instructions_delta",
-        "label": "mcp_instructions_delta",
-        "tokens": 132022,
-        "share": 0.0004717071247773605,
+        "kind": "edited_text_file",
+        "label": "edited_text_file",
+        "tokens": 176526,
+        "share": 0.000788346058222817,
         "removable": true,
         "isFloor": false,
         "estimated": true
       },
       {
+        "kind": "async_hook_response",
+        "label": "async_hook_response",
+        "tokens": 105009,
+        "share": 0.0004689588572103814,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "mcp_instructions_delta",
+        "label": "mcp_instructions_delta",
+        "tokens": 78455,
+        "share": 0.00035037155998476774,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "floor:hook_additional_context",
+        "label": "hook_additional_context (startup)",
+        "tokens": 65698,
+        "share": 0.0002934001752326719,
+        "removable": true,
+        "isFloor": true,
+        "estimated": true
+      },
+      {
         "kind": "skill_listing",
         "label": "skill_listing",
-        "tokens": 72586,
-        "share": 0.00025934566480654355,
+        "tokens": 50204,
+        "share": 0.00022420564396756457,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -139,26 +139,8 @@
       {
         "kind": "task_reminder",
         "label": "task_reminder",
-        "tokens": 47674,
-        "share": 0.0001703365004820097,
-        "removable": true,
-        "isFloor": false,
-        "estimated": true
-      },
-      {
-        "kind": "hook_additional_context",
-        "label": "hook_additional_context",
-        "tokens": 46725,
-        "share": 0.00016694577725850367,
-        "removable": true,
-        "isFloor": false,
-        "estimated": true
-      },
-      {
-        "kind": "queued_command",
-        "label": "queued_command",
-        "tokens": 30917,
-        "share": 0.00011046468904229337,
+        "tokens": 32853,
+        "share": 0.00014671795118449525,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -166,17 +148,26 @@
       {
         "kind": "hook_error_during_execution",
         "label": "hook_error_during_execution",
-        "tokens": 15050,
-        "share": 0.000053772797169405674,
+        "tokens": 24665,
+        "share": 0.00011015122716237711,
         "removable": true,
         "isFloor": false,
         "estimated": true
       },
       {
-        "kind": "goal_status",
-        "label": "goal_status",
-        "tokens": 14473,
-        "share": 0.00005171120886596733,
+        "kind": "queued_command",
+        "label": "queued_command",
+        "tokens": 23633,
+        "share": 0.0001055424265772738,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_additional_context",
+        "label": "hook_additional_context",
+        "tokens": 22360,
+        "share": 0.00009985734601057175,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -184,26 +175,8 @@
       {
         "kind": "agent_listing_delta",
         "label": "agent_listing_delta",
-        "tokens": 11391,
-        "share": 0.000040699397512073094,
-        "removable": true,
-        "isFloor": false,
-        "estimated": true
-      },
-      {
-        "kind": "hook_system_message",
-        "label": "hook_system_message",
-        "tokens": 1534,
-        "share": 0.000005480895073612512,
-        "removable": true,
-        "isFloor": false,
-        "estimated": true
-      },
-      {
-        "kind": "command_permissions",
-        "label": "command_permissions",
-        "tokens": 756,
-        "share": 0.000002701145160137587,
+        "tokens": 6643,
+        "share": 0.000029666920820582653,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -211,35 +184,62 @@
       {
         "kind": "floor:file",
         "label": "file (startup)",
-        "tokens": 520,
-        "share": 0.0000018579305334279701,
+        "tokens": 5718,
+        "share": 0.000025535970683741023,
         "removable": true,
         "isFloor": true,
+        "estimated": true
+      },
+      {
+        "kind": "goal_status",
+        "label": "goal_status",
+        "tokens": 2653,
+        "share": 0.000011848011581665781,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "hook_system_message",
+        "label": "hook_system_message",
+        "tokens": 1020,
+        "share": 0.000004555209880625366,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "command_permissions",
+        "label": "command_permissions",
+        "tokens": 608,
+        "share": 0.0000027152623602159044,
+        "removable": true,
+        "isFloor": false,
         "estimated": true
       },
       {
         "kind": "floor:goal_status",
         "label": "goal_status (startup)",
-        "tokens": 471,
-        "share": 0.000001682856310085719,
+        "tokens": 416,
+        "share": 0.0000018578110885687767,
         "removable": true,
         "isFloor": true,
-        "estimated": true
-      },
-      {
-        "kind": "read_truncation_notice",
-        "label": "read_truncation_notice",
-        "tokens": 433,
-        "share": 0.0000015470844634121366,
-        "removable": true,
-        "isFloor": false,
         "estimated": true
       },
       {
         "kind": "hook_non_blocking_error",
         "label": "hook_non_blocking_error",
         "tokens": 325,
-        "share": 0.0000011612065833924812,
+        "share": 0.000001451414912944357,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "read_truncation_notice",
+        "label": "read_truncation_notice",
+        "tokens": 272,
+        "share": 0.000001214722634833431,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -247,8 +247,17 @@
       {
         "kind": "date_change",
         "label": "date_change",
-        "tokens": 225,
-        "share": 8.039122500409487e-7,
+        "tokens": 165,
+        "share": 7.368721865717504e-7,
+        "removable": true,
+        "isFloor": false,
+        "estimated": true
+      },
+      {
+        "kind": "directory",
+        "label": "directory",
+        "tokens": 87,
+        "share": 3.8853260746510477e-7,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -256,8 +265,8 @@
       {
         "kind": "ultra_effort_enter",
         "label": "ultra_effort_enter",
-        "tokens": 204,
-        "share": 7.288804400371267e-7,
+        "tokens": 51,
+        "share": 2.277604940312683e-7,
         "removable": true,
         "isFloor": false,
         "estimated": true
@@ -265,17 +274,8 @@
       {
         "kind": "floor:command_permissions",
         "label": "command_permissions (startup)",
-        "tokens": 32,
-        "share": 1.1433418667249046e-7,
-        "removable": true,
-        "isFloor": true,
-        "estimated": true
-      },
-      {
-        "kind": "floor:ultra_effort_enter",
-        "label": "ultra_effort_enter (startup)",
-        "tokens": 17,
-        "share": 6.074003666976056e-8,
+        "tokens": 48,
+        "share": 2.1436281791178194e-7,
         "removable": true,
         "isFloor": true,
         "estimated": true
@@ -285,56 +285,47 @@
       {
         "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/eval/qwen_bench",
         "name": "qwen_bench",
-        "sessions": 5657,
-        "msgsPerSession": 1.1171999292911436,
-        "floorTokens": 196598592,
+        "sessions": 5541,
+        "msgsPerSession": 1.1196534921494314,
+        "floorTokens": 192555334,
         "workTokens": 1955018,
-        "overhead": 0.9901537020656537
-      },
-      {
-        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev",
-        "name": "getnadir.dev",
-        "sessions": 117,
-        "msgsPerSession": 31.00854700854701,
-        "floorTokens": 6860620,
-        "workTokens": 27176493,
-        "overhead": 0.201562923388949
-      },
-      {
-        "project": "/private/tmp/claude-501/-Users-dor-Documents-code-Nadir-getnadir-dev/819fbd25-6ba9-48f1-bdb4-ba9ad95e2cce/scratchpad/qwen_bench",
-        "name": "qwen_bench",
-        "sessions": 1926,
-        "msgsPerSession": 1.346313603322949,
-        "floorTokens": 21985088,
-        "workTokens": 1473119,
-        "overhead": 0.9372024042587739
+        "overhead": 0.9899490285226568
       },
       {
         "project": "/Users/dor/Documents/code/Stacked",
         "name": "Stacked",
-        "sessions": 30,
-        "msgsPerSession": 63.5,
-        "floorTokens": 1256874,
-        "workTokens": 10354708,
-        "overhead": 0.10824313172830369
+        "sessions": 40,
+        "msgsPerSession": 67.975,
+        "floorTokens": 1553071,
+        "workTokens": 14079126,
+        "overhead": 0.09935078223489635
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev",
+        "name": "getnadir.dev",
+        "sessions": 32,
+        "msgsPerSession": 67.75,
+        "floorTokens": 1460462,
+        "workTokens": 8360506,
+        "overhead": 0.14870855907482847
       },
       {
         "project": "/Users/dor/Documents/code/barber",
         "name": "barber",
-        "sessions": 34,
-        "msgsPerSession": 34.3235294117647,
-        "floorTokens": 963815,
-        "workTokens": 4435432,
-        "overhead": 0.1785091513687001
+        "sessions": 3,
+        "msgsPerSession": 114.33333333333333,
+        "floorTokens": 85318,
+        "workTokens": 773181,
+        "overhead": 0.09938043026258621
       },
       {
         "project": "/Users/dor/Documents/code/comma",
         "name": "comma",
         "sessions": 3,
-        "msgsPerSession": 291,
-        "floorTokens": 102936,
-        "workTokens": 4462139,
-        "overhead": 0.02254858901551453
+        "msgsPerSession": 48,
+        "floorTokens": 103029,
+        "workTokens": 427526,
+        "overhead": 0.19419098868166354
       },
       {
         "project": "/Users/dor/Documents/code/echo",
@@ -346,13 +337,13 @@
         "overhead": 0.022479318115316945
       },
       {
-        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/app/src",
+        "project": "/Users/dor/Documents/code/Stacked/app/src",
         "name": "src",
-        "sessions": 2,
-        "msgsPerSession": 95,
-        "floorTokens": 107951,
-        "workTokens": 416610,
-        "overhead": 0.20579303455651488
+        "sessions": 3,
+        "msgsPerSession": 64.33333333333333,
+        "floorTokens": 92026,
+        "workTokens": 342675,
+        "overhead": 0.21169953600290775
       },
       {
         "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a317238e4d97c1382",
@@ -364,13 +355,22 @@
         "overhead": 0.13850125365339822
       },
       {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/app/src",
+        "name": "src",
+        "sessions": 1,
+        "msgsPerSession": 88,
+        "floorTokens": 44490,
+        "workTokens": 175085,
+        "overhead": 0.2026186952066492
+      },
+      {
         "project": "/Users/dor/Documents/code/Nadir/NadirClaw",
         "name": "NadirClaw",
         "sessions": 5,
-        "msgsPerSession": 5.4,
-        "floorTokens": 187143,
-        "workTokens": 22244,
-        "overhead": 0.8937660886301442
+        "msgsPerSession": 6.2,
+        "floorTokens": 186494,
+        "workTokens": 28877,
+        "overhead": 0.865919738497755
       },
       {
         "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a0f82557655178dad",
@@ -391,6 +391,15 @@
         "overhead": 0.12750353495679498
       },
       {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/backend",
+        "name": "backend",
+        "sessions": 1,
+        "msgsPerSession": 93,
+        "floorTokens": 44921,
+        "workTokens": 102014,
+        "overhead": 0.3057202164222275
+      },
+      {
         "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/.claude/worktrees/inspiring-cerf-edeebe",
         "name": "inspiring-cerf-edeebe",
         "sessions": 1,
@@ -409,22 +418,13 @@
         "overhead": 0.1911339664427011
       },
       {
-        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/.claude/worktrees/objective-sanderson-4d119b",
-        "name": "objective-sanderson-4d119b",
-        "sessions": 1,
-        "msgsPerSession": 19,
-        "floorTokens": 41282,
-        "workTokens": 13654,
-        "overhead": 0.7514562399883501
-      },
-      {
         "project": "/Users/dor/Documents/code/Stacked/app",
         "name": "app",
         "sessions": 1,
-        "msgsPerSession": 1,
-        "floorTokens": 7737,
-        "workTokens": 0,
-        "overhead": 1
+        "msgsPerSession": 50,
+        "floorTokens": 30409,
+        "workTokens": 60030,
+        "overhead": 0.33623768506949436
       }
     ],
     "empty": false
@@ -433,140 +433,1227 @@
     {
       "id": "floor-dominates",
       "severity": "high",
-      "title": "82% of your tokens went to starting sessions",
-      "detail": "228,271,237 of 279,881,293 cache-write tokens were the session floor, across 7,783 sessions (29,329 per session before you typed anything).",
-      "tokens": 228271237,
+      "title": "88% of your tokens went to starting sessions",
+      "detail": "196,314,753 of 223,919,430 cache-write tokens were the session floor, across 5,637 sessions (34,826 per session before you typed anything).",
+      "tokens": 196314753,
       "action": "Fewer, longer sessions pay this once instead of many times. The per-project table shows which ones churn."
     },
     {
       "id": "churn:/Users/dor/Documents/code/Nadir/getnadir.dev/eval/qwen_bench",
       "severity": "high",
-      "title": "qwen_bench ran 5,657 sessions averaging 1.1 messages",
-      "detail": "196,598,592 tokens of session floor bought 1,955,018 tokens of work (99% overhead). Each of those sessions paid the full startup cost for about one exchange.",
-      "tokens": 196598592,
+      "title": "qwen_bench ran 5,541 sessions averaging 1.1 messages",
+      "detail": "192,555,334 tokens of session floor bought 1,955,018 tokens of work (99% overhead). Each of those sessions paid the full startup cost for about one exchange.",
+      "tokens": 192555334,
       "action": "If a script or harness drives this, reuse one session across iterations instead of starting a new one each time."
     },
     {
       "id": "floor-component:skill_listing",
       "severity": "high",
-      "title": "skill_listing costs ~6,071 tokens every session",
-      "detail": "47,254,517 in total across 7,783 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
-      "tokens": 47254517,
+      "title": "skill_listing costs ~6,542 tokens every session",
+      "detail": "36,877,306 in total across 5,637 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 36877306,
       "action": "If you don't need skill_listing in every project, scope or disable it and the floor shrinks by roughly that much per session."
     },
     {
       "id": "floor-component:hook_success",
       "severity": "high",
-      "title": "hook_success costs ~3,901 tokens every session",
-      "detail": "30,369,251 in total across 7,783 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
-      "tokens": 30369251,
+      "title": "hook_success costs ~3,931 tokens every session",
+      "detail": "22,159,155 in total across 5,637 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 22159155,
       "action": "If you don't need hook_success in every project, scope or disable it and the floor shrinks by roughly that much per session."
-    },
-    {
-      "id": "churn:/private/tmp/claude-501/-Users-dor-Documents-code-Nadir-getnadir-dev/819fbd25-6ba9-48f1-bdb4-ba9ad95e2cce/scratchpad/qwen_bench",
-      "severity": "high",
-      "title": "qwen_bench ran 1,926 sessions averaging 1.3 messages",
-      "detail": "21,985,088 tokens of session floor bought 1,473,119 tokens of work (94% overhead). Each of those sessions paid the full startup cost for about one exchange.",
-      "tokens": 21985088,
-      "action": "If a script or harness drives this, reuse one session across iterations instead of starting a new one each time."
     },
     {
       "id": "floor-component:agent_listing_delta",
       "severity": "notable",
-      "title": "agent_listing_delta costs ~1,986 tokens every session",
-      "detail": "15,460,270 in total across 7,783 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
-      "tokens": 15460270,
+      "title": "agent_listing_delta costs ~2,405 tokens every session",
+      "detail": "13,560,397 in total across 5,637 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 13560397,
       "action": "If you don't need agent_listing_delta in every project, scope or disable it and the floor shrinks by roughly that much per session."
     },
     {
       "id": "floor-component:deferred_tools_delta",
       "severity": "notable",
-      "title": "deferred_tools_delta costs ~609 tokens every session",
-      "detail": "4,747,158 in total across 7,783 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
-      "tokens": 4747158,
+      "title": "deferred_tools_delta costs ~563 tokens every session",
+      "detail": "3,174,691 in total across 5,637 sessions. It is loaded into context before your first message, so you pay it whether or not the session uses it.",
+      "tokens": 3174691,
       "action": "If you don't need deferred_tools_delta in every project, scope or disable it and the floor shrinks by roughly that much per session."
     },
     {
       "id": "per-turn-injections",
       "severity": "notable",
-      "title": "Per-turn injections cost 4,415,650 tokens (1.6%)",
-      "detail": "Across 18 kinds, largest is deferred_tools_delta. These are hooks, reminders and listings re-sent during a session rather than at startup.",
-      "tokens": 4415650,
+      "title": "Per-turn injections cost 3,084,966 tokens (1.4%)",
+      "detail": "Across 19 kinds, largest is hook_success. These are hooks, reminders and listings re-sent during a session rather than at startup.",
+      "tokens": 3084966,
       "action": "Trim the noisiest hooks if they fire on every tool call."
     }
   ],
+  "tasks": {
+    "periodLabel": "Last 7 days",
+    "rows": [
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/eval/qwen_bench",
+        "name": "qwen_bench",
+        "sessions": 5541,
+        "floorTokens": 192555334,
+        "workTokens": 1955018,
+        "totalTokens": 194510352,
+        "share": 0.8686608167000153,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          113029704,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": 0.32161531537158744
+      },
+      {
+        "project": "/Users/dor/Documents/code/Stacked",
+        "name": "Stacked",
+        "sessions": 40,
+        "floorTokens": 1553071,
+        "workTokens": 14079491,
+        "totalTokens": 15632562,
+        "share": 0.06981322039884862,
+        "tasks": 52,
+        "turns": 1651,
+        "turnsPerTask": 31.75,
+        "toolErrors": 96,
+        "failedTasks": 30,
+        "failureRate": 0.5769230769230769,
+        "daily": [
+          0,
+          2624137,
+          487927,
+          9929600,
+          1077244,
+          1513654,
+          0
+        ],
+        "delta": 6.872149646037931
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev",
+        "name": "getnadir.dev",
+        "sessions": 32,
+        "floorTokens": 1460462,
+        "workTokens": 8360506,
+        "totalTokens": 9820968,
+        "share": 0.043859311321716776,
+        "tasks": 110,
+        "turns": 1318,
+        "turnsPerTask": 11.981818181818182,
+        "toolErrors": 45,
+        "failedTasks": 28,
+        "failureRate": 0.2545454545454545,
+        "daily": [
+          793525,
+          5262985,
+          192665,
+          183355,
+          111419,
+          3062321,
+          214698
+        ],
+        "delta": -0.7987124028447538
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber",
+        "name": "barber",
+        "sessions": 3,
+        "floorTokens": 85318,
+        "workTokens": 773181,
+        "totalTokens": 858499,
+        "share": 0.00383395760075611,
+        "tasks": 21,
+        "turns": 156,
+        "turnsPerTask": 7.428571428571429,
+        "toolErrors": 9,
+        "failedTasks": 6,
+        "failureRate": 0.2857142857142857,
+        "daily": [
+          113964,
+          579272,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": -0.9311767792266328
+      },
+      {
+        "project": "/Users/dor/Documents/code/comma",
+        "name": "comma",
+        "sessions": 3,
+        "floorTokens": 103029,
+        "workTokens": 427526,
+        "totalTokens": 530555,
+        "share": 0.0023693974889535782,
+        "tasks": 14,
+        "turns": 144,
+        "turnsPerTask": 10.285714285714286,
+        "toolErrors": 7,
+        "failedTasks": 3,
+        "failureRate": 0.21428571428571427,
+        "daily": [
+          0,
+          0,
+          0,
+          387577,
+          0,
+          142978,
+          0
+        ],
+        "delta": -0.9170420885276332
+      },
+      {
+        "project": "/Users/dor/Documents/code/echo",
+        "name": "echo",
+        "sessions": 1,
+        "floorTokens": 11831,
+        "workTokens": 514475,
+        "totalTokens": 526306,
+        "share": 0.002350421944607443,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          526306,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/Stacked/app/src",
+        "name": "src",
+        "sessions": 3,
+        "floorTokens": 92026,
+        "workTokens": 342675,
+        "totalTokens": 434701,
+        "share": 0.0019413245711483436,
+        "tasks": 5,
+        "turns": 193,
+        "turnsPerTask": 38.6,
+        "toolErrors": 13,
+        "failedTasks": 3,
+        "failureRate": 0.6,
+        "daily": [
+          0,
+          0,
+          0,
+          0,
+          434701,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a317238e4d97c1382",
+        "name": "agent-a317238e4d97c1382",
+        "sessions": 2,
+        "floorTokens": 46677,
+        "workTokens": 290338,
+        "totalTokens": 337015,
+        "share": 0.0015050701524624028,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          337015,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/app/src",
+        "name": "src",
+        "sessions": 1,
+        "floorTokens": 44490,
+        "workTokens": 175085,
+        "totalTokens": 219575,
+        "share": 0.0009805966462232605,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          0,
+          0,
+          219575,
+          0,
+          0,
+          0
+        ],
+        "delta": -0.28004892027830786
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/NadirClaw",
+        "name": "NadirClaw",
+        "sessions": 5,
+        "floorTokens": 186494,
+        "workTokens": 28877,
+        "totalTokens": 215371,
+        "share": 0.0009618220666913347,
+        "tasks": 2,
+        "turns": 13,
+        "turnsPerTask": 6.5,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": 0,
+        "daily": [
+          0,
+          40823,
+          43051,
+          42264,
+          41283,
+          47950,
+          0
+        ],
+        "delta": -0.1474608408577208
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a0f82557655178dad",
+        "name": "agent-a0f82557655178dad",
+        "sessions": 1,
+        "floorTokens": 19911,
+        "workTokens": 173416,
+        "totalTokens": 193327,
+        "share": 0.0008633761030372505,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          193327,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-adde144976a78db40",
+        "name": "agent-adde144976a78db40",
+        "sessions": 1,
+        "floorTokens": 20289,
+        "workTokens": 138836,
+        "totalTokens": 159125,
+        "share": 0.0007106339124685247,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          159125,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/backend",
+        "name": "backend",
+        "sessions": 1,
+        "floorTokens": 44921,
+        "workTokens": 102014,
+        "totalTokens": 146935,
+        "share": 0.0006561947772415565,
+        "tasks": 1,
+        "turns": 93,
+        "turnsPerTask": 93,
+        "toolErrors": 4,
+        "failedTasks": 1,
+        "failureRate": 1,
+        "daily": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          146935
+        ],
+        "delta": -0.8851933082626283
+      },
+      {
+        "project": "/Users/dor/Documents/code/Nadir/getnadir.dev/.claude/worktrees/inspiring-cerf-edeebe",
+        "name": "inspiring-cerf-edeebe",
+        "sessions": 1,
+        "floorTokens": 40123,
+        "workTokens": 97378,
+        "totalTokens": 137501,
+        "share": 0.0006140636204137289,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          137501,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/barber/.claude/worktrees/agent-a8529349accde18de",
+        "name": "agent-a8529349accde18de",
+        "sessions": 1,
+        "floorTokens": 20368,
+        "workTokens": 86196,
+        "totalTokens": 106564,
+        "share": 0.0004759025435870911,
+        "tasks": 0,
+        "turns": 0,
+        "turnsPerTask": null,
+        "toolErrors": 0,
+        "failedTasks": 0,
+        "failureRate": null,
+        "daily": [
+          0,
+          106564,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "delta": null
+      },
+      {
+        "project": "/Users/dor/Documents/code/Stacked/app",
+        "name": "app",
+        "sessions": 1,
+        "floorTokens": 30409,
+        "workTokens": 60030,
+        "totalTokens": 90439,
+        "share": 0.00040389015182869383,
+        "tasks": 1,
+        "turns": 50,
+        "turnsPerTask": 50,
+        "toolErrors": 3,
+        "failedTasks": 1,
+        "failureRate": 1,
+        "daily": [
+          0,
+          0,
+          0,
+          0,
+          90439,
+          0,
+          0
+        ],
+        "delta": 10.689156003618974
+      }
+    ],
+    "tasksUnrecorded": false,
+    "empty": false
+  },
   "stats": {
     "periodLabel": "Last 7 days",
     "streams": {
-      "input": 246562,
-      "output": 12436684,
-      "cacheWrite": 295316277,
-      "cacheRead": 2293412093
+      "input": 90221,
+      "output": 7616739,
+      "cacheWrite": 241611077,
+      "cacheRead": 1990233905
     },
-    "totalTokens": 2601411616,
-    "sessions": 7790,
-    "costUsdEst": 851.83,
+    "totalTokens": 2239551942,
+    "sessions": 5646,
+    "costUsdEst": 527.31,
     "costEstimated": true,
     "fullyPriced": false,
-    "unpricedTokens": 2083803126,
+    "unpricedTokens": 2043831882,
     "headline": {
       "value": null,
       "label": "not_enough_data",
-      "nHoldout": 151,
+      "nHoldout": 155,
       "note": null,
-      "nFullOn": 9790,
-      "nBaseline": 151,
+      "nFullOn": 9792,
+      "nBaseline": 155,
       "baselineKind": "holdout",
       "onRandomized": false,
+      "nFullOnRandomized": 5,
       "baselineClean": true,
+      "multiplierState": "withheld_cost_more",
       "minGroup": 10,
+      "waiting": null,
+      "nCarried": 0,
+      "carriedSavers": [],
       "turns": {
         "stream": "turns per session",
         "kind": "measuring",
-        "nOn": 7456,
-        "nOff": 147,
+        "nOn": 7458,
+        "nOff": 151,
         "medianOn": 1,
         "medianOff": 2,
-        "delta": null
+        "delta": null,
+        "note": "too few turns per session to compare",
+        "reading": "quiet"
       },
       "streams": [
         {
           "stream": "input",
           "kind": "measuring",
-          "nOn": 7456,
-          "nOff": 147,
+          "nOn": 7458,
+          "nOff": 151,
           "medianOn": 2,
           "medianOff": 2,
-          "delta": null
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
         },
         {
           "stream": "output",
           "kind": "estimated",
-          "nOn": 7456,
-          "nOff": 147,
+          "nOn": 7458,
+          "nOff": 151,
           "medianOn": 163,
-          "medianOff": 331.3333333333333,
-          "delta": -0.5080482897384306
+          "medianOff": 341,
+          "delta": -0.5219941348973607,
+          "note": null,
+          "reading": "delta"
         },
         {
           "stream": "cache write",
           "kind": "measuring",
-          "nOn": 7456,
-          "nOff": 147,
-          "medianOn": 33293,
-          "medianOff": 13107,
-          "delta": null
+          "nOn": 7458,
+          "nOff": 151,
+          "medianOn": 33292,
+          "medianOff": 13032.75,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
         },
         {
           "stream": "cache read",
           "kind": "estimated",
-          "nOn": 7456,
-          "nOff": 147,
+          "nOn": 7458,
+          "nOff": 151,
           "medianOn": 18945,
-          "medianOff": 27361,
-          "delta": -0.30759109681663677
+          "medianOff": 27764,
+          "delta": -0.3176415502089036,
+          "note": null,
+          "reading": "delta"
         }
       ]
+    }
+  },
+  "saverStreams": {
+    "barber": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 5,
+          "nOff": 7,
+          "medianOn": 1.8888888888888888,
+          "medianOff": 1.9,
+          "delta": null,
+          "note": "needs 5 more sessions with it on and 3 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 5,
+          "nOff": 7,
+          "medianOn": 508.7826086956522,
+          "medianOff": 500.6,
+          "delta": null,
+          "note": "needs 5 more sessions with it on and 3 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 5,
+          "nOff": 7,
+          "medianOn": 4836.724867724868,
+          "medianOff": 3690.16,
+          "delta": null,
+          "note": "needs 5 more sessions with it on and 3 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 5,
+          "nOff": 7,
+          "medianOn": 101815.20588235294,
+          "medianOff": 102059.24,
+          "delta": null,
+          "note": "needs 5 more sessions with it on and 3 with it off",
+          "reading": "waiting"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 5,
+        "nOff": 7,
+        "medianOn": 68,
+        "medianOff": 49,
+        "delta": null,
+        "note": "needs 5 more sessions with it on and 3 with it off",
+        "reading": "waiting"
+      },
+      "summary": "still measuring: needs about 5 more sessions on the thinner side",
+      "caveat": null
+    },
+    "caveman": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 321,
+          "nOff": 10,
+          "medianOn": 1611.5238095238096,
+          "medianOff": 1.96,
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 321,
+          "nOff": 10,
+          "medianOn": 287.5,
+          "medianOff": 418.72368421052636,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 321,
+          "nOff": 10,
+          "medianOn": 3154.140625,
+          "medianOff": 3630.092052023121,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache read",
+          "kind": "estimated",
+          "nOn": 321,
+          "nOff": 10,
+          "medianOn": 22336.666666666668,
+          "medianOff": 78293.92499999999,
+          "delta": -0.7147075374409104,
+          "note": null,
+          "reading": "delta"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "estimated",
+        "nOn": 321,
+        "nOff": 10,
+        "medianOn": 6,
+        "medianOff": 22.5,
+        "delta": -0.7333333333333334,
+        "note": null,
+        "reading": "delta"
+      },
+      "summary": "71% less cache read and 73% fewer turns per session with it on",
+      "caveat": "one side of the comparison is thin: 11 sessions with it off, against 358 the other way"
+    },
+    "context-mode": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 0,
+        "nOff": 0,
+        "medianOn": 0,
+        "medianOff": 0,
+        "delta": null,
+        "note": "needs 10 more sessions with it on and 10 with it off",
+        "reading": "waiting"
+      },
+      "summary": "still measuring: needs about 10 more sessions on the thinner side",
+      "caveat": null
+    },
+    "cto": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 0,
+        "nOff": 0,
+        "medianOn": 0,
+        "medianOff": 0,
+        "delta": null,
+        "note": "needs 10 more sessions with it on and 10 with it off",
+        "reading": "waiting"
+      },
+      "summary": "still measuring: needs about 10 more sessions on the thinner side",
+      "caveat": null
+    },
+    "headroom": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 355,
+          "nOff": 7718,
+          "medianOn": 2501,
+          "medianOff": 2,
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 355,
+          "nOff": 7718,
+          "medianOn": 157.9,
+          "medianOff": 166,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache write",
+          "kind": "estimated",
+          "nOn": 355,
+          "nOff": 7718,
+          "medianOn": 3375,
+          "medianOff": 33221.5,
+          "delta": -0.898409162740996,
+          "note": null,
+          "reading": "delta"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 355,
+          "nOff": 7718,
+          "medianOn": 19983.6,
+          "medianOff": 18945,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 355,
+        "nOff": 7718,
+        "medianOn": 5,
+        "medianOff": 1,
+        "delta": null,
+        "note": "too few turns per session to compare",
+        "reading": "quiet"
+      },
+      "summary": "90% less cache write with it on",
+      "caveat": "the turn count could not be compared, so a per-turn saving here is not proof of a saving overall"
+    },
+    "nadir-route": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 11,
+          "medianOn": 0,
+          "medianOff": 1.8888888888888888,
+          "delta": null,
+          "note": "needs 10 more sessions with it on",
+          "reading": "waiting"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 11,
+          "medianOn": 0,
+          "medianOff": 507.15865384615387,
+          "delta": null,
+          "note": "needs 10 more sessions with it on",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 11,
+          "medianOn": 0,
+          "medianOff": 3690.16,
+          "delta": null,
+          "note": "needs 10 more sessions with it on",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 11,
+          "medianOn": 0,
+          "medianOff": 102059.24,
+          "delta": null,
+          "note": "needs 10 more sessions with it on",
+          "reading": "waiting"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 0,
+        "nOff": 11,
+        "medianOn": 0,
+        "medianOff": 50,
+        "delta": null,
+        "note": "needs 10 more sessions with it on",
+        "reading": "waiting"
+      },
+      "summary": "still measuring: needs about 10 more sessions on the thinner side",
+      "caveat": null
+    },
+    "ponytail": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "estimated",
+          "nOn": 7470,
+          "nOff": 604,
+          "medianOn": 2,
+          "medianOff": 1888.25,
+          "delta": -0.9989408182179267,
+          "note": null,
+          "reading": "delta"
+        },
+        {
+          "stream": "output",
+          "kind": "estimated",
+          "nOn": 7470,
+          "nOff": 604,
+          "medianOn": 163,
+          "medianOff": 406.70833333333337,
+          "delta": -0.5992213912508965,
+          "note": null,
+          "reading": "delta"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 7470,
+          "nOff": 604,
+          "medianOn": 33289.5,
+          "medianOff": 3532.5,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache read",
+          "kind": "estimated",
+          "nOn": 7470,
+          "nOff": 604,
+          "medianOn": 18945,
+          "medianOff": 21793,
+          "delta": -0.13068416464002197,
+          "note": null,
+          "reading": "delta"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 7470,
+        "nOff": 604,
+        "medianOn": 1,
+        "medianOff": 6,
+        "delta": null,
+        "note": "too few turns per session to compare",
+        "reading": "quiet"
+      },
+      "summary": "100% less input, 60% less output and 13% less cache read with it on",
+      "caveat": "the turn count could not be compared, so a per-turn saving here is not proof of a saving overall"
+    },
+    "rtk": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 56,
+          "nOff": 8068,
+          "medianOn": 1984.6666666666667,
+          "medianOff": 2,
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 56,
+          "nOff": 8068,
+          "medianOn": 139,
+          "medianOff": 166,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache write",
+          "kind": "estimated",
+          "nOn": 56,
+          "nOff": 8068,
+          "medianOn": 2223.5,
+          "medianOff": 33136.5,
+          "delta": -0.9328987672204366,
+          "note": null,
+          "reading": "delta"
+        },
+        {
+          "stream": "cache read",
+          "kind": "estimated",
+          "nOn": 56,
+          "nOff": 8068,
+          "medianOn": 17368.833333333332,
+          "medianOff": 18945,
+          "delta": -0.08319697369578616,
+          "note": null,
+          "reading": "delta"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 56,
+        "nOff": 8068,
+        "medianOn": 3,
+        "medianOff": 1,
+        "delta": null,
+        "note": "too few turns per session to compare",
+        "reading": "quiet"
+      },
+      "summary": "93% less cache write and 8% less cache read with it on",
+      "caveat": "the turn count could not be compared, so a per-turn saving here is not proof of a saving overall"
+    },
+    "sweep": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 7501,
+          "nOff": 117,
+          "medianOn": 2,
+          "medianOff": 2,
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 7501,
+          "nOff": 117,
+          "medianOn": 162,
+          "medianOff": 162,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 7501,
+          "nOff": 117,
+          "medianOn": 33280,
+          "medianOff": 33168,
+          "delta": null,
+          "note": "measured, and there is no change bigger than 1% either way",
+          "reading": "no_change"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 7501,
+          "nOff": 117,
+          "medianOn": 18945,
+          "medianOff": 18945,
+          "delta": null,
+          "note": "measured, and there is no change bigger than 1% either way",
+          "reading": "no_change"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 7501,
+        "nOff": 117,
+        "medianOn": 1,
+        "medianOff": 1,
+        "delta": null,
+        "note": "too few turns per session to compare",
+        "reading": "quiet"
+      },
+      "summary": "no change bigger than 1% on cache write and cache read; output still too noisy to call",
+      "caveat": null
+    },
+    "token-optimizer": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 12,
+          "nOff": 24,
+          "medianOn": 1.8879598662207357,
+          "medianOff": 1.900974025974026,
+          "delta": null,
+          "note": "under 10 tokens a turn on both sides, too small to compare",
+          "reading": "quiet"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 12,
+          "nOff": 24,
+          "medianOn": 759.8820153061224,
+          "medianOff": 726.2564018742509,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 12,
+          "nOff": 24,
+          "medianOn": 3957.4880459770116,
+          "medianOff": 4586.378048780488,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 12,
+          "nOff": 24,
+          "medianOn": 101365.58739130435,
+          "medianOff": 92208.7556620209,
+          "delta": null,
+          "note": "compared, but the result is still too noisy to call",
+          "reading": "inconclusive"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 12,
+        "nOff": 24,
+        "medianOn": 47.5,
+        "medianOff": 26,
+        "delta": null,
+        "note": "compared, but the result is still too noisy to call",
+        "reading": "inconclusive"
+      },
+      "summary": "output, cache write, cache read and turns per session still too noisy to call",
+      "caveat": null
+    },
+    "token-optimizer-mcp": {
+      "streams": [
+        {
+          "stream": "input",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "output",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache write",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        },
+        {
+          "stream": "cache read",
+          "kind": "measuring",
+          "nOn": 0,
+          "nOff": 0,
+          "medianOn": 0,
+          "medianOff": 0,
+          "delta": null,
+          "note": "needs 10 more sessions with it on and 10 with it off",
+          "reading": "waiting"
+        }
+      ],
+      "turns": {
+        "stream": "turns per session",
+        "kind": "measuring",
+        "nOn": 0,
+        "nOff": 0,
+        "medianOn": 0,
+        "medianOff": 0,
+        "delta": null,
+        "note": "needs 10 more sessions with it on and 10 with it off",
+        "reading": "waiting"
+      },
+      "summary": "still measuring: needs about 10 more sessions on the thinner side",
+      "caveat": null
     }
   },
   "sources": {
@@ -574,16 +1661,16 @@
       {
         "source": "claude-code",
         "interface": "gui",
-        "sessions": 7788,
-        "totalTokens": 2601363957,
-        "costUsdEst": 851.82039915,
+        "sessions": 5647,
+        "totalTokens": 2239604047,
+        "costUsdEst": 527.30663605,
         "toolPresent": true
       },
       {
         "source": "claude-code",
         "interface": "tui",
-        "sessions": 1,
-        "totalTokens": 28418,
+        "sessions": 0,
+        "totalTokens": 0,
         "costUsdEst": 0,
         "toolPresent": true
       },
@@ -604,7 +1691,7 @@
         "toolPresent": true
       }
     ],
-    "unknownTokens": 19241,
-    "unknownSessions": 1
+    "unknownTokens": 0,
+    "unknownSessions": 0
   }
 }

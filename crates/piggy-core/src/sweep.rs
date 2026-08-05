@@ -35,6 +35,10 @@ use crate::store::Store;
 /// Default look-back window for usage cross-reference.
 pub const DEFAULT_N_SESSIONS: usize = 50;
 
+/// Tool-call counts over the window, keyed by tool name then by the project the
+/// calls came from (see [`Store::recent_tool_usage`]).
+type ProjectUsage = BTreeMap<String, BTreeMap<String, u64>>;
+
 /// One candidate the sweep found.
 #[derive(Debug, Clone)]
 pub struct SweepItem {
@@ -44,7 +48,9 @@ pub struct SweepItem {
     pub kind: String,
     /// Server name / `plugin@marketplace` / skill dir name.
     pub id: String,
-    /// For MCP: the `~/.claude.json` project path it is configured under.
+    /// For MCP: the `~/.claude.json` project path it is configured under, or
+    /// `None` when it sits at the top level (user scope, loaded in every
+    /// session).
     pub source: Option<String>,
     /// Usage count for this item. Its meaning depends on [`Self::used_windowed`]:
     /// for MCP servers it is invocations over the last N sessions; for plugins and
@@ -60,6 +66,14 @@ pub struct SweepItem {
     pub est_tokens: u64,
     /// Whether Piggy recommends turning it off (unused in the window).
     pub recommend_disable: bool,
+    /// For a user-scope MCP server whose calls all come from one project: that
+    /// project. Keeping it at user scope makes every *other* session load its
+    /// schemas for nothing, so the fix is to move it, not to remove it.
+    ///
+    /// `None` whenever the item is not an MCP server, is already project-scoped,
+    /// is unused (that is [`Self::recommend_disable`]'s job), or is genuinely
+    /// spread across projects.
+    pub scope_to: Option<String>,
     /// Plain-language rationale.
     pub reason: String,
 }
@@ -77,6 +91,11 @@ impl SweepReport {
     /// Only the items Piggy recommends disabling.
     pub fn recommended(&self) -> impl Iterator<Item = &SweepItem> {
         self.items.iter().filter(|i| i.recommend_disable)
+    }
+    /// Items that are used, but only from one project while configured to load
+    /// everywhere. Sweep recommends re-scoping these rather than removing them.
+    pub fn rescope(&self) -> impl Iterator<Item = &SweepItem> {
+        self.items.iter().filter(|i| i.scope_to.is_some())
     }
     /// Sum of estimated tokens across recommended-disable items.
     pub fn est_recoverable_tokens(&self) -> u64 {
@@ -118,57 +137,118 @@ pub fn scan(store: &Store, n_sessions: usize) -> Result<SweepReport> {
 // Scanning each source
 // ---------------------------------------------------------------------------
 
-fn scan_mcp_servers(usage: &BTreeMap<String, u64>, out: &mut Vec<SweepItem>) -> Result<()> {
+fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()> {
     let path = config::claude_json_path();
     if !path.exists() {
         return Ok(());
     }
     let root: Value = serde_json::from_slice(&std::fs::read(&path)?)
         .with_context(|| format!("parsing {}", path.display()))?;
-    let Some(projects) = root.get("projects").and_then(Value::as_object) else {
-        return Ok(());
-    };
 
-    // Count MCP usage per (normalized) server name across the window.
-    let mut server_used: BTreeMap<String, u64> = BTreeMap::new();
-    for (name, n) in usage {
-        if let Some(server) = mcp_server_of(name) {
-            *server_used.entry(normalize(server)).or_insert(0) += n;
+    // Count MCP usage per (normalized) server name per project across the window.
+    let mut server_used: ProjectUsage = BTreeMap::new();
+    for (name, by_project) in usage {
+        let Some(server) = mcp_server_of(name) else {
+            continue;
+        };
+        let entry = server_used.entry(normalize(server)).or_default();
+        for (project, n) in by_project {
+            *entry.entry(project.clone()).or_insert(0) += n;
         }
     }
 
-    // Dedup servers by name (a server can be configured in multiple projects; we
-    // report the first project it appears under).
+    // Dedup servers by name (a server can be configured in several places; we
+    // report the first). User scope goes first because that is the copy every
+    // session pays for, so it is the one whose placement is worth judging.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (server, cfg) in root
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if seen.insert(server.clone()) {
+            out.push(mcp_item(server, cfg, None, &server_used));
+        }
+    }
+    let Some(projects) = root.get("projects").and_then(Value::as_object) else {
+        return Ok(());
+    };
     for (proj_path, proj) in projects {
         let Some(servers) = proj.get("mcpServers").and_then(Value::as_object) else {
             continue;
         };
         for (server, cfg) in servers {
-            if !seen.insert(server.clone()) {
-                continue;
+            if seen.insert(server.clone()) {
+                out.push(mcp_item(server, cfg, Some(proj_path.clone()), &server_used));
             }
-            let used = server_used.get(&normalize(server)).copied().unwrap_or(0);
-            let est = est_mcp_tokens(cfg);
-            let recommend = used == 0;
-            out.push(SweepItem {
-                idx: 0,
-                kind: "mcp".into(),
-                id: server.clone(),
-                source: Some(proj_path.clone()),
-                used,
-                used_windowed: true,
-                est_tokens: est,
-                recommend_disable: recommend,
-                reason: if recommend {
-                    "no tool calls in the look-back window".into()
-                } else {
-                    format!("{used} tool call(s) in the window")
-                },
-            });
         }
     }
     Ok(())
+}
+
+/// Share of a user-scope server's calls that must come from a single project
+/// before Sweep calls it that project's tool rather than a global one. Not 1.0:
+/// one stray call from another cwd should not keep a server loaded everywhere.
+const SCOPE_CONCENTRATION: f64 = 0.9;
+
+/// One configured MCP server as a sweep item. `source` is the project path it is
+/// configured under, or `None` for user scope.
+///
+/// The scope call only applies to user scope: a project-scoped server already
+/// costs nothing outside its own project, so telling its owner where it is used
+/// would be noise. A user-scope server is loaded by every session, which is only
+/// worth it if more than one project actually calls it.
+fn mcp_item(
+    server: &str,
+    cfg: &Value,
+    source: Option<String>,
+    server_used: &ProjectUsage,
+) -> SweepItem {
+    let by_project = server_used.get(&normalize(server)).map(fold_subpaths);
+    let used: u64 = by_project.as_ref().map(|m| m.values().sum()).unwrap_or(0);
+    // Sessions with no recorded project cannot vote on where a server belongs,
+    // so they count toward `used` but never toward the concentration.
+    let scope_to = match (&source, &by_project) {
+        (None, Some(by_project)) if used > 0 => by_project
+            .iter()
+            .filter(|(project, _)| !project.is_empty())
+            .max_by_key(|(_, n)| **n)
+            .filter(|(_, n)| **n as f64 >= used as f64 * SCOPE_CONCENTRATION)
+            .map(|(project, _)| project.clone()),
+        _ => None,
+    };
+    let n_projects = by_project
+        .as_ref()
+        .map(|m| m.keys().filter(|p| !p.is_empty()).count())
+        .unwrap_or(0);
+
+    let reason = if used == 0 {
+        "no tool calls in the look-back window".to_string()
+    } else if let Some(project) = &scope_to {
+        format!(
+            "{used} tool call(s) in the window, effectively all from {project}. \
+             It loads at user scope, so every other session pays for it too: \
+             re-add it in that project instead."
+        )
+    } else if source.is_none() {
+        format!("{used} tool call(s) across {n_projects} project(s) - global, keep at user scope")
+    } else {
+        format!("{used} tool call(s) in the window")
+    };
+
+    SweepItem {
+        idx: 0,
+        kind: "mcp".into(),
+        id: server.to_string(),
+        source,
+        used,
+        used_windowed: true,
+        est_tokens: est_mcp_tokens(cfg),
+        recommend_disable: used == 0,
+        scope_to,
+        reason,
+    }
 }
 
 fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
@@ -200,6 +280,7 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             used_windowed: false,
             est_tokens: 800, // estimate: a plugin's skills/commands manifest
             recommend_disable: recommend,
+            scope_to: None, // plugins have no per-project scope to move to
             reason: if recommend {
                 "enabled but never used (lifetime)".into()
             } else {
@@ -244,6 +325,7 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             used_windowed: false,
             est_tokens: est,
             recommend_disable: recommend,
+            scope_to: None, // skills are user-wide; Claude Code has no project scope for them
             reason: if recommend {
                 "installed but never invoked (lifetime)".into()
             } else {
@@ -322,6 +404,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
                 used_windowed: false,
                 est_tokens: 0, // hooks fire on events; they cost no context tokens
                 recommend_disable: false,
+                scope_to: None,
                 reason: "hook — fires on events, not usage-measurable and costs no context tokens (informational)".into(),
             });
         }
@@ -363,31 +446,28 @@ pub fn apply(
 }
 
 fn disable_mcp(state: &mut PiggyState, item: &SweepItem) -> Result<()> {
-    let source = item
-        .source
-        .clone()
-        .ok_or_else(|| anyhow!("mcp item has no source project"))?;
+    let source = item.source.clone();
     let path = config::claude_json_path();
     let mut snapshot = Value::Null;
     edit_json_atomic(&path, |root| {
-        if let Some(servers) = root
-            .get_mut("projects")
-            .and_then(|p| p.get_mut(&source))
-            .and_then(|proj| proj.get_mut("mcpServers"))
-            .and_then(Value::as_object_mut)
-        {
+        if let Some(servers) = mcp_servers_mut(root, source.as_deref(), false) {
             if let Some(removed) = servers.remove(&item.id) {
                 snapshot = removed;
             }
         }
+        Ok(())
     })?;
     if snapshot.is_null() {
-        bail!("MCP server '{}' not found under {}", item.id, source);
+        bail!(
+            "MCP server '{}' not found under {}",
+            item.id,
+            source.as_deref().unwrap_or("user scope")
+        );
     }
     state.sweep_disabled.push(SweepDisabled {
         kind: "mcp".into(),
         id: item.id.clone(),
-        source: Some(source),
+        source,
         snapshot,
         restore_path: None,
         disabled_at: chrono::Utc::now().to_rfc3339(),
@@ -444,47 +524,72 @@ fn disable_skill(state: &mut PiggyState, item: &SweepItem) -> Result<()> {
     Ok(())
 }
 
-/// Restore every Sweep-disabled item and clear the list. Returns the count
-/// restored. Used by the Sweep saver's uninstall (`builtin_disable`) and by
-/// `piggy restore-defaults`.
-pub fn restore_all(state: &mut PiggyState) -> Result<usize> {
+/// An item `restore_all` could not put back, and why. The reason names the
+/// file and missing key, which is what the user has to act on.
+pub struct RestoreFailure {
+    pub id: String,
+    pub reason: String,
+}
+
+pub struct RestoreOutcome {
+    pub restored: usize,
+    pub failures: Vec<RestoreFailure>,
+}
+
+/// Restore every Sweep-disabled item and clear the list. Items that fail stay
+/// in `state.sweep_disabled` (the snapshot is their only copy) and are reported
+/// in `failures`. Used by the Sweep saver's uninstall (`builtin_disable`), the
+/// app's Undo all, and `piggy restore-defaults`.
+pub fn restore_all(state: &mut PiggyState) -> Result<RestoreOutcome> {
     let items = std::mem::take(&mut state.sweep_disabled);
-    let mut restored = 0;
+    let mut outcome = RestoreOutcome {
+        restored: 0,
+        failures: Vec::new(),
+    };
     let mut failed: Vec<SweepDisabled> = Vec::new();
     for item in items {
         match restore_one(state, &item) {
-            Ok(()) => restored += 1,
-            Err(_) => failed.push(item),
+            Ok(()) => outcome.restored += 1,
+            Err(e) => {
+                eprintln!("warning: {e:#}");
+                outcome.failures.push(RestoreFailure {
+                    id: item.id.clone(),
+                    reason: format!("{e:#}"),
+                });
+                failed.push(item);
+            }
         }
     }
     // Keep any that could not be restored so the record is not lost.
     state.sweep_disabled = failed;
-    Ok(restored)
+    Ok(outcome)
 }
 
 fn restore_one(state: &mut PiggyState, item: &SweepDisabled) -> Result<()> {
     match item.kind.as_str() {
         "mcp" => {
-            let source = item
-                .source
-                .clone()
-                .ok_or_else(|| anyhow!("mcp restore missing source"))?;
+            // `None` is user scope, the top level of `~/.claude.json`. Entries
+            // written before Sweep looked there always carry a project path.
+            let source = item.source.clone();
             let path = config::claude_json_path();
             let id = item.id.clone();
             let snap = item.snapshot.clone();
+            let key = match &source {
+                None => "mcpServers".to_string(),
+                Some(project) => format!("projects.{project}.mcpServers"),
+            };
             edit_json_atomic(&path, |root| {
-                let servers = root
-                    .as_object_mut()
-                    .and_then(|o| o.get_mut("projects"))
-                    .and_then(|p| p.get_mut(&source))
-                    .and_then(|proj| proj.as_object_mut())
-                    .map(|proj| {
-                        proj.entry("mcpServers")
-                            .or_insert_with(|| Value::Object(Map::new()))
-                    });
-                if let Some(Value::Object(m)) = servers {
-                    m.insert(id.clone(), snap.clone());
-                }
+                // No map to write into means the config was replaced under us. A
+                // silent success here would drop the snapshot with it, so fail and
+                // let the caller keep the record.
+                let m = mcp_servers_mut(root, source.as_deref(), true).ok_or_else(|| {
+                    anyhow!(
+                        "MCP server '{id}' cannot be restored: {} has no '{key}' map to put it back in",
+                        path.display()
+                    )
+                })?;
+                m.insert(id.clone(), snap.clone());
+                Ok(())
             })?;
             Ok(())
         }
@@ -560,6 +665,54 @@ fn read_usage(v: Option<&Value>, out: &mut BTreeMap<String, u64>) {
     }
 }
 
+/// Fold each project path into the shortest ancestor path also present.
+///
+/// A project is a session's cwd, so one checkout arrives under several keys the
+/// moment a session starts in a subdirectory (`…/Stacked` and
+/// `…/Stacked/app/src`). Left split, a server used in exactly one repo counts as
+/// two projects and passes as global, which is the one wrong answer this whole
+/// scope call exists to avoid.
+fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+    let mut out: BTreeMap<String, u64> = BTreeMap::new();
+    for (project, n) in by_project {
+        let root = by_project
+            .keys()
+            .filter(|p| {
+                !p.is_empty()
+                    && project
+                        .strip_prefix(p.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .min_by_key(|p| p.len())
+            .unwrap_or(project);
+        *out.entry(root.clone()).or_insert(0) += n;
+    }
+    out
+}
+
+/// The `mcpServers` map a server lives in inside `~/.claude.json`: the top level
+/// when `source` is `None` (user scope), otherwise that project's. `create`
+/// inserts the map when it is missing, which restore needs and disable does not.
+fn mcp_servers_mut<'a>(
+    root: &'a mut Value,
+    source: Option<&str>,
+    create: bool,
+) -> Option<&'a mut Map<String, Value>> {
+    let parent = match source {
+        None => root.as_object_mut()?,
+        Some(project) => root
+            .get_mut("projects")?
+            .get_mut(project)?
+            .as_object_mut()?,
+    };
+    if create {
+        parent
+            .entry("mcpServers")
+            .or_insert_with(|| Value::Object(Map::new()));
+    }
+    parent.get_mut("mcpServers")?.as_object_mut()
+}
+
 /// The server segment of an `mcp__<server>__<tool>` name (`None` otherwise).
 fn mcp_server_of(name: &str) -> Option<&str> {
     name.strip_prefix("mcp__")?.split("__").next()
@@ -606,9 +759,10 @@ fn unique_bak_path(dir: &Path, stem: &str) -> std::path::PathBuf {
     unreachable!()
 }
 
-/// Read a JSON file, back it up to Piggy's backups dir, apply `mutate`, and
+/// Read a JSON file, apply `mutate`, back it up to Piggy's backups dir, and
 /// atomically write it back preserving a trailing newline. Used for
-/// `~/.claude.json`.
+/// `~/.claude.json`. A `mutate` that returns an error aborts before the file or
+/// the backups dir is touched.
 ///
 /// The re-serialization touches the whole document, but `preserve_order` keeps
 /// every key in place and `arbitrary_precision` keeps every number's exact source
@@ -616,10 +770,14 @@ fn unique_bak_path(dir: &Path, stem: &str) -> std::path::PathBuf {
 /// diff is therefore just the one entry `mutate` changed.
 fn edit_json_atomic<F>(path: &Path, mutate: F) -> Result<()>
 where
-    F: FnOnce(&mut Value),
+    F: FnOnce(&mut Value) -> Result<()>,
 {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let trailing_newline = bytes.last() == Some(&b'\n');
+
+    let mut root: Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    mutate(&mut root)?;
 
     // Back up before touching it, to a collision-free path (a nanosecond stamp
     // plus an existence-checked suffix, so two edits in the same instant never
@@ -631,10 +789,6 @@ where
         .and_then(|n| n.to_str())
         .unwrap_or("claude.json");
     std::fs::write(unique_bak_path(&backups, stem), &bytes)?;
-
-    let mut root: Value =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    mutate(&mut root);
 
     let mut text = serde_json::to_string_pretty(&root)?;
     if trailing_newline {

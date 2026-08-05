@@ -289,6 +289,33 @@ pub fn annotate(period_s: String) -> Result<Vec<AnnotationDto>, ApiError> {
     run_model(spec, &built)
 }
 
+/// Per-saver advice, keyed by `saver:<id>`.
+///
+/// Same contract as [`annotate`]: an empty vector whenever the advisor cannot or
+/// should not run, because the deterministic per-saver summary on the row is the
+/// product and this is prose on top of it.
+pub fn explain_savers() -> Result<Vec<AnnotationDto>, ApiError> {
+    let Some(spec) = selected().as_deref().and_then(advisor::model) else {
+        return Ok(Vec::new());
+    };
+    if !spec.present() {
+        return Ok(Vec::new());
+    }
+
+    let catalog = piggy_core::Catalog::embedded();
+    let bundle = crate::backend::attribution_bundle()
+        .map_err(|e| ApiError::new("Could not read the measurements", e.to_string(), true))?;
+    // Catalog order, so the sheet's cap takes the savers the user sees first.
+    let rows: Vec<_> = catalog
+        .entries
+        .iter()
+        .filter_map(|e| Some((e, bundle.per_saver.get(&e.id)?)))
+        .collect();
+    let facts = Facts::savers(&rows);
+
+    run_saver_model(spec, &facts)
+}
+
 #[cfg(feature = "local-llm")]
 fn run_model(
     spec: &'static piggy_core::AdvisorModel,
@@ -330,6 +357,41 @@ fn run_model(
             Ok(Vec::new())
         }
     }
+}
+
+#[cfg(feature = "local-llm")]
+fn run_saver_model(
+    spec: &'static piggy_core::AdvisorModel,
+    facts: &Facts,
+) -> Result<Vec<AnnotationDto>, ApiError> {
+    use piggy_core::advisor::llama::Advisor;
+
+    // Loaded and dropped per call, for the reason spelled out in `run_model`.
+    let advisor = Advisor::load(spec)
+        .map_err(|e| ApiError::new("Could not load the local model", e.to_string(), true))?;
+    match advisor.explain_savers(facts) {
+        Ok(list) => Ok(list
+            .into_iter()
+            .map(|a| AnnotationDto {
+                insight_id: a.insight_id,
+                headline: a.headline,
+                why: a.why,
+                model: spec.name.to_string(),
+            })
+            .collect()),
+        Err(e) => {
+            eprintln!("piggy: local advisor produced nothing usable for savers: {e}");
+            Ok(Vec::new())
+        }
+    }
+}
+
+#[cfg(not(feature = "local-llm"))]
+fn run_saver_model(
+    _spec: &'static piggy_core::AdvisorModel,
+    _facts: &Facts,
+) -> Result<Vec<AnnotationDto>, ApiError> {
+    Ok(Vec::new())
 }
 
 #[cfg(not(feature = "local-llm"))]

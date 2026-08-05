@@ -139,7 +139,28 @@ impl Advisor {
     /// prose instead of JSON" are indistinguishable from an empty list. Never
     /// render this. It is the text that has not been checked yet.
     pub fn annotate_raw(&self, facts: &Facts) -> Result<String> {
-        self.generate(&self.prompt(facts)?)
+        self.generate(&self.prompt(facts, SYSTEM, USER_PREAMBLE)?)
+    }
+
+    /// Turn the per-saver measurements into advice.
+    ///
+    /// A different job from [`Self::annotate`], and so a different prompt: the
+    /// ledger pass explains *why* a cost exists by naming a configuration item,
+    /// while this one says what a saver's measured result means for this setup
+    /// and what to do about it. Same guard, same allow-list, same failure mode:
+    /// anything unquotable, hedged, or about the wrong saver is dropped and the
+    /// deterministic summary renders alone.
+    pub fn explain_savers(&self, facts: &Facts) -> Result<Vec<Annotation>> {
+        if facts.insight_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        guard::accept_savers(&self.explain_savers_raw(facts)?, facts)
+    }
+
+    /// The saver pass's unfiltered output. Diagnostics only, exactly as
+    /// [`Self::annotate_raw`]: never rendered.
+    pub fn explain_savers_raw(&self, facts: &Facts) -> Result<String> {
+        self.generate(&self.prompt(facts, SAVER_SYSTEM, &saver_preamble())?)
     }
 
     /// Build the prompt through the model's own chat template.
@@ -147,18 +168,18 @@ impl Advisor {
     /// Falling back to a bare concatenation is deliberate: a GGUF without an
     /// embedded template still produces usable output, and refusing to run would
     /// be a worse trade than a slightly off prompt format.
-    fn prompt(&self, facts: &Facts) -> Result<String> {
+    fn prompt(&self, facts: &Facts, system: &str, preamble: &str) -> Result<String> {
         // Instructions AFTER the data. The fact sheet is a couple of thousand
         // tokens of dense JSON, and a small model that read the task first has
         // effectively forgotten it by the time it reaches the end.
-        let user = format!("{}\n\n{USER_PREAMBLE}", facts.prompt_json());
-        let plain = format!("{SYSTEM}\n\n{user}\n\n");
+        let user = format!("{}\n\n{preamble}", facts.prompt_json());
+        let plain = format!("{system}\n\n{user}\n\n");
 
         let Ok(tmpl) = self.model.chat_template(None) else {
             return Ok(plain);
         };
         let msgs = vec![
-            LlamaChatMessage::new("system".into(), SYSTEM.into())?,
+            LlamaChatMessage::new("system".into(), system.into())?,
             LlamaChatMessage::new("user".into(), user)?,
         ];
         Ok(self
@@ -286,11 +307,19 @@ impl Advisor {
 const SYSTEM: &str = "\
 You annotate a token-usage report for a developer tool called Piggy.
 
-The report's numbers are exact measurements that have already been computed. \
-Your job is to explain WHY each finding is happening, using the user's own \
-configuration, and to make the recommended action specific.
+Every number in the report is already measured and every finding is already \
+written, with its own title, detail and recommended action. The reader has \
+read them. Restating one in different words is worth nothing to them.
+
+Your only job: connect a finding to the specific item in the user's \
+`configuration` that produced it. That link is the one thing the report cannot \
+compute for itself, and it is the only reason you are here.
 
 Hard rules:
+- Annotate a finding ONLY if you can name an item from `configuration` that \
+explains it. No named item, no annotation. An empty array is a correct answer.
+- Never repeat what a finding's own title, detail or current_action already \
+says, in any wording.
 - Never state a number, percentage, or multiplier that does not appear verbatim \
 in the data you were given. If you want to quote a figure, copy it exactly.
 - Never perform arithmetic. Do not add, average, or compare figures to produce a \
@@ -299,22 +328,144 @@ new one. Every total you might need has already been computed for you.
 turning them off would achieve.
 - Never guess at a cause. If you write \"likely\", \"probably\", \"suggests\", \
 \"appears to\" or \"may be\", you are guessing: leave that finding out instead. \
-Only say what the data shows.
-- Prefer a couple of sharp annotations over one for every finding. Annotate the \
-ones where the configuration actually explains what you see.";
+Only say what the data shows.";
+
+/// The saver pass's system prompt.
+///
+/// Deliberately narrow in the same way [`SYSTEM`] is. The measurements are done
+/// and the one-line finding is already written; what a reader cannot get from
+/// the row is what the result means for the setup they actually have, and
+/// whether it calls for an action. Everything else the model might want to add
+/// is either already on screen or a number it is not allowed to invent.
+const SAVER_SYSTEM: &str = "\
+You write one line of advice per token-saving add-on for a developer tool \
+called Piggy.
+
+Each saver in `savers` has already been measured against the user's own \
+sessions, with it switched on and with it switched off. `finding` is the \
+verdict from that comparison. It is correct, it is already printed on the \
+screen your line appears on, and the reader has read it.
+
+So restating it is worth nothing. Your line has to say something the verdict \
+does not: what it means for this setup, or what to do now.
+
+Hard rules:
+- Never restate a `finding`, in any wording. If all you have is the verdict in \
+different words, leave that saver out.
+- Never contradict a `finding`.
+- `reduced_by_pct` is what the saver took OFF a stream; `increased_by_pct` is \
+what it ADDED. A stream carrying `increased_by_pct` got worse with the saver on. \
+Never read one of those two as the other.
+- A stream with neither figure was NOT measurable. Never call it unchanged, \
+unaffected, safe, or free: `result` says why it could not be read, and that is \
+all that is known about it.
+- Never state a number, percentage, or multiplier that does not appear verbatim \
+in the data you were given. If you want to quote a figure, copy it exactly.
+- Never perform arithmetic. Every figure you might want has been computed.
+- Never guess at a cause. If you write \"likely\", \"probably\", \"suggests\", \
+\"appears to\" or \"may be\", you are guessing: leave that saver out instead.
+- Never recommend an action the measurement does not support.";
+
+/// The saver pass's task instructions, appended after the sheet.
+///
+/// The steering matters more here than in the ledger pass. Left to itself, a 4B
+/// picks the three savers with the prettiest percentages and writes the verdict
+/// back out with "use it consistently" bolted on. The savers actually worth a
+/// line are the ones whose measurement says something the percentage does not.
+///
+/// Built rather than written out because the rejected example below is also the
+/// needle [`guard::accept_savers`] matches a pasted-back answer against. Held as
+/// two literals they drift, and a needle that appears nowhere in the prompt is a
+/// check that runs on every response and can never fire.
+fn saver_preamble() -> String {
+    format!(
+        "\
+Those are the measurements. Write about at most three savers, and only ones \
+where you have something to add. For each, return an object:
+  insight_id  the saver's id, copied exactly from `savers`
+  headline    under 120 characters, naming the saver
+  why         one or two short sentences: what the reader should do, or what \
+they would get wrong about this saver without you
+
+Some savers carry a `caveat`: the part of the measurement that is NOT on the \
+reader's screen. Those are the savers to write about, and the caveat is what to \
+write. Put it in your own words, name the saver, and say what it means for \
+them.
+
+Where there is no caveat, the only line worth writing is about a saver whose \
+`finding` says nothing changed: it has been shown to do nothing on THIS \
+workload, over the session counts on the sheet, so switching it off would cost \
+nothing measurable.
+
+A saver whose streams were all too noisy or too small to compare supports NO \
+advice. Leave it out. So does one whose only story is the percentage already in \
+its `finding`.
+
+A line that would be REJECTED, because it only says the verdict again:
+  {{\"insight_id\":\"saver:example\",\"headline\":\"{headline}\",\
+\"why\":\"{why}\"}}
+
+Two sharp lines beat five, and none at all beats one that repeats the verdict. \
+Return a JSON array of at most three objects, and nothing else.",
+        headline = guard::EXAMPLE_HEADLINE,
+        why = guard::EXAMPLE_WHY,
+    )
+}
 
 const USER_PREAMBLE: &str = "\
-That was the report. Now annotate the two or three most important findings \
-above. For each one, return an object with:
+That was the report. Annotate at most three findings, and only the ones where a \
+named item in `configuration` explains what the finding measured. For each one, \
+return an object with:
   insight_id  the finding's id, copied exactly from `findings`
-  headline    one short sentence under 120 characters, naming the CAUSE
-  why         one or two short sentences, grounded in `configuration`
+  headline    under 120 characters, naming the configuration item responsible
+  why         one or two short sentences: which item it is, what `configuration` \
+records about its use, and how it reaches this finding
 
-The headline must not restate the finding's own title. Say why it is happening.
+Every item in `configuration` is an add-on the logs show going unused. That is \
+the whole point of naming one: the reader is paying for it and getting nothing.
 
-Name specific items from `configuration` where they explain a finding. Do not \
-quote figures at all unless you are copying one character-for-character from \
-the report: never add, compare, or estimate one. Prefer sentences with no \
-numbers in them.
+Each item carries `inflates`: the part of the session floor it is loaded as \
+part of. That field is the only way to match an item to a finding. A finding \
+whose id ends in the same name is the one that item explains, and if no item's \
+`inflates` matches, no item explains that finding.
 
-Return a JSON array of two or three objects, and nothing else.";
+Findings about session counts, per-project churn, or how long sessions run have \
+no cause in `configuration`. Leave them alone. Leave a finding out by not \
+writing an object for it: never write one that says nothing explains it.
+
+Two sharp annotations beat five, and none at all beats one that only repeats the \
+finding. Do not quote figures unless you are copying one character-for-character \
+from the report.
+
+Return a JSON array of at most three objects, and nothing else.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The needle [`guard::accept_savers`] matches a pasted-back answer against
+    /// has to be a sentence the model was actually shown.
+    ///
+    /// Splicing the two constants into the prompt is what makes that true today,
+    /// but nothing about splicing them is load-bearing: rewrite the rejected
+    /// example around them and the needle goes back to matching text no model has
+    /// ever seen. That failure is silent by construction. The check runs on every
+    /// response and simply never fires, so the first symptom is a 4B's pasted
+    /// example printed as advice.
+    ///
+    /// Asserted against the built preamble rather than the source, and here
+    /// rather than in `tests/`, because building it needs no weights: this is the
+    /// half of the prompt that exists before a model is loaded.
+    #[test]
+    fn the_saver_prompt_shows_the_example_the_guard_matches() {
+        let prompt = saver_preamble();
+        assert!(
+            prompt.contains(guard::EXAMPLE_HEADLINE),
+            "guard's needle headline is not in the prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains(guard::EXAMPLE_WHY),
+            "guard's needle `why` is not in the prompt: {prompt}"
+        );
+    }
+}

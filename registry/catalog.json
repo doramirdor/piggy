@@ -280,6 +280,92 @@
       "notes": "Node.js soft dependency. Authors publicly self-corrected inflated benchmarks - good honesty signal."
     },
     {
+      "id": "honey",
+      "name": "Honey",
+      "plainLabel": "Less code, fewer words",
+      "description": "Claude builds the smallest thing that works and explains it in fewer words",
+      "layer": "reply_style",
+      "installType": "claude_plugin",
+      "status": "curated_v1",
+      "defaultOn": false,
+      "license": "MIT",
+      "licenseNote": "MIT. The bundled carbon-estimate tables derive from EcoLogits (MPL-2.0) - attribution only, per the repo's NOTICE. No effect on Piggy shipping the entry.",
+      "source": {
+        "type": "claude_plugin_marketplace",
+        "repo": "Green-PT/honey-for-devs",
+        "marketplace": "greenpt",
+        "plugin": "honey"
+      },
+      "install": {
+        "steps": [
+          {
+            "step": "require_binary",
+            "binary": "node",
+            "reason": "hooks and the activation flag; without it the skill text still loads but nothing activates",
+            "soft": true
+          },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "add", "Green-PT/honey-for-devs"] },
+          { "step": "claude_cli", "args": ["plugin", "install", "honey@greenpt"] },
+          {
+            "step": "run_plugin_script",
+            "script": "hooks/honey-state.js",
+            "runner": "node",
+            "args": ["set", "full"],
+            "note": "The plugin installs INERT: the SessionStart directive and the Bash hook are both gated on ${CLAUDE_DIR}/.honey-active, which upstream writes only when the user types /honey. Piggy calls the plugin's own documented state writer so an installed saver is actually saving."
+          }
+        ]
+      },
+      "uninstall": {
+        "steps": [
+          {
+            "step": "run_plugin_script",
+            "script": "hooks/honey-state.js",
+            "runner": "node",
+            "args": ["off"],
+            "ignoreFailure": true,
+            "note": "must run BEFORE the plugin uninstall - clears the flag while the script is still on disk"
+          },
+          { "step": "claude_cli", "args": ["plugin", "uninstall", "honey@greenpt"] },
+          { "step": "claude_cli", "args": ["plugin", "marketplace", "remove", "greenpt"], "ignoreFailure": true },
+          { "step": "delete_file", "path": "${CLAUDE_DIR}/.honey-active" },
+          { "step": "delete_file", "path": "${CLAUDE_DIR}/.honey-warned" },
+          { "step": "delete_file", "path": "${CLAUDE_DIR}/.honey-usage-ledger.jsonl" },
+          { "step": "delete_dir", "dir": "${CLAUDE_DIR}/honey" },
+          { "step": "verify_no_setting", "path": "statusLine", "contains": "honey" }
+        ]
+      },
+      "healthCheck": {
+        "checks": [
+          { "check": "plugin_enabled", "plugin": "honey@greenpt" },
+          { "check": "file_present", "path": "${CLAUDE_DIR}/.honey-active" }
+        ]
+      },
+      "configOptions": [
+        {
+          "key": "defaultMode",
+          "label": "Intensity",
+          "description": "How hard Claude trims. Applies from the next session.",
+          "choices": [
+            { "value": "lite", "label": "Lite", "description": "Keeps full explanations; still avoids writing code you did not ask for" },
+            { "value": "full", "label": "Full", "description": "Terse prose, fragments over paragraphs" }
+          ],
+          "default": "full",
+          "apply": {
+            "kind": "text_file",
+            "path": "${CLAUDE_DIR}/.honey-active",
+            "note": "The plugin's own activation flag: the whole file is the mode, and its hooks re-read it at each session start. Piggy deliberately does not offer the plugin's third level ('ultra') - see the warning field."
+          }
+        }
+      ],
+      "conflictsWith": ["caveman", "ponytail"],
+      "ordering": 61,
+      "behaviorChanging": true,
+      "warning": "Changes how Claude writes code (less of it) and how it explains it. The skill prompt costs input tokens, so short sessions can come out net negative - the author's own table shows a cold-cost case above baseline. Piggy caps intensity at 'full': the plugin's 'ultra' level tells Claude to fetch the third-party 'pxpipe-proxy' npm package at run time and read files as images, which is lossy on exact strings.",
+      "claimedSavings": "−38% output tokens / −24% cost (author benchmark, paired per-task, n=23 tasks × 3 runs on claude-opus-5, p<0.001)",
+      "risk": "low",
+      "notes": "Zero telemetry and no permission-model changes (verified 2026-08-04 against the tree at commit 85e5391-era main: no network calls outside bench/, no permissionDecision anywhere; 148/148 upstream tests pass with no dependencies installed). The README headline of −53% is not what the published results show - the paired figure above is. Quality was a tie, not a win: judge 99% of baseline, sign test p=0.302, with tests-pass 100% vs 94% baseline. Ships a PostToolUse Bash hook that compresses repetitive output, currently inert on Claude Code ≥2.1.121 (anthropics/claude-code#68951 drops updatedToolOutput for the built-in Bash tool); the plugin detects this and warns once per version, so today the value is the reply-style levers only. Single maintainer, repo created 2026-06-19, fast churn - re-verify on version bumps. Marketplace installs cannot be pinned, same as caveman and ponytail. Not default-on: promote only if it beats caveman in a Piggy holdout measurement rather than on the author's own arms."
+    },
+    {
       "id": "sweep",
       "name": "Sweep",
       "plainLabel": "Clean unused extras",

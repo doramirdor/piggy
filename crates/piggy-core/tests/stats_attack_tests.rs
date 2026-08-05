@@ -65,6 +65,7 @@ fn insert_session(
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     let path = if subagent {
@@ -113,6 +114,7 @@ fn insert_session_at(
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -1326,8 +1328,73 @@ fn a_hand_switched_off_saver_does_not_kill_the_headline() {
     );
     // The holdout genuinely was all-off here, so the baseline is clean...
     assert!(hl.baseline_clean);
-    // ...but a hand-set saver is still not something Piggy randomized.
-    assert!(!hl.on_randomized);
+    // ...and the contrast really is randomized, on the same grounds that let the
+    // session count as full-on at all: caveman is off in BOTH arms of every
+    // session here, so it is a constant, not something a randomization needed to
+    // balance. Randomization is a property of the contrast, and this contrast is
+    // "rtk on because rotation said so" vs "rtk off because rotation said so".
+    //
+    // This assertion used to read `!on_randomized`, and it was the second half of
+    // the same bug the first half of this test fixed: hand-switch one saver off,
+    // ever, and `measured` became unreachable for good, however long rotation ran
+    // afterwards. The per-saver path had it right all along (see `SaverRow::
+    // others_on`); only the headline disagreed with it.
+    assert!(
+        hl.on_randomized,
+        "a saver switched off by hand is off in both arms, so it is a constant - \
+         it leaves the contrast rather than de-randomizing it"
+    );
+    assert_eq!(hl.ceiling, Badge::Measured);
+}
+
+// The other half of the rule, so the fix above cannot be over-applied: a saver
+// the user pinned *on* DOES de-randomize the contrast. It runs in the ON arm
+// because the user said so, and it rides through the holdout, so the "nothing on"
+// counterfactual was never observed. Same shape as the test above, one flag
+// different, and the answer has to flip.
+#[test]
+fn a_hand_switched_on_saver_still_blocks_a_measured_headline() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    let mut rng = XorShift64::new(0x00DE_AD12);
+
+    for i in 0..15 {
+        let turns = 8 + rng.below(6) as u64;
+        let out = (2000.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("holdout-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+
+        let turns = 8 + rng.below(6) as u64;
+        let out = (1200.0 * noise(&mut rng, 0.4) * turns as f64).round() as u64;
+        let id = format!("full-on-{i}");
+        insert_session(
+            &mut store, &pricing, &id, "claude-sonnet-4-5", turns, 400, out, 0, 0, false,
+        );
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    // The one difference from the test above: pinned ON, not off.
+                    SaverTag::new("caveman", true, source::MANUAL),
+                ],
+            )
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x8643).unwrap();
+    assert_eq!(hl.n_full_on, 15);
+    assert!(
+        !hl.on_randomized,
+        "a saver the user pinned on is in the ON arm because they said so, not \
+         because Piggy randomized it"
+    );
     assert_eq!(hl.ceiling, Badge::Estimated);
 }
 
@@ -1848,4 +1915,342 @@ fn the_headline_ci_is_reproducible_for_a_fixed_seed() {
              whose order came out of a HashMap, so seeding it buys nothing"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The wait itself has to be honest.
+// ---------------------------------------------------------------------------
+//
+// "Measuring" with no end in sight is indistinguishable from broken, and the ON
+// arm restarts silently every time the saver set changes. `Headline::waiting`
+// exists so a surface can say which arm is short, when its count started, and
+// roughly how much longer - so those three have to be right, and the ETA has to
+// come off the DATA's clock, not the wall clock, or the same database answers
+// differently on a machine left idle overnight.
+
+#[test]
+fn the_wait_reports_the_short_arm_with_a_pace_off_the_datas_own_clock() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    // Baseline is comfortably full, so the ON arm is the short one.
+    for i in 0..15 {
+        let id = format!("holdout-{i}");
+        insert_session_at(&mut store, &pricing, &id, 10, 20_000, "2026-05-01T00:00:00.000Z");
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+    }
+    // Five full-on sessions spread over exactly four days: four intervals, so a
+    // pace of 1.0/day. Five more needed, so five days left. Dividing by the
+    // COUNT instead of the intervals would say 1.25/day and promise four.
+    for i in 0..5 {
+        let id = format!("full-on-{i}");
+        let day = 10 + i;
+        insert_session_at(
+            &mut store,
+            &pricing,
+            &id,
+            10,
+            10_000,
+            &format!("2026-06-{day:02}T00:00:00.000Z"),
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let hl = attribution::headline(&store, &pricing, 0x0FACE).unwrap();
+    let w = hl.waiting().expect("the ON arm is 5 of 10, so there is a wait to report");
+    assert_eq!(w.arm, attribution::WaitingArm::On);
+    assert_eq!((w.have, w.need), (5, attribution::MIN_GROUP));
+    assert_eq!(
+        w.since.as_deref(),
+        Some("2026-06-10T00:00:00.000Z"),
+        "the count started when the current saver set first appeared, not when Piggy \
+         was installed"
+    );
+    let days = w.days_left.expect("four intervals over four days is a pace");
+    assert!(
+        (days - 5.0).abs() < 0.01,
+        "5 sessions to go at 1.0/day is 5 days, got {days}"
+    );
+
+    // A single session spans no time, so there is no pace to extrapolate and the
+    // honest answer is no estimate rather than a made-up one.
+    let one = attribution::Pace {
+        since: "2026-06-10T00:00:00.000Z".to_string(),
+        per_day: None,
+    };
+    assert_eq!(one.days_to(1, attribution::MIN_GROUP), None);
+}
+
+#[test]
+fn a_full_experiment_reports_no_wait_at_all() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    for i in 0..12 {
+        let id = format!("holdout-{i}");
+        insert_session_at(&mut store, &pricing, &id, 10, 20_000, "2026-05-01T00:00:00.000Z");
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::HOLDOUT)])
+            .unwrap();
+        let id = format!("full-on-{i}");
+        insert_session_at(&mut store, &pricing, &id, 10, 10_000, "2026-05-02T00:00:00.000Z");
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+    let hl = attribution::headline(&store, &pricing, 0x0FACF).unwrap();
+    assert_eq!(
+        hl.waiting(),
+        None,
+        "both arms are full: whatever holds the headline up now, it is not sample \
+         size, and saying 'still gathering' would be a lie"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Carrying an older saver set forward, when the saver that separates them is
+// provably null.
+// ---------------------------------------------------------------------------
+//
+// Scoping the ON arm to the current saver set is correct and it has a bill: try
+// a saver, and the count restarts at zero. For a user whose whole job is trying
+// savers, that is the difference between a headline and a permanent "4 of 10".
+// The recovery is only legal when the differing saver has been MEASURED to do
+// nothing, and even then the pooled figure caps at `estimated`, because two eras
+// are two stretches of calendar and no saver measurement speaks to work drift
+// between them.
+//
+// Fixture shape, held deliberately simple so the equivalence bound is the thing
+// under test and not the noise model: turns fixed at 10 (so the turns arm is
+// exactly null), input fixed (so its arm is exactly null), no cache traffic (so
+// those arms take the too-quiet-to-matter branch), and output carrying the
+// entire signal with a +-2% wobble - inside NULL_BAND, but not the degenerate
+// zero-width interval.
+
+/// Output for session `i` at `per_turn` tokens/turn, wobbled +-2% deterministically.
+fn wobbled(per_turn: f64, turns: u64, i: usize) -> u64 {
+    let w = 1.0 + ((i % 5) as f64 - 2.0) * 0.01;
+    (per_turn * turns as f64 * w).round() as u64
+}
+
+/// `noop_per_turn` is what the OLD era spent per turn. Equal to the live era's
+/// 1000 means the extra saver did nothing; anything else means it did.
+fn carry_store(noop_per_turn: f64, n_live: usize) -> attribution::Headline {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    const T: u64 = 10;
+
+    // All-off baseline, 2000/turn.
+    for i in 0..15 {
+        let id = format!("holdout-{i}");
+        insert_session_at(&mut store, &pricing, &id, T, wobbled(2000.0, T, i), "2026-01-01T00:00:00.000Z");
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", false, source::HOLDOUT),
+                    SaverTag::new("noop", false, source::HOLDOUT),
+                ],
+            )
+            .unwrap();
+    }
+    // OLD era, everything on: rtk + noop.
+    for i in 0..12 {
+        let id = format!("old-{i}");
+        insert_session_at(&mut store, &pricing, &id, T, wobbled(noop_per_turn, T, i), "2026-02-01T00:00:00.000Z");
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    SaverTag::new("noop", true, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+    // Single-off slots from the same era: rtk still on, noop switched off by the
+    // scheduler. These are Mixed sessions, so they never enter a full-on group -
+    // they exist to give `noop` the OFF arm its own measurement needs.
+    for i in 0..12 {
+        let id = format!("noop-off-{i}");
+        insert_session_at(&mut store, &pricing, &id, T, wobbled(1000.0, T, i), "2026-02-15T00:00:00.000Z");
+        store
+            .set_session_savers(
+                &id,
+                &[
+                    SaverTag::new("rtk", true, source::ROTATION),
+                    SaverTag::new("noop", false, source::ROTATION),
+                ],
+            )
+            .unwrap();
+    }
+    // LIVE era: noop uninstalled, so it has no row at all. Short on its own.
+    for i in 0..n_live {
+        let id = format!("live-{i}");
+        insert_session_at(&mut store, &pricing, &id, T, wobbled(1000.0, T, i), "2026-03-01T00:00:00.000Z");
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+    attribution::headline(&store, &pricing, 0x4321).unwrap()
+}
+
+#[test]
+fn a_proven_null_saver_lets_its_era_be_carried_forward_as_estimated() {
+    let hl = carry_store(1000.0, 6);
+    eprintln!(
+        "[carry] n_full_on={} n_carried={} carried={:?} ceiling={:?} mult={:?}",
+        hl.n_full_on, hl.n_carried, hl.carried_savers, hl.ceiling, hl.multiplier
+    );
+
+    assert_eq!(hl.n_carried, 12, "the 12 old-era sessions are the same treatment");
+    assert_eq!(hl.carried_savers, vec!["noop".to_string()], "and the screen can say why");
+    assert_eq!(hl.n_full_on, 18, "6 live + 12 carried");
+    assert!(
+        hl.multiplier.is_some(),
+        "6 sessions alone could never clear MIN_GROUP; carrying the era forward is \
+         the whole point of this path"
+    );
+    // Never measured. The treatments match; the calendar does not.
+    assert_eq!(
+        hl.ceiling,
+        Badge::Estimated,
+        "pooling two eras buys sample size and pays for it in the badge, exactly as \
+         pick_group does for observational rows"
+    );
+    assert!(hl.waiting().is_none(), "18 of 10 is not a wait");
+}
+
+#[test]
+fn a_saver_with_a_real_effect_never_drags_its_era_in() {
+    // Same fixture, one number changed: the old era spent half as much per turn,
+    // so `noop` moved the output stream by 50% and is nowhere near the null band.
+    let hl = carry_store(500.0, 6);
+    eprintln!(
+        "[carry-real] n_full_on={} n_carried={} mult={:?}",
+        hl.n_full_on, hl.n_carried, hl.multiplier
+    );
+    assert_eq!(hl.n_carried, 0);
+    assert!(hl.carried_savers.is_empty());
+    assert_eq!(hl.n_full_on, 6, "the live era stands alone, short and honest");
+    let w = hl.waiting().expect("still short");
+    assert_eq!((w.arm, w.have), (attribution::WaitingArm::On, 6));
+}
+
+#[test]
+fn a_healthy_live_era_is_never_diluted_by_an_older_one() {
+    // 14 live sessions clear MIN_GROUP on their own, so the carried era is not
+    // needed - and an unneeded fold-in would cost a `measured` badge for nothing.
+    let hl = carry_store(1000.0, 14);
+    assert_eq!(hl.n_carried, 0, "the fallback must not fire when the live era stands");
+    assert_eq!(hl.n_full_on, 14);
+    assert_eq!(hl.ceiling, Badge::Measured);
+}
+
+// ---------------------------------------------------------------------------
+// A turn regression on ordinary short sessions must not be certified as null.
+// ---------------------------------------------------------------------------
+//
+// The floor that stops a ratio being taken against a barely-used denominator is
+// calibrated in tokens per turn, where the busy streams sit in the thousands.
+// Turns per session lives two orders of magnitude below that, so the token floor
+// swallowed the whole turns arm on any normal workload: no ratio, and
+// `is_negligible` reads "both arms under the floor" as a proven null. A saver
+// that took a 4-turn job to 9 turns then certified as doing nothing, which is
+// exactly the licence to fold its era into the headline's ON arm.
+//
+// Fixture: 14 sessions a side, tokens per turn held equal (so every token arm is
+// genuinely null) and the turn count more than doubled with the saver on.
+
+/// Deterministic +-1% wobble, so the token arms have a real interval rather than
+/// a degenerate zero-width one.
+fn nudged(per_turn: f64, turns: u64, i: usize) -> u64 {
+    (per_turn * turns as f64 * (1.0 + ((i % 5) as f64 - 2.0) * 0.005)).round() as u64
+}
+
+#[test]
+fn a_turn_regression_on_short_sessions_is_not_certified_as_null() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    for i in 0..14 {
+        // OFF: 3-5 turns a session, median 4.
+        let turns = 3 + (i % 3) as u64;
+        let id = format!("off-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            turns,
+            400 * turns,
+            nudged(1000.0, turns, i),
+            0,
+            0,
+            false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::ROTATION)])
+            .unwrap();
+
+        // ON: 8-10 turns for the same work at the same price per turn. Still
+        // under the tokens-per-turn floor of 10, which is the whole point.
+        let turns = 8 + (i % 3) as u64;
+        let id = format!("on-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            turns,
+            400 * turns,
+            nudged(1000.0, turns, i),
+            0,
+            0,
+            false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x7017).unwrap();
+    let t = &a.turns;
+    eprintln!(
+        "[turn_regression] median_on={:.1} median_off={:.1} delta={:?} ci={:?} badge={:?} negligible={}",
+        t.median_on,
+        t.median_off,
+        t.delta,
+        t.ci,
+        t.badge,
+        a.is_negligible()
+    );
+
+    assert!(
+        t.median_on < 10.0 && t.median_off < 10.0,
+        "the fixture only bites while both arms sit under the tokens-per-turn floor"
+    );
+    let delta = t
+        .delta
+        .expect("4 turns a session is a denominator, not a rounding difference");
+    assert!(
+        delta < -0.5,
+        "more than doubling the turn count is a regression, got delta={delta:?}"
+    );
+    assert_eq!(t.reading(), attribution::Reading::Delta);
+    assert_eq!(t.badge, Badge::Measured);
+    assert!(
+        !a.is_negligible(),
+        "a saver that doubles the turn count has been measured to do something; \
+         certifying it null lets its era be folded into the headline"
+    );
+    let summary = a.summary();
+    assert!(summary.contains("more turns per session"), "{summary}");
 }

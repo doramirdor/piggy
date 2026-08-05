@@ -9,7 +9,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use piggy_core::attribution::{self, median, Badge, Stream, MIN_GROUP};
+use piggy_core::attribution::{
+    self, median, Badge, Reading, SaverAttribution, Stream, StreamStat, MIN_GROUP,
+};
 use piggy_core::rng::XorShift64;
 use piggy_core::store::source;
 use piggy_core::{discovery, Catalog, ModelTokens, Pricing, SaverTag, SessionParse, Store};
@@ -61,6 +63,7 @@ fn insert_session(
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -312,6 +315,7 @@ fn subagent_sessions_are_excluded_from_groups() {
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -740,6 +744,7 @@ fn insert_at(store: &mut Store, pricing: &Pricing, id: &str, ts: &str) {
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -861,6 +866,7 @@ fn session_without_model_rows_does_not_break_rate_map() {
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -1051,4 +1057,155 @@ fn a_stream_the_baseline_barely_uses_reports_no_percentage() {
         "the busy stream still measures, got {:?}",
         out.delta
     );
+}
+
+// --- readings: the three things "measuring" used to mean -------------------
+
+/// A stream both arms barely touch has no percentage worth showing, and says so
+/// rather than sitting on a progress bar that can never fill.
+#[test]
+fn a_quiet_stream_reads_as_too_small_to_compare() {
+    let s = StreamStat {
+        stream: Stream::Input,
+        n_on: 50,
+        n_off: 50,
+        median_on: 2.0,
+        median_off: 2.0,
+        delta: None,
+        ci: None,
+        badge: Badge::Measuring,
+    };
+    assert_eq!(s.reading(), Reading::Quiet);
+    assert!(s.note().unwrap().contains("too small to compare"));
+}
+
+/// The case the UI was flattening: both arms full, the interval tight around
+/// zero. That is a measurement, not a wait.
+#[test]
+fn a_tight_interval_around_zero_reads_as_no_change() {
+    let s = StreamStat {
+        stream: Stream::CacheCreate,
+        n_on: 7501,
+        n_off: 116,
+        median_on: 33280.0,
+        median_off: 33169.5,
+        delta: Some(-0.003),
+        ci: Some((-0.006, 0.003)),
+        badge: Badge::Measuring,
+    };
+    assert_eq!(s.reading(), Reading::NoChange { bound: 0.006 });
+    // Rounded away from zero: claim less than the interval supports.
+    assert_eq!(
+        s.note().unwrap(),
+        "measured, and there is no change bigger than 1% either way"
+    );
+}
+
+/// A wide interval is not a null result, and must not be reported as one.
+#[test]
+fn a_wide_interval_stays_inconclusive() {
+    let s = StreamStat {
+        stream: Stream::Output,
+        n_on: 7501,
+        n_off: 116,
+        median_on: 162.0,
+        median_off: 161.0,
+        delta: Some(-0.006),
+        ci: Some((-0.114, 0.099)),
+        badge: Badge::Measuring,
+    };
+    assert_eq!(s.reading(), Reading::Inconclusive);
+    assert!(s.note().unwrap().contains("too noisy"));
+}
+
+/// A short arm reports what it is short OF, not a verdict.
+#[test]
+fn a_short_arm_reads_as_waiting_and_counts_what_is_missing() {
+    let s = StreamStat {
+        stream: Stream::Output,
+        n_on: 40,
+        n_off: 3,
+        median_on: 100.0,
+        median_off: 120.0,
+        delta: Some(0.16),
+        ci: Some((-0.2, 0.4)),
+        badge: Badge::Measuring,
+    };
+    assert_eq!(
+        s.reading(),
+        Reading::Waiting {
+            need_on: 0,
+            need_off: 7
+        }
+    );
+    assert_eq!(s.note().unwrap(), "needs 7 more sessions with it off");
+}
+
+// --- the caveat: what the one-line finding leaves out -----------------------
+
+fn stat(stream: Stream, on: f64, off: f64, delta: Option<f64>, ci: Option<(f64, f64)>, badge: Badge) -> StreamStat {
+    StreamStat { stream, n_on: 400, n_off: 400, median_on: on, median_off: off, delta, ci, badge }
+}
+
+fn attribution(streams: Vec<StreamStat>, turns: StreamStat, n_on: usize, n_off: usize) -> SaverAttribution {
+    SaverAttribution {
+        saver_id: "x".into(),
+        n_on,
+        n_off,
+        off_by_source: BTreeMap::new(),
+        streams,
+        turns,
+    }
+}
+
+/// The failure mode a per-turn metric is blind to: fewer tokens per turn, more
+/// turns. The summary reports the saving; the caveat is what makes it readable.
+#[test]
+fn a_turn_regression_under_a_saving_is_called_out() {
+    let a = attribution(
+        vec![stat(Stream::CacheCreate, 3000.0, 30000.0, Some(0.9), Some((0.88, 0.92)), Badge::Measured)],
+        stat(Stream::Turns, 30.0, 20.0, Some(-0.5), Some((-0.6, -0.4)), Badge::Measured),
+        400,
+        400,
+    );
+    assert!(a.summary().contains("90% less cache write"));
+    let c = a.caveat().expect("a turn regression is always worth saying");
+    assert!(c.contains("more turns"), "{c}");
+}
+
+/// The other half of the same problem: a saving whose denominator could not be
+/// compared at all is not proof of a saving overall, and must not read like one.
+#[test]
+fn an_uncomparable_turn_count_under_a_saving_is_called_out() {
+    let a = attribution(
+        vec![stat(Stream::CacheCreate, 3000.0, 30000.0, Some(0.9), Some((0.88, 0.92)), Badge::Measured)],
+        stat(Stream::Turns, 3.0, 1.0, None, None, Badge::Measuring),
+        400,
+        400,
+    );
+    let c = a.caveat().expect("an unmeasurable denominator is a caveat");
+    assert!(c.contains("turn count could not be compared"), "{c}");
+}
+
+/// A full comparison that found nothing is a result, and the summary says so in
+/// those terms rather than as a wait.
+#[test]
+fn a_flat_saver_summarizes_as_no_change_not_as_waiting() {
+    let flat = |s| stat(s, 1000.0, 1000.0, Some(0.0), Some((-0.01, 0.01)), Badge::Measuring);
+    let a = attribution(
+        vec![
+            flat(Stream::Input),
+            flat(Stream::Output),
+            flat(Stream::CacheCreate),
+            flat(Stream::CacheRead),
+        ],
+        flat(Stream::Turns),
+        400,
+        400,
+    );
+    let s = a.summary();
+    assert!(s.contains("no change worth measuring on any stream"), "{s}");
+    assert!(s.contains("400"), "the session counts are the whole weight of it: {s}");
+    // Nothing is hidden by that sentence, so there is nothing to add.
+    assert_eq!(a.caveat(), None);
 }

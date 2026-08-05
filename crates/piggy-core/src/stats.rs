@@ -31,6 +31,10 @@ impl Period {
 
     /// Inclusive lower bound as an ISO8601-Z string comparable to stored
     /// timestamps, or `None` for all-time (no lower bound).
+    ///
+    /// A rolling instant: `Week` starts exactly 7*24h ago, mid-day. Use
+    /// [`Self::day_cutoff`] instead wherever the same window is also drawn as
+    /// calendar days.
     pub fn cutoff(&self) -> Option<String> {
         let now = chrono::Utc::now();
         let naive = match self {
@@ -40,6 +44,32 @@ impl Period {
             Period::All => return None,
         };
         Some(naive.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+    }
+
+    /// Midnight UTC on the first calendar day of the window, or `None` for
+    /// all-time. The same bound [`Store::daily_series`] and
+    /// [`Store::task_table`] zero-fill from.
+    ///
+    /// Needed because a rolling [`Self::cutoff`] and a calendar-day series do
+    /// not cover the same sessions: a session at 23:30 on the day before a
+    /// 7-day window opens is inside `now - 7d` but outside `today - 6`, so a
+    /// total taken one way and a sparkline drawn the other disagree by up to a
+    /// day of spend while sitting on the same row.
+    pub fn day_cutoff(&self) -> Option<String> {
+        let today = chrono::Utc::now().date_naive();
+        let start = match self {
+            Period::Today => today,
+            Period::Week => today - chrono::Duration::days(6),
+            Period::Month => today - chrono::Duration::days(29),
+            Period::All => return None,
+        };
+        Some(
+            start
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+        )
     }
 }
 
@@ -122,8 +152,12 @@ fn row_to_totals(r: &rusqlite::Row, base: usize) -> rusqlite::Result<Totals> {
 
 impl Store {
     /// Overall totals for a window.
+    ///
+    /// Windows on calendar days ([`Period::day_cutoff`]), same as
+    /// [`Self::daily_series`], so a headline total always equals the sum of
+    /// the bars drawn under it.
     pub fn totals(&self, period: Period) -> Result<Totals> {
-        let cutoff = period.cutoff();
+        let cutoff = period.day_cutoff();
         let sql = format!(
             "SELECT {AGG_COLS}
              FROM sessions s JOIN session_models sm ON sm.session_id = s.session_id
@@ -146,7 +180,7 @@ impl Store {
     }
 
     fn grouped(&self, period: Period, key_expr: &str) -> Result<Vec<GroupRow>> {
-        let cutoff = period.cutoff();
+        let cutoff = period.day_cutoff();
         // `key_expr` is a fixed internal literal, never user input.
         let sql = format!(
             "SELECT {key_expr} AS k, {AGG_COLS}
@@ -174,7 +208,7 @@ impl Store {
     /// Breakdown grouped by `(source, interface)` — which tool and surface the
     /// tokens came from. Largest first, so the UI's card order is stable.
     pub fn by_source(&self, period: Period) -> Result<Vec<SourceRow>> {
-        let cutoff = period.cutoff();
+        let cutoff = period.day_cutoff();
         let sql = format!(
             "SELECT s.source, s.interface, {AGG_COLS}
              FROM sessions s JOIN session_models sm ON sm.session_id = s.session_id
@@ -210,8 +244,10 @@ impl Store {
     ///   clamped to the most recent 120 days so the series stays bounded (it is
     ///   a chart window, not an all-time total).
     ///
-    /// Sessions with a NULL `ended_at` can't be placed on a day and are omitted,
-    /// so the summed series can under-count vs [`Self::totals`] by those rows.
+    /// Sessions with a NULL `ended_at` can't be placed on a day and are omitted.
+    /// For `Today`/`Week`/`Month` the summed series equals [`Self::totals`]
+    /// exactly (same calendar window, and undated sessions fall out of both);
+    /// `All` can under-count vs totals by undated rows plus the 120-day clamp.
     pub fn daily_series(&self, period: Period) -> Result<Vec<DailyRow>> {
         use std::collections::BTreeMap;
         // Group every dated session by its UTC calendar day. Cheap: one pass,

@@ -3,8 +3,14 @@ import type { Badge } from "../types";
 
 /** Status chip with a leading indicator: a determinate progress bar for
  *  "Measuring" (honest n-of-10 holdout progress, never an endless spinner), a
- *  small icon or dot for the settled states. Mirrors the v1.0 badge set. */
-export function StatusChip({ badge }: { badge: Badge }) {
+ *  small icon or dot for the settled states. Mirrors the v1.0 badge set.
+ *
+ *  `label` overrides the word only. A per-stream row knows things the badge
+ *  does not - that the comparison ran and came back flat, say - and "Measuring"
+ *  over a row that just reported no change reads as a stuck progress bar. The
+ *  tone still comes from the badge, so an override can never promote a row to
+ *  looking measured. */
+export function StatusChip({ badge, label }: { badge: Badge; label?: string }) {
   const v = statusView(badge);
   const pct = Math.round((v.progress ?? 0) * 100);
   return (
@@ -30,7 +36,7 @@ export function StatusChip({ badge }: { badge: Badge }) {
       ) : (
         <span className="chip-dot" aria-hidden />
       )}
-      {v.label}
+      {label ?? v.label}
     </span>
   );
 }

@@ -965,12 +965,22 @@ fn any_backup_contains(dir: &Path, needle: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 
 fn seed_session_with_tools(store: &mut Store, id: &str, last_ts: &str, tools: &[(&str, u64)]) {
+    seed_session_in_project(store, id, "/proj", last_ts, tools);
+}
+
+fn seed_session_in_project(
+    store: &mut Store,
+    id: &str,
+    project: &str,
+    last_ts: &str,
+    tools: &[(&str, u64)],
+) {
     let parse = SessionParse {
         session_id: id.to_string(),
         source: "claude-code".to_string(),
         interface: "unknown".to_string(),
         client: None,
-        project_path: Some("/proj".into()),
+        project_path: Some(project.into()),
         git_branch: None,
         first_ts: Some(last_ts.to_string()),
         last_ts: Some(last_ts.to_string()),
@@ -981,6 +991,7 @@ fn seed_session_with_tools(store: &mut Store, id: &str, last_ts: &str, tools: &[
         sidechain: ModelTokens::default(),
         tool_use_counts: tools.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store
@@ -1082,6 +1093,158 @@ fn sweep_flags_unused_mcp_server_and_apply_restore_round_trips() {
         "server restored with its exact config"
     );
     assert!(PiggyState::load().unwrap().sweep_disabled.is_empty());
+}
+
+/// A user-scope server is loaded by every session, so "is it used" is the wrong
+/// question: what matters is whether more than one project uses it. Sweep must
+/// tell a one-project server (move it) from a shared one (keep it) from a dead
+/// one (remove it), and must be able to remove and restore at the top level.
+#[test]
+fn sweep_separates_global_from_single_project_user_scope_servers() {
+    let sb = Sandbox::new();
+    let claude_json = json!({
+        "mcpServers": {
+            "onlyhere": { "command": "npx", "args": ["only"] },
+            "everywhere": { "command": "npx", "args": ["every"] },
+            "deadserver": { "command": "npx", "args": ["dead"] }
+        },
+        "projects": {},
+        "pluginUsage": {},
+        "skillUsage": {}
+    });
+    std::fs::write(
+        sb.claude_json(),
+        format!("{}\n", serde_json::to_string_pretty(&claude_json).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(sb.settings_path(), "{}\n").unwrap();
+
+    let home = piggy_core::config::piggy_home();
+    let mut store = Store::open(&home).unwrap();
+    seed_session_in_project(
+        &mut store,
+        "s1",
+        "/a",
+        "2026-07-12T10:00:00.000Z",
+        &[("mcp__onlyhere__x", 5), ("mcp__everywhere__x", 3)],
+    );
+    seed_session_in_project(
+        &mut store,
+        "s2",
+        "/b",
+        "2026-07-12T11:00:00.000Z",
+        &[("mcp__everywhere__y", 4)],
+    );
+    // Same checkout, deeper cwd: two project keys, one project.
+    seed_session_in_project(
+        &mut store,
+        "s3",
+        "/a/sub",
+        "2026-07-12T12:00:00.000Z",
+        &[("mcp__onlyhere__x", 2)],
+    );
+
+    let report = sweep::scan(&store, 50).unwrap();
+    let item = |id: &str| report.items.iter().find(|i| i.id == id).unwrap().clone();
+
+    let only = item("onlyhere");
+    assert_eq!(only.used, 7);
+    assert!(!only.recommend_disable, "a used server is never removed");
+    assert_eq!(
+        only.scope_to.as_deref(),
+        Some("/a"),
+        "one checkout under two cwds is still one project"
+    );
+
+    let every = item("everywhere");
+    assert_eq!(every.used, 7);
+    assert_eq!(
+        every.scope_to, None,
+        "used from two projects, so user scope is earning its keep"
+    );
+
+    let dead = item("deadserver");
+    assert!(dead.recommend_disable);
+    assert_eq!(
+        dead.scope_to, None,
+        "an unused server gets removed, not relocated"
+    );
+
+    // Disabling a user-scope server edits the top-level map, and restore puts it
+    // back there rather than inventing a project for it.
+    let mut state = PiggyState::load().unwrap();
+    sweep::apply(&store, &mut state, dead.idx, 50).unwrap();
+    let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
+    assert!(cj["mcpServers"].get("deadserver").is_none());
+    assert!(cj["mcpServers"].get("onlyhere").is_some());
+
+    let mut state = PiggyState::load().unwrap();
+    assert_eq!(sweep::restore_all(&mut state).unwrap(), 1);
+    state.save().unwrap();
+    let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
+    assert_eq!(cj["mcpServers"]["deadserver"]["args"], json!(["dead"]));
+}
+
+/// The snapshot in `state.json` is the only copy of a swept server's config, so a
+/// restore that cannot find the map to write it back into must report failure and
+/// keep the record. Reporting success there would tell the user the server is
+/// back while throwing its config away.
+#[test]
+fn sweep_restore_fails_when_the_target_map_is_gone() {
+    let sb = Sandbox::new();
+    let claude_json = json!({
+        "projects": {
+            "/proj": {
+                "mcpServers": {
+                    "deadserver": { "command": "npx", "args": ["dead"] }
+                }
+            }
+        },
+        "pluginUsage": {},
+        "skillUsage": {}
+    });
+    std::fs::write(
+        sb.claude_json(),
+        format!("{}\n", serde_json::to_string_pretty(&claude_json).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(sb.settings_path(), "{}\n").unwrap();
+
+    let home = piggy_core::config::piggy_home();
+    let store = Store::open(&home).unwrap();
+    let report = sweep::scan(&store, 50).unwrap();
+    let dead = report.items.iter().find(|i| i.id == "deadserver").unwrap();
+    assert!(dead.recommend_disable, "unused server flagged");
+
+    let mut state = PiggyState::load().unwrap();
+    sweep::apply(&store, &mut state, dead.idx, 50).unwrap();
+
+    // Claude Code rewrote claude.json without that project, so there is no
+    // mcpServers map left to put the server back into.
+    let replaced = "{\n  \"projects\": {}\n}\n";
+    std::fs::write(sb.claude_json(), replaced).unwrap();
+
+    let mut state = PiggyState::load().unwrap();
+    assert_eq!(
+        sweep::restore_all(&mut state).unwrap(),
+        0,
+        "a restore with nowhere to write is not a restore"
+    );
+    state.save().unwrap();
+
+    let kept = PiggyState::load().unwrap();
+    assert_eq!(
+        kept.sweep_disabled.len(),
+        1,
+        "the snapshot survives a failed restore"
+    );
+    assert_eq!(kept.sweep_disabled[0].id, "deadserver");
+    assert_eq!(kept.sweep_disabled[0].snapshot["args"], json!(["dead"]));
+    assert_eq!(
+        std::fs::read_to_string(sb.claude_json()).unwrap(),
+        replaced,
+        "a failed restore leaves claude.json exactly as it found it"
+    );
 }
 
 #[test]

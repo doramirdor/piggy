@@ -36,6 +36,7 @@ fn seed_day(store: &mut Store, id: &str, day_ts: &str, input: u64, output: u64) 
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context: BTreeMap::new(),
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store

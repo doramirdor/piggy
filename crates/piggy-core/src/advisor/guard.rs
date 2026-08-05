@@ -208,6 +208,161 @@ fn numbers_in(text: &str) -> Vec<f64> {
 /// findings either way, so a dropped annotation costs the user nothing, while a
 /// surviving fabrication costs them their trust in the numbers next to it.
 pub fn accept(raw: &str, facts: &Facts) -> Result<Vec<Annotation>> {
+    let names = config_names(facts);
+    // A ledger annotation exists to name the configuration item behind a
+    // finding, so one that names none has nothing to say.
+    accept_with(raw, facts, &|_id, text| {
+        names.iter().any(|n| text.contains(n.as_str()))
+    })
+}
+
+/// The saver sheet's acceptance pass ([`super::facts::Facts::savers`]).
+///
+/// Identical checks, with one substitution: the thing an annotation must name
+/// is the **saver it is about**, not a configuration item. Without that swap
+/// every saver annotation would be dropped, since the saver sheet carries no
+/// `configuration` block at all; with it, a model that writes about the wrong
+/// saver or about savers in general still fails closed.
+pub fn accept_savers(raw: &str, facts: &Facts) -> Result<Vec<Annotation>> {
+    let names = saver_names(facts);
+    let findings = findings(facts);
+    let example = example();
+    accept_with(raw, facts, &|id, text| {
+        if !names
+            .iter()
+            .any(|(fid, name)| fid == id && text.contains(name.as_str()))
+        {
+            return false;
+        }
+        if unsupported(text) || restates(&example, text) {
+            return false;
+        }
+        !findings
+            .iter()
+            .any(|(fid, finding)| fid == id && restates(finding, text))
+    })
+}
+
+/// Claims about a stream that was never measurable.
+///
+/// The saver sheet withholds the medians of an unsettled stream precisely so
+/// this sentence cannot be built (see [`super::facts::Facts::savers`]), and a
+/// live 4B wrote it anyway, from nothing: "enabling RTK improves efficiency
+/// without increasing output or turns", about a saver whose turns arm the sheet
+/// says was too small to compare. Reassurance about an unmeasured stream is the
+/// most expensive thing this advisor could print, because it is the exact claim
+/// the measurement refused to make.
+const UNSUPPORTED: &[&str] = &[
+    "no impact",
+    "no effect",
+    "no downside",
+    "without increasing",
+    "without affecting",
+    "no increase",
+    "not increase",
+    "no additional",
+    "no extra",
+    "no risk",
+    "without risk",
+    "risk-free",
+    "risk free",
+    "safe to enable",
+    "no cost",
+    "minimal overhead",
+    "no overhead",
+];
+
+fn unsupported(text: &str) -> bool {
+    UNSUPPORTED.iter().any(|p| text.contains(p))
+}
+
+/// The worked example in the saver prompt, which a small model will happily
+/// paste back with a different saver's id on it.
+///
+/// The example earns its place: without it a 4B wrote about the three biggest
+/// percentages and ignored the saver that had been shown to do nothing, which is
+/// the line the reader most needs. With it, the model picked the right saver and
+/// returned the example's own sentences word for word. A pasted example is not an
+/// analysis, and the next time it is pasted it may land on a saver it is false
+/// about, so it is rejected the same way a restatement is.
+///
+/// These two constants are the **only** copy of that example: the prompt splices
+/// them in rather than spelling the sentences out again (`llama::saver_preamble`).
+/// An earlier version kept its own copy here, the prompt was rewritten, and the
+/// check spent that whole time matching a sentence no model had ever been shown.
+pub const EXAMPLE_HEADLINE: &str = "Example cuts cache write";
+pub const EXAMPLE_WHY: &str = "It reduces cache write and lowers your token costs.";
+
+/// The example in the shape [`accept_with`] hands to the anti-vacuity check:
+/// headline and `why` joined, lowercased.
+fn example() -> String {
+    format!("{EXAMPLE_HEADLINE} {EXAMPLE_WHY}").to_lowercase()
+}
+
+/// Whether an annotation is the finding in different words.
+///
+/// The one thing the prompt cannot make a small model stop doing. Told twice,
+/// in the system prompt and again in the task, a 4B still answered
+/// "93% less cache write" with "Reduces cache write by 93%" and called it
+/// advice. The reader has the finding on the same row, so a restatement is
+/// worse than silence: it doubles the height of the panel and adds nothing.
+///
+/// Measured by content-word overlap in the direction that matters: how much of
+/// the annotation came *out of* the finding. A line that is mostly the
+/// finding's own words is a restatement however it is arranged.
+fn restates(finding: &str, text: &str) -> bool {
+    let from_finding: BTreeSet<&str> = content_words(finding).collect();
+    if from_finding.is_empty() {
+        return false;
+    }
+    let words: Vec<&str> = content_words(text).collect();
+    if words.is_empty() {
+        return true;
+    }
+    let borrowed = words.iter().filter(|w| from_finding.contains(*w)).count();
+    borrowed * 10 >= words.len() * 6
+}
+
+/// Words worth comparing: everything that is not punctuation, a number, or one
+/// of the joins every English sentence has.
+fn content_words(s: &str) -> impl Iterator<Item = &str> {
+    const STOP: &[&str] = &[
+        "the", "a", "an", "and", "or", "but", "with", "without", "on", "off", "in", "of", "to",
+        "it", "its", "this", "that", "is", "are", "was", "were", "be", "been", "has", "have",
+        "had", "for", "by", "at", "as", "from", "than", "then", "so", "you", "your", "per",
+    ];
+    s.split(|c: char| !c.is_alphanumeric() && c != '%')
+        .filter(|w| w.len() > 2)
+        .filter(|w| !w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|w| w.trim_end_matches('%'))
+        .filter(|w| !w.is_empty() && !STOP.contains(&w.to_lowercase().as_str()))
+}
+
+/// `(id, finding)` for every saver on the sheet, lowercased.
+fn findings(facts: &Facts) -> Vec<(String, String)> {
+    let Some(items) = facts.value.get("savers").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|i| {
+            Some((
+                i.get("id")?.as_str()?.to_string(),
+                i.get("finding")?.as_str()?.to_lowercase(),
+            ))
+        })
+        .collect()
+}
+
+/// The shared body. `must_name` is the anti-vacuity check, and it is the only
+/// thing the two sheets disagree about: it receives the annotation's id and its
+/// lowercased text, and returns whether the annotation names the thing it is
+/// required to name.
+fn accept_with(
+    raw: &str,
+    facts: &Facts,
+    must_name: &dyn Fn(&str, &str) -> bool,
+) -> Result<Vec<Annotation>> {
     let allow = Allowlist::from_facts(facts);
     let parsed: Value = serde_json::from_str(&extract_json(raw))
         .context("the model did not return the requested JSON array")?;
@@ -242,6 +397,15 @@ pub fn accept(raw: &str, facts: &Facts) -> Result<Vec<Annotation>> {
         if hedges(headline) || hedges(why) {
             continue;
         }
+        // The annotation's whole job is to name the configuration item behind a
+        // finding, so one that names none has nothing to say. Told to skip those
+        // findings, a live 4B instead returned "No configuration item inflates
+        // hook_success" as an annotation: true, useless, and printed under a
+        // finding as though it were an explanation. Silence is the correct
+        // rendering of "nothing to add", and this is what produces it.
+        if !must_name(id, &format!("{headline} {why}").to_lowercase()) {
+            continue;
+        }
         out.push(Annotation {
             insight_id: id.to_string(),
             headline: headline.to_string(),
@@ -249,6 +413,44 @@ pub fn accept(raw: &str, facts: &Facts) -> Result<Vec<Annotation>> {
         });
     }
     Ok(out)
+}
+
+/// Every configuration item the fact sheet offered, plus the bare form of a
+/// `plugin@marketplace` name, which is how a model refers to it half the time.
+///
+/// Empty when the sweep did not run. Nothing is annotated in that case, which is
+/// correct rather than unfortunate: with no configuration there is no link to
+/// draw, and the deterministic findings already say everything else.
+fn config_names(facts: &Facts) -> Vec<String> {
+    let Some(items) = facts.value.pointer("/configuration/items").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in items.iter().filter_map(|i| i.get("name")?.as_str()) {
+        out.push(name.to_lowercase());
+        if let Some(bare) = name.split('@').next().filter(|b| !b.is_empty() && *b != name) {
+            out.push(bare.to_lowercase());
+        }
+    }
+    out
+}
+
+/// `(id, saver name)` for every saver on the sheet, lowercased. The name rather
+/// than the id: the model is writing for a reader, and "Sweep" is what the
+/// reader sees on the row.
+fn saver_names(facts: &Facts) -> Vec<(String, String)> {
+    let Some(items) = facts.value.get("savers").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|i| {
+            Some((
+                i.get("id")?.as_str()?.to_string(),
+                i.get("saver")?.as_str()?.to_lowercase(),
+            ))
+        })
+        .collect()
 }
 
 /// Slice out the JSON array, tolerating a code fence, a preamble, and a

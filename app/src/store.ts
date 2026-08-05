@@ -10,6 +10,7 @@ import type {
   SaversState,
   SourcesOverview,
   StatsOverview,
+  TaskTable,
   UsageSeries,
 } from "./types";
 
@@ -18,7 +19,7 @@ import type {
 // Dashboard and Reports were folded into Spend (they answered the same
 // question in different cuts) and Discovery became a section of Savers, which
 // is the tab that installs things.
-export type Tab = "spend" | "savers" | "proof" | "settings";
+export type Tab = "spend" | "savers" | "proof" | "settings" | "about";
 
 interface AppState {
   tab: Tab;
@@ -34,21 +35,38 @@ interface AppState {
    *  switch or a background refresh cannot re-trigger inference for the same
    *  data. `null` means "not asked yet for the current period". */
   annotatedPeriod: Period | null;
+  /** Per-saver advice from the same local model, keyed by `saver:<id>`. Not
+   *  period-scoped: the comparison behind it counts every session ever run. */
+  saverNotes: Annotation[];
+  /** Whether the saver pass has already been asked this session. One load is
+   *  ~3GB resident, so Proof asks once and never on a refresh. */
+  saverNotesAsked: boolean;
   sources: SourcesOverview | null;
   series: UsageSeries | null;
+  /** The task table, fetched only when the Tasks view is opened. `null` means
+   *  "not asked yet", which is why it has its own period marker below. */
+  tasks: TaskTable | null;
+  /** The period `tasks` holds. A background refresh must not serve last week's
+   *  table beside this week's header, and a period switch clears both. */
+  tasksPeriod: Period | null;
   savers: SaversState | null;
   banner: Banner | null;
   booting: boolean;
+  /** A period switch is in flight. The screens keep the old slice on screen and
+   *  dim it rather than blanking, so the swap reads as the same page changing. */
+  periodBusy: boolean;
   busySavers: string[];
   masterBusy: boolean;
 
   setTab: (t: Tab) => void;
   setPeriod: (p: Period) => Promise<void>;
+  loadTasks: () => Promise<void>;
   boot: () => Promise<void>;
   loadStats: () => Promise<void>;
   /** Ask the local advisor for prose about the current findings. Cheap to call
    *  repeatedly: it no-ops unless the period's findings are un-annotated. */
   loadAnnotations: () => Promise<void>;
+  loadSaverNotes: () => Promise<void>;
   loadSavers: () => Promise<void>;
   refresh: () => Promise<void>;
   toggleSaver: (id: string, on: boolean) => Promise<void>;
@@ -94,12 +112,17 @@ export const useStore = create<AppState>((set, get) => {
   ledger: null,
   insights: [],
   annotations: [],
+  saverNotes: [],
+  saverNotesAsked: false,
   annotatedPeriod: null,
   sources: null,
   series: null,
+  tasks: null,
+  tasksPeriod: null,
   savers: null,
   banner: null,
   booting: true,
+  periodBusy: false,
   busySavers: [],
   masterBusy: false,
 
@@ -109,8 +132,39 @@ export const useStore = create<AppState>((set, get) => {
     // Last period's prose next to this period's numbers is exactly the mismatch
     // the whole design avoids, so a period change is the one thing that discards
     // annotations and re-arms inference.
-    set({ period, annotations: [], annotatedPeriod: null });
-    await get().loadStats();
+    // The task table goes with them: it is windowed and compared against the
+    // window before it, so it is wrong the instant the window changes.
+    set({
+      period,
+      annotations: [],
+      annotatedPeriod: null,
+      tasks: null,
+      tasksPeriod: null,
+      periodBusy: true,
+    });
+    try {
+      await get().loadStats();
+    } finally {
+      // Only the newest switch clears the flag: two fast clicks leave the
+      // loader up until the second one's data lands.
+      if (get().period === period) set({ periodBusy: false });
+    }
+  },
+
+  /** Fetched on demand: the Tasks view is one of three subviews and may never
+   *  be opened, and `loadStats` runs on the watcher's 400ms debounce. Putting
+   *  this in that batch would run a two-query join on every write to a session
+   *  log for a table nobody is looking at. */
+  loadTasks: async () => {
+    const period = get().period;
+    if (get().tasksPeriod === period) return;
+    try {
+      const tasks = await api.taskTable(period);
+      // A period change mid-flight makes this answer the wrong one.
+      if (get().period === period) set({ tasks, tasksPeriod: period });
+    } catch (e) {
+      get().showError(e);
+    }
   },
 
   loadAnnotations: async () => {
@@ -129,6 +183,22 @@ export const useStore = create<AppState>((set, get) => {
       // Silent: the findings are already correct and complete without prose.
       // Re-arm so a later visit can retry.
       if (get().period === period) set({ annotatedPeriod: null });
+    }
+  },
+
+  /** Ask the local model for per-saver advice. Called by Proof, once.
+   *
+   *  Deliberately not part of `refresh`: without the guard of `saverNotesAsked`
+   *  a 4B would load on every session-log write, whichever tab is open. */
+  loadSaverNotes: async () => {
+    if (get().saverNotesAsked) return;
+    set({ saverNotesAsked: true });
+    try {
+      set({ saverNotes: await api.advisorSavers() });
+    } catch {
+      // Silent: the deterministic summary on each row is the product, and it is
+      // already rendered. Re-arm so a later visit can retry.
+      set({ saverNotesAsked: false });
     }
   },
 

@@ -12,7 +12,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::parser::SessionParse;
 use crate::pricing::Pricing;
 
-const SCHEMA_VERSION: i64 = 5;
+// 6: added `tasks`, the per-prompt unit. Everything before it was keyed by
+// session (a container) or normalised per turn (a denominator); neither can
+// answer "which of my tasks was expensive" or "did it work".
+// 7: `tasks.n_tool_results`, the denominator `n_tool_errors` never had. Also the
+// first version anything READS: v6 shipped the table but not the re-index that
+// fills it, so every v6 database in the wild has session rows and no task rows.
+// Bumping past 6 is what gets those databases their one-time re-parse.
+const SCHEMA_VERSION: i64 = 7;
 
 /// How a session's saver assignment came to be, stored in `session_savers.source`.
 /// `rotation`/`holdout` are Piggy's A/B scheduler; `manual` is a user toggle;
@@ -69,6 +76,8 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<()> {
+        // The CREATE TABLEs run first so `meta` exists to be read; the version
+        // it holds is only overwritten at the very end of this function.
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
@@ -112,6 +121,24 @@ impl Store {
                 n          INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (session_id, tool_name)
             );
+            -- One row per user prompt: the thing a person actually asked for.
+            -- `n_tool_errors` is the outcome signal, and the reason this table
+            -- exists as much as the token columns are: on real data a task that
+            -- hits a tool error costs several times a clean one, which no
+            -- session-level or per-turn figure can see.
+            CREATE TABLE IF NOT EXISTS tasks (
+                session_id    TEXT NOT NULL,
+                prompt_id     TEXT NOT NULL,
+                spend_tokens  INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                n_turns       INTEGER NOT NULL DEFAULT 0,
+                n_tool_calls  INTEGER NOT NULL DEFAULT 0,
+                n_tool_results INTEGER NOT NULL DEFAULT 0,
+                n_tool_errors INTEGER NOT NULL DEFAULT 0,
+                started_at    TEXT,
+                ended_at      TEXT,
+                PRIMARY KEY (session_id, prompt_id)
+            );
             CREATE TABLE IF NOT EXISTS session_savers (
                 session_id TEXT NOT NULL,
                 saver_id   TEXT NOT NULL,
@@ -135,10 +162,15 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
             CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
             CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);
+            -- Ranking tasks by cost is the primary read, and correlating error
+            -- count with spend is the second.
+            CREATE INDEX IF NOT EXISTS idx_tasks_spend ON tasks(spend_tokens DESC);
+            CREATE INDEX IF NOT EXISTS idx_tasks_errors ON tasks(n_tool_errors);
             CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);
             CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
             CREATE INDEX IF NOT EXISTS idx_session_context_kind ON session_context(kind);",
         )?;
+        let stored = self.schema_version()?;
         // v3 → v4: sessions grew source/interface/client (multi-tool
         // observability). ALTERs run before the index that uses the columns;
         // pre-existing rows are Claude Code by construction (the only source
@@ -150,14 +182,52 @@ impl Store {
                  ALTER TABLE sessions ADD COLUMN client TEXT;",
             )?;
         }
+        // v6 → v7: tasks grew `n_tool_results`. Additive, like the columns above.
+        if !self.column_exists("tasks", "n_tool_results")? {
+            self.conn.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN n_tool_results INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         self.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source, interface);",
         )?;
+        // A new schema can only fill its new columns by re-reading the logs, and
+        // incremental indexing skips every file whose (size, mtime_ns) still
+        // match, which is every finished session, forever. Poisoning the pair is
+        // what makes the next run re-parse: without it v6's `tasks` table stayed
+        // empty on every existing install and the UI blamed logs that do carry
+        // `promptId`.
+        //
+        // An UPDATE rather than DELETE because the rows carry more than the skip
+        // check: `session_rate_map` reads `files.path` to keep subagent
+        // sub-sessions out of attribution, and dropping them would widen that
+        // population until the re-index finished writing them back.
+        //
+        // `None` is a database this function has never run on: nothing indexed,
+        // so nothing to invalidate.
+        if matches!(stored, Some(v) if v < SCHEMA_VERSION) {
+            self.conn
+                .execute("UPDATE files SET size = -1, mtime_ns = -1", [])?;
+        }
         self.conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
         Ok(())
+    }
+
+    /// The schema version this database was last written by, or `None` before
+    /// any migration has run against it.
+    pub fn schema_version(&self) -> Result<Option<i64>> {
+        let v: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(v.and_then(|s| s.parse().ok()))
     }
 
     /// Whether `table` already has a column named `col` (SQLite pragma probe,
@@ -256,6 +326,34 @@ impl Store {
                 params![parse.session_id, tool, n],
             )?;
         }
+        // Replace wholesale, like every other per-session table: a re-parse of
+        // the same file is authoritative over whatever a partial earlier pass
+        // wrote.
+        tx.execute(
+            "DELETE FROM tasks WHERE session_id = ?1",
+            params![parse.session_id],
+        )?;
+        for (prompt_id, t) in &parse.tasks {
+            tx.execute(
+                "INSERT OR REPLACE INTO tasks
+                   (session_id, prompt_id, spend_tokens, cache_read_tokens,
+                    n_turns, n_tool_calls, n_tool_results, n_tool_errors,
+                    started_at, ended_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    parse.session_id,
+                    prompt_id,
+                    t.spend_tokens,
+                    t.cache_read_tokens,
+                    t.n_turns,
+                    t.n_tool_calls,
+                    t.n_tool_results,
+                    t.n_tool_errors,
+                    t.first_ts,
+                    t.last_ts
+                ],
+            )?;
+        }
         tx.execute(
             "DELETE FROM session_context WHERE session_id = ?1",
             params![parse.session_id],
@@ -277,28 +375,40 @@ impl Store {
     }
 
     /// Summed `tool_use` counts across the most recent `n_sessions` sessions
-    /// (by last-activity time). Keys are full tool names (`mcp__<server>__<tool>`
-    /// / `Skill`). Backs Sweep's usage cross-reference.
+    /// (by last-activity time), split by the project each session ran in. Keys
+    /// are full tool names (`mcp__<server>__<tool>` / `Skill`), then project
+    /// path; a session with no recorded project lands under `""`.
+    ///
+    /// Split rather than totalled because a total cannot tell a tool that earns
+    /// its place everywhere from one that earns it in a single project and is
+    /// loaded by every other session for nothing. Backs Sweep's usage
+    /// cross-reference and its scope call.
     pub fn recent_tool_usage(
         &self,
         n_sessions: usize,
-    ) -> Result<std::collections::BTreeMap<String, u64>> {
+    ) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tool_name, SUM(n)
-             FROM session_tools
-             WHERE session_id IN (
+            "SELECT t.tool_name, COALESCE(s.project, ''), SUM(t.n)
+             FROM session_tools t
+             JOIN sessions s ON s.session_id = t.session_id
+             WHERE t.session_id IN (
                  SELECT session_id FROM sessions
                  ORDER BY ended_at DESC LIMIT ?1
              )
-             GROUP BY tool_name",
+             GROUP BY t.tool_name, s.project",
         )?;
         let rows = stmt.query_map(params![n_sessions as i64], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
         })?;
-        let mut out = std::collections::BTreeMap::new();
+        let mut out: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>> =
+            std::collections::BTreeMap::new();
         for row in rows {
-            let (k, v) = row?;
-            out.insert(k, v);
+            let (tool, project, n) = row?;
+            out.entry(tool).or_default().insert(project, n);
         }
         Ok(out)
     }

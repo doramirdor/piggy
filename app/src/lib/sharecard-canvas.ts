@@ -2,33 +2,62 @@
 // cool stock, hairline rules, a Hoefler figure carrying the whole composition.
 // All text comes from shareCardText() so the honesty rules live in one place.
 //
-// The exported PNG is deliberately the LIGHT variant. The card is the one
-// artefact that leaves the machine, cool statement stock is the distinctive half
-// of the identity, and a pale card reads better in a feed of dark ones.
+// Light is the default variant: the card is the one artefact that leaves the
+// machine, cool statement stock is the distinctive half of the identity, and a
+// pale card reads better in a feed of dark ones. Dark is offered, not assumed.
 
 import type { ShareCardData } from "../types";
 import { shareCardText } from "./sharecard";
 
-export const CARD_W = 2400;
-export const CARD_H = 1260;
-const S = 4; // scale vs the 600x315 mockup
+export interface ShareCardOptions {
+  theme: "light" | "dark";
+  /** Logical export size; the PNG is drawn at 2x for retina. */
+  width: number;
+  height: number;
+  /** Which parts of the claim the card carries. */
+  include: { percent: boolean; totals: boolean; method: boolean };
+}
+
+/** Export presets. The first is the default. */
+export const CARD_SIZES = [
+  { label: "1200 × 630 (Twitter / X)", width: 1200, height: 630 },
+  { label: "1080 × 1080 (Square)", width: 1080, height: 1080 },
+];
+
+export const DEFAULT_SHARE_OPTIONS: ShareCardOptions = {
+  theme: "light",
+  width: CARD_SIZES[0].width,
+  height: CARD_SIZES[0].height,
+  include: { percent: true, totals: true, method: true },
+};
 
 // Native macOS faces, matching the app. Canvas needs real family names.
 const SERIF = '"Hoefler Text", "Baskerville", Georgia, serif';
 const SANS = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif';
 const MONO = 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace';
 
-const STOCK = "#e6ebef";
-const SHEET = "#f4f7f9";
-const INK = "#0d1b26";
-const INK_2 = "#4d5c68";
-const INK_3 = "#5b6873";
-const RULE = "#6b7a87";
-const MEASURED = "#1c6b48";
-
-function px(n: number): number {
-  return n * S;
-}
+// Both palettes are copied from index.css by hand: Canvas2D cannot read custom
+// properties, which is why this file is in the palette test's ALLOW list.
+const PALETTE = {
+  light: {
+    stock: "#e6ebef",
+    sheet: "#f4f7f9",
+    ink: "#0d1b26",
+    ink2: "#4d5c68",
+    ink3: "#5b6873",
+    rule: "#6b7a87",
+    measured: "#1c6b48",
+  },
+  dark: {
+    stock: "#070d13",
+    sheet: "#101a23",
+    ink: "#e9eef2",
+    ink2: "#9aa8b4",
+    ink3: "#7d8d99",
+    rule: "#697a85",
+    measured: "#3fae7a",
+  },
+};
 
 /** Tracked-out uppercase, the margin voice. Canvas has no letter-spacing on
  *  older WKWebView builds, so this draws glyph by glyph and returns the width. */
@@ -56,25 +85,37 @@ function folio(
 }
 
 /** Render the card to a fresh canvas element. */
-export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
+export function renderShareCard(
+  data: ShareCardData,
+  opts: ShareCardOptions = DEFAULT_SHARE_OPTIONS,
+): HTMLCanvasElement {
   const t = shareCardText(data);
   const canvas = document.createElement("canvas");
-  canvas.width = CARD_W;
-  canvas.height = CARD_H;
+  const W = opts.width * 2;
+  const H = opts.height * 2;
+  canvas.width = W;
+  canvas.height = H;
   const ctx = canvas.getContext("2d");
   if (!ctx) return canvas;
+
+  // Type and rules scale off the width, so the 600x315 mockup's proportions
+  // survive any preset; the vertical anchors are read off the real height.
+  const S = W / 600;
+  const px = (n: number) => n * S;
+  const c = PALETTE[opts.theme];
+  const inc = opts.include;
 
   const padX = px(38);
   const padY = px(32);
 
   // --- the sheet: flat stock, one inset sheet, no glow and no grain ------
-  ctx.fillStyle = STOCK;
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-  ctx.fillStyle = SHEET;
-  ctx.fillRect(px(14), px(14), CARD_W - px(28), CARD_H - px(28));
-  ctx.strokeStyle = RULE;
+  ctx.fillStyle = c.stock;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = c.sheet;
+  ctx.fillRect(px(14), px(14), W - px(28), H - px(28));
+  ctx.strokeStyle = c.rule;
   ctx.lineWidth = Math.max(1, px(0.4));
-  ctx.strokeRect(px(14), px(14), CARD_W - px(28), CARD_H - px(28));
+  ctx.strokeRect(px(14), px(14), W - px(28), H - px(28));
 
   ctx.textBaseline = "middle";
 
@@ -85,50 +126,57 @@ export function renderShareCard(data: ShareCardData): HTMLCanvasElement {
   const markW = 16.6 * u + px(8);
   ctx.textAlign = "left";
   ctx.font = `400 ${px(21)}px ${SERIF}`;
-  ctx.fillStyle = INK;
+  ctx.fillStyle = c.ink;
   ctx.fillText("Piggy", padX + markW, topY);
-  folio(ctx, t.week, CARD_W - padX, topY, px(10.5), INK_3, "right");
+  if (inc.method) folio(ctx, t.week, W - padX, topY, px(10.5), c.ink3, "right");
 
   // rule under the nameplate, the way a masthead is ruled off
   const ruleY = topY + px(20);
-  ctx.fillStyle = INK;
-  ctx.fillRect(padX, ruleY, CARD_W - padX * 2, Math.max(2, px(0.6)));
+  ctx.fillStyle = c.ink;
+  ctx.fillRect(padX, ruleY, W - padX * 2, Math.max(2, px(0.6)));
 
   // --- the figure IS the picture -----------------------------------------
   // Piggy can never have imagery, so the number carries the scale contrast a
   // magazine gets from a full-bleed photograph.
-  const midY = CARD_H / 2 + px(10);
-  folio(ctx, t.kicker, padX, midY - px(64), px(11), INK_3);
+  const midY = H / 2 + px(10);
+  if (inc.totals) {
+    folio(ctx, t.kicker, padX, midY - px(64), px(11), c.ink3);
 
-  ctx.textAlign = "left";
-  // Fit to the column rather than trusting one size: `t.big` swings from "1.7x
-  // longer" to "1.2M tokens" depending on what Piggy can honestly claim, and a
-  // fixed size clipped the longer strings off the edge of the card.
-  const bigMax = CARD_W - padX * 2;
-  let bigSize = px(112);
-  do {
-    ctx.font = `400 ${bigSize}px ${SERIF}`;
-    if (ctx.measureText(t.big).width <= bigMax) break;
-    bigSize -= px(2);
-  } while (bigSize > px(40));
-  // Green is spent here only when a randomised holdout stands behind the
-  // number. Everything else on this card is ink.
-  ctx.fillStyle = data.headlineLabel === "measured" ? MEASURED : INK;
-  ctx.fillText(t.big, padX, midY);
+    ctx.textAlign = "left";
+    // Fit to the column rather than trusting one size: `t.big` swings from "1.7x
+    // longer" to "1.2M tokens" depending on what Piggy can honestly claim, and a
+    // fixed size clipped the longer strings off the edge of the card.
+    const bigMax = W - padX * 2;
+    let bigSize = px(112);
+    do {
+      ctx.font = `400 ${bigSize}px ${SERIF}`;
+      if (ctx.measureText(t.big).width <= bigMax) break;
+      bigSize -= px(2);
+    } while (bigSize > px(40));
+    // Green is spent here only when a randomised holdout stands behind the
+    // number. Everything else on this card is ink.
+    ctx.fillStyle = data.headlineLabel === "measured" ? c.measured : c.ink;
+    ctx.fillText(t.big, padX, midY);
+  }
 
-  ctx.font = `400 ${px(15)}px ${SANS}`;
-  ctx.fillStyle = INK_2;
-  ctx.fillText(t.sub, padX, midY + px(74));
+  if (inc.percent) {
+    ctx.textAlign = "left";
+    ctx.font = `400 ${px(15)}px ${SANS}`;
+    ctx.fillStyle = c.ink2;
+    // Without the figure above it the multiplier is the claim, so it moves up
+    // into the optical centre instead of hanging under empty space.
+    ctx.fillText(t.sub, padX, inc.totals ? midY + px(74) : midY);
+  }
 
   // --- footer: ruled off, proof credit left, url right -------------------
-  const botY = CARD_H - padY - px(12);
-  ctx.fillStyle = RULE;
-  ctx.fillRect(padX, botY - px(24), CARD_W - padX * 2, Math.max(1, px(0.3)));
-  folio(ctx, t.proof, padX, botY, px(10.5), INK_3);
+  const botY = H - padY - px(12);
+  ctx.fillStyle = c.rule;
+  ctx.fillRect(padX, botY - px(24), W - padX * 2, Math.max(1, px(0.3)));
+  if (inc.method) folio(ctx, t.proof, padX, botY, px(10.5), c.ink3);
   ctx.textAlign = "right";
   ctx.font = `600 ${px(12)}px ${SANS}`;
-  ctx.fillStyle = INK_2;
-  ctx.fillText(t.url, CARD_W - padX, botY);
+  ctx.fillStyle = c.ink2;
+  ctx.fillText(t.url, W - padX, botY);
 
   return canvas;
 }

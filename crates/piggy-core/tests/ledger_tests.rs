@@ -47,6 +47,7 @@ fn insert(
         sidechain: ModelTokens::default(),
         tool_use_counts: BTreeMap::new(),
         context,
+        tasks: Default::default(),
         parse_errors: 0,
     };
     store

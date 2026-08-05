@@ -1,7 +1,7 @@
 //! Per-saver configuration: read and apply the catalog's `configOptions`.
 //!
 //! An option's `apply` object says how a chosen value lands on disk. v1 knows
-//! one kind:
+//! two kinds:
 //!
 //! * `json_field` — set one string field in a JSON file the saver itself
 //!   reads (e.g. Caveman's documented user config
@@ -10,6 +10,10 @@
 //!   atomic (temp + rename). Piggy also remembers the choice in its own
 //!   state ledger, but the saver's file is the source of truth reported back
 //!   to the UI — if the user edits it by hand, Piggy shows the real value.
+//! * `text_file` — the whole file *is* the value, one bare line (Honey's
+//!   `~/.claude/.honey-active`, which holds `lite` / `full` / `ultra`). Same
+//!   atomic write and same "saver's file is truth" rule; the only difference
+//!   is there is no surrounding document to preserve.
 //!
 //! Unknown apply kinds refuse the action ("catalog newer than app"), the same
 //! contract as install steps. Values are validated against the option's
@@ -25,7 +29,7 @@ use crate::registry::{Catalog, ConfigOption, Entry};
 use crate::state::PiggyState;
 
 /// Apply kinds this build understands.
-pub const KNOWN_APPLY_KINDS: &[&str] = &["json_field"];
+pub const KNOWN_APPLY_KINDS: &[&str] = &["json_field", "text_file"];
 
 /// One option resolved to its current effective value, ready for the UI.
 #[derive(Debug, Clone)]
@@ -111,6 +115,42 @@ fn write_json_field(opt: &ConfigOption, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// The expanded path of a `text_file` apply.
+fn text_file_target(opt: &ConfigOption) -> Result<PathBuf> {
+    let path = opt
+        .apply
+        .get("path")
+        .and_then(Value::as_str)
+        .context("configOption apply.path is missing")?;
+    Ok(expand_path(path))
+}
+
+/// Read a `text_file` target's single line. Never errors — a missing or
+/// unreadable file just means "no current value on disk". An empty file means
+/// the saver is off, which is not one of the option's choices, so report
+/// nothing rather than an unselectable value.
+fn read_text_file(opt: &ConfigOption) -> Option<String> {
+    let text = std::fs::read_to_string(text_file_target(opt).ok()?).ok()?;
+    let value = text.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Write a `text_file` target: the value plus a trailing newline, atomically.
+/// Unlike `json_field` there is nothing in the file to preserve, so an
+/// unparseable prior value is simply replaced.
+fn write_text_file(opt: &ConfigOption, value: &str) -> Result<()> {
+    let path = text_file_target(opt)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("piggy-tmp");
+    std::fs::write(&tmp, format!("{value}\n").as_bytes())
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
 fn entry<'c>(catalog: &'c Catalog, id: &str) -> Result<&'c Entry> {
     catalog
         .get(id)
@@ -126,6 +166,7 @@ pub fn get_config(catalog: &Catalog, state: &PiggyState, id: &str) -> Result<Vec
         .map(|opt| {
             let on_disk = match apply_kind(opt) {
                 "json_field" => read_json_field(opt),
+                "text_file" => read_text_file(opt),
                 _ => None,
             };
             let remembered = chosen.and_then(|c| c.get(&opt.key).cloned());
@@ -159,6 +200,7 @@ pub fn set_config(
     }
     match apply_kind(opt) {
         "json_field" => write_json_field(opt, value)?,
+        "text_file" => write_text_file(opt, value)?,
         other => bail!("unknown config apply kind '{other}' - this catalog is newer than Piggy"),
     }
 

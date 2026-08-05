@@ -92,6 +92,11 @@ struct RawLine {
     /// the ledger's whole "from where".
     #[serde(default)]
     attachment: Option<serde_json::Value>,
+    /// The task key. Every user line that starts a turn carries it, and the
+    /// assistant work it causes follows until the next one. This is the only
+    /// boundary in the log corresponding to "a thing the user asked for".
+    #[serde(default, rename = "promptId")]
+    prompt_id: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -222,6 +227,10 @@ pub struct SessionParse {
     /// messages, so the ledger reconciles against `session_models` rather than
     /// estimating.
     pub context: BTreeMap<String, ContextTokens>,
+    /// Per-task aggregates, keyed by `promptId`. Empty for logs that predate the
+    /// field, so consumers must read "no tasks" as "not recorded", never as
+    /// "no work happened".
+    pub tasks: BTreeMap<String, TaskAgg>,
     pub parse_errors: u64,
 }
 
@@ -231,6 +240,46 @@ struct AssistantRec {
     is_sidechain: bool,
     /// Sweep-relevant tool_use names in this (deduplicated) assistant message.
     tool_uses: Vec<String>,
+    /// Every tool_use block in it, unfiltered. `tool_uses` answers a Sweep
+    /// question ("which MCP servers earn their place"); a task's call count is a
+    /// different question and the filter is wrong for it.
+    n_tool_uses: u64,
+    /// Which task this message belongs to, captured at read time. Assistant
+    /// lines carry no `promptId`, so it comes from the last user line seen.
+    /// Recorded here because dedup is last-wins and the token fold runs after
+    /// the whole file is read.
+    prompt_id: Option<String>,
+}
+
+/// One task: everything that happened because of a single user prompt.
+///
+/// The unit the product has been missing. A session is a container and a turn
+/// is a denominator; this is the thing a person actually asked for, and the
+/// only level at which "was that expensive?" and "did it work?" can both be
+/// answered.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct TaskAgg {
+    /// Plan-metered spend: input + output + cache write. Cache reads excluded,
+    /// matching `docs/measurement.md`, so this is comparable to the headline.
+    pub spend_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// Deduplicated assistant messages caused by this prompt.
+    pub n_turns: u64,
+    /// Every tool_use block in the task's assistant messages.
+    pub n_tool_calls: u64,
+    /// tool_result blocks seen, flagged or not. The denominator: an error count
+    /// with no basis beside it says nothing, and 2 errors out of 40 calls and 2
+    /// out of 2 are not the same task. It does not share a footing with
+    /// [`Self::n_tool_calls`]: calls are folded over the requestId-deduplicated
+    /// assistant records while results accumulate over every user line as read,
+    /// so a log that replays user lines can report more results than calls.
+    pub n_tool_results: u64,
+    /// tool_result blocks flagged `is_error`. The outcome signal: a task that
+    /// hits one costs several times a clean one, and nothing in Piggy could see
+    /// that before this field existed.
+    pub n_tool_errors: u64,
+    pub first_ts: Option<String>,
+    pub last_ts: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +300,10 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
     let reader = BufReader::new(File::open(path)?);
 
     let mut dedup: HashMap<String, AssistantRec> = HashMap::new();
+    // The task cursor. Set by any line carrying `promptId` (user turns do), and
+    // every assistant message after it belongs to that task until the next one.
+    let mut current_prompt: Option<String> = None;
+    let mut tasks: BTreeMap<String, TaskAgg> = BTreeMap::new();
     // The ledger needs ORDER, which `dedup` throws away. `order` records each
     // assistant message the first time its key is seen, paired with whatever was
     // injected since the previous one. A streaming rewrite of the same requestId
@@ -311,6 +364,20 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
             }
         }
 
+        // Task cursor first, so every arm below can attribute to it.
+        if let Some(pid) = raw.prompt_id.as_ref() {
+            let t = tasks.entry(pid.clone()).or_default();
+            if t.first_ts.is_none() {
+                t.first_ts = raw.timestamp.clone();
+            }
+            current_prompt = Some(pid.clone());
+        }
+        if let (Some(pid), Some(ts)) = (current_prompt.as_ref(), raw.timestamp.as_ref()) {
+            if let Some(t) = tasks.get_mut(pid) {
+                t.last_ts = Some(ts.clone());
+            }
+        }
+
         match raw.line_type.as_deref() {
             Some("assistant") => {
                 let model = raw.message.as_ref().and_then(|m| m.model.clone());
@@ -331,10 +398,10 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                     .as_ref()
                     .and_then(|m| m.usage.clone())
                     .unwrap_or_default();
-                let tool_uses = raw
+                let (tool_uses, n_tool_uses) = raw
                     .message
                     .as_ref()
-                    .map(|m| sweep_tool_use_names(&m.content))
+                    .map(|m| scan_tool_uses(&m.content))
                     .unwrap_or_default();
                 let model_key = model.unwrap_or_else(|| UNKNOWN_MODEL.to_string());
                 if !dedup.contains_key(&key) {
@@ -349,11 +416,24 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                         usage,
                         is_sidechain: raw.is_sidechain,
                         tool_uses,
+                        n_tool_uses,
+                        prompt_id: current_prompt.clone(),
                     },
                 );
             }
             Some("user") => {
                 n_user_msgs += 1;
+                // Count tool outcomes against the task that caused them. The
+                // error flag is the whole point: it is the only success signal
+                // the log carries, and it was being read past.
+                if let (Some(pid), Some(m)) = (current_prompt.as_ref(), raw.message.as_ref()) {
+                    let (n_res, n_err) = tool_result_counts(&m.content);
+                    if n_res > 0 {
+                        let t = tasks.entry(pid.clone()).or_default();
+                        t.n_tool_results += n_res;
+                        t.n_tool_errors += n_err;
+                    }
+                }
                 if raw
                     .message
                     .as_ref()
@@ -415,6 +495,22 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         .map(crate::sources::classify_claude_entrypoint)
         .unwrap_or(crate::sources::Interface::Unknown);
 
+    // Fold the deduplicated assistant records into their tasks. Done here, not
+    // inline, because dedup is last-wins: a streamed message rewritten three
+    // times must count once, and only the final record knows its true usage.
+    for rec in dedup.values() {
+        let Some(pid) = rec.prompt_id.as_ref() else {
+            continue;
+        };
+        let t = tasks.entry(pid.clone()).or_default();
+        t.n_turns += 1;
+        t.n_tool_calls += rec.n_tool_uses;
+        t.spend_tokens += rec.usage.input_tokens.unwrap_or(0)
+            + rec.usage.output_tokens.unwrap_or(0)
+            + rec.usage.cache_creation_input_tokens.unwrap_or(0);
+        t.cache_read_tokens += rec.usage.cache_read_input_tokens.unwrap_or(0);
+    }
+
     Ok(SessionParse {
         session_id,
         source: crate::sources::SourceKind::ClaudeCode.as_str().to_string(),
@@ -431,6 +527,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
         sidechain,
         tool_use_counts,
         context,
+        tasks,
         parse_errors,
     })
 }
@@ -520,25 +617,54 @@ fn attribute_context(
     out
 }
 
-/// Extract Sweep-relevant `tool_use` names from an assistant message's content:
-/// MCP tool invocations (`mcp__<server>__<tool>`) and `Skill`. Other tool names
-/// are ignored so the per-session table stays tiny.
-fn sweep_tool_use_names(content: &Option<serde_json::Value>) -> Vec<String> {
+/// `(sweep-relevant names, every tool_use block)` in an assistant message.
+///
+/// The names are filtered to MCP invocations (`mcp__<server>__<tool>`) and
+/// `Skill` so the per-session Sweep table stays tiny. The count is not: that
+/// filter is a display choice for one table, and reusing it as a task's call
+/// count reported `n_tool_calls = 0` for a task that ran forty Reads while
+/// `n_tool_errors` still counted the two that failed.
+fn scan_tool_uses(content: &Option<serde_json::Value>) -> (Vec<String>, u64) {
     let Some(serde_json::Value::Array(blocks)) = content else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
     let mut names = Vec::new();
+    let mut n = 0;
     for b in blocks {
         if b.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
             continue;
         }
+        n += 1;
         if let Some(name) = b.get("name").and_then(|n| n.as_str()) {
             if name.starts_with("mcp__") || name == "Skill" {
                 names.push(name.to_string());
             }
         }
     }
-    names
+    (names, n)
+}
+
+/// `(tool_results, of which errors)` in one user message.
+///
+/// `is_error` is absent on plenty of blocks (older logs, and results the client
+/// never flagged), and absent is NOT an error: it is counted only when the flag
+/// is explicitly true, so the error rate is a floor rather than a guess.
+fn tool_result_counts(content: &Option<serde_json::Value>) -> (u64, u64) {
+    let Some(serde_json::Value::Array(arr)) = content else {
+        return (0, 0);
+    };
+    let mut n = 0;
+    let mut errs = 0;
+    for el in arr {
+        if el.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+            continue;
+        }
+        n += 1;
+        if el.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
+            errs += 1;
+        }
+    }
+    (n, errs)
 }
 
 /// True if `content` is an array containing at least one `tool_result` block.

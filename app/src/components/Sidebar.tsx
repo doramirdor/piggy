@@ -31,6 +31,13 @@ const ICONS: Record<Tab, JSX.Element> = {
       <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.7a7 7 0 0 0-2.1 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1c.6.5 1.4.9 2.1 1.2L10 21h4l.5-2.7a7 7 0 0 0 2.1-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" />
     </svg>
   ),
+  about: (
+    <svg className="ni-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5.5" />
+      <circle cx="12" cy="7.9" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  ),
 };
 
 const LABELS: Record<Tab, string> = {
@@ -38,9 +45,10 @@ const LABELS: Record<Tab, string> = {
   savers: "Savers",
   proof: "Proof",
   settings: "Settings",
+  about: "About Piggy",
 };
 
-const ORDER: Tab[] = ["spend", "savers", "proof", "settings"];
+const ORDER: Tab[] = ["spend", "savers", "proof", "about", "settings"];
 
 export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
   const savers = useStore((s) => s.savers);
@@ -82,11 +90,23 @@ export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
           <span className={`mstate ${masterOn && anyEnabled ? "on" : "off"}`} aria-hidden />
           <div className="mtxt">
             <div className="m1">
-              {masterOn ? (anyEnabled ? "Savers on" : "No savers on") : "Savers are off"}
+              {savers === null
+                ? "Checking savers…"
+                : masterOn
+                  ? anyEnabled
+                    ? "Savers on"
+                    : "No savers on"
+                  : "Savers are off"}
             </div>
             <div className="m2">Measurement continues</div>
           </div>
-          <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Turn savers on or off" />
+          <Switch
+            on={masterOn}
+            busy={masterBusy}
+            disabled={savers === null}
+            onChange={toggleMaster}
+            label="Turn savers on or off"
+          />
         </div>
         <div className="version">v{APP_VERSION}</div>
       </div>

@@ -246,6 +246,9 @@ pub fn parse_codex_file(path: &Path) -> io::Result<SessionParse> {
         // floor/conversation split: the ledger UI can then say "not available
         // for this source" instead of showing a number built from nothing.
         context: BTreeMap::new(),
+        // Codex logs carry no prompt boundary, so tasks are simply not
+        // recorded for them. Empty means "not observable here", never "none".
+        tasks: BTreeMap::new(),
         parse_errors,
     })
 }

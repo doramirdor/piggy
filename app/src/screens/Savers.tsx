@@ -119,7 +119,7 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
           )}
           {saver.pinned && saver.enabled && !busy && (
             <button type="button" className="unpin-cta" onClick={() => unpin(saver.id)}>
-              Let Piggy rotate &amp; measure this
+              Let Piggy switch it on and off to measure it
             </button>
           )}
         </div>
@@ -147,6 +147,10 @@ function SaverRowItem({ saver }: { saver: SaverRow }) {
 
 export function Savers() {
   const savers = useStore((s) => s.savers);
+  // Until the list lands we do not know the master state. Defaulting it to
+  // false printed "Piggy is OFF" over a loading list, which is a claim, not a
+  // placeholder - and the wrong one for anyone whose savers are running.
+  const loading = savers === null;
   const masterOn = savers?.masterOn ?? false;
   // Master can be ON with every saver off. Keep the panel copy honest about
   // whether anything is actually running, matching the sidebar and hero.
@@ -168,7 +172,7 @@ export function Savers() {
       </div>
 
       <div
-        className={`master ${masterBusy ? `busy ${turningOn ? "turning-on" : "turning-off"}` : masterOn ? "on" : "off"}`}
+        className={`master ${masterBusy ? `busy ${turningOn ? "turning-on" : "turning-off"}` : loading || !masterOn ? "off" : "on"}`}
       >
         <div className="mpower">
           {masterBusy && <span className="mpower-ring" aria-hidden />}
@@ -177,7 +181,16 @@ export function Savers() {
             <path d="M7 6.3a7.5 7.5 0 1 0 10 0" />
           </svg>
         </div>
-        {masterBusy ? (
+        {loading ? (
+          <div className="txt">
+            <div className="t1">Checking Piggy…</div>
+            <div className="t2">Reading which savers are on.</div>
+            <div className="mstatus">
+              <i />
+              Status in a moment
+            </div>
+          </div>
+        ) : masterBusy ? (
           <div className="txt">
             <div className="t1">{turningOn ? "Turning Piggy on…" : "Turning Piggy off…"}</div>
             <div className="t2">
@@ -213,7 +226,13 @@ export function Savers() {
             </div>
           </div>
         )}
-        <Switch on={masterOn} busy={masterBusy} onChange={toggleMaster} label="Piggy master switch" />
+        <Switch
+          on={masterOn}
+          busy={masterBusy}
+          disabled={loading}
+          onChange={toggleMaster}
+          label="Piggy master switch"
+        />
       </div>
 
       <div className="sect-head">
@@ -222,14 +241,28 @@ export function Savers() {
       </div>
       <div className="rows">
         {savers === null ? (
-          <div className="row">
-            <div className="meta">
-              <div className="desc">Loading savers…</div>
-              <div className="progress" role="progressbar" aria-label="Loading savers">
-                <div className="progress-bar" />
+          <>
+            <div className="load-head">
+              <div className="load-txt">
+                <div className="desc">Loading savers…</div>
+                <div className="progress" role="progressbar" aria-label="Loading savers">
+                  <div className="progress-bar" />
+                </div>
               </div>
+              <span className="chip-spinner" role="status" aria-label="Loading" />
             </div>
-          </div>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div className="row skel" key={i} aria-hidden>
+                <div className="sk sk-ic" />
+                <div className="meta">
+                  <div className="sk sk-line" />
+                  <div className="sk sk-line sk-short" />
+                </div>
+                <div className="sk sk-chip" />
+                <div className="sk sk-sw" />
+              </div>
+            ))}
+          </>
         ) : savers.savers.length === 0 ? (
           <div className="row">
             <div className="desc">No savers available yet.</div>

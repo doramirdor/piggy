@@ -9,7 +9,7 @@ use crate::advisor::{self, AdvisorStatusDto, AnnotationDto};
 use crate::backend::{
     self, ApiError, AppPrefs, ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ReindexDto,
     RestoreDto, SaversState, ShareCardData, SourcesOverview, StatsOverview, SweepReportDto,
-    InsightDto, LedgerOverview, UsageSeries,
+    InsightDto, LedgerOverview, TaskTable, UsageSeries,
 };
 
 /// Run blocking `piggy-core` work off the main thread, flattening the join error.
@@ -54,6 +54,11 @@ pub async fn ledger_insights(period: String) -> Result<Vec<InsightDto>, ApiError
     run(move || backend::ledger_insights(period)).await
 }
 
+#[tauri::command]
+pub async fn task_table(period: String) -> Result<TaskTable, ApiError> {
+    run(move || backend::task_table(period)).await
+}
+
 // ---------------------------------------------------------------------------
 // local advisor (opt-in, off by default)
 // ---------------------------------------------------------------------------
@@ -95,6 +100,13 @@ pub async fn advisor_remove(model_id: String) -> Result<AdvisorStatusDto, ApiErr
 #[tauri::command]
 pub async fn advisor_annotate(period: String) -> Result<Vec<AnnotationDto>, ApiError> {
     run(move || advisor::annotate(period)).await
+}
+
+/// Per-saver advice, keyed by `saver:<id>`. Empty whenever the advisor is off,
+/// not downloaded, or produced nothing that survived the guard.
+#[tauri::command]
+pub async fn advisor_savers() -> Result<Vec<AnnotationDto>, ApiError> {
+    run(advisor::explain_savers).await
 }
 
 #[tauri::command]
@@ -269,6 +281,70 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<(), ApiError> 
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| ApiError::new("Couldn't open the link", e.to_string(), false))
+}
+
+/// Reveal Piggy's data folder in Finder. Takes no path on purpose: the only
+/// folder the About screen offers is the one Piggy owns.
+#[tauri::command]
+pub async fn open_data_folder(app: AppHandle) -> Result<(), ApiError> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = piggy_core::config::piggy_home();
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(|e| ApiError::new("Couldn't open the folder", e.to_string(), false))
+}
+
+// ---------------------------------------------------------------------------
+// About
+// ---------------------------------------------------------------------------
+
+/// What the About screen's system table shows. Every field is read from the
+/// running build or the filesystem — nothing here is a stand-in, because a
+/// version or a path that is decorative is worse than absent.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInfoDto {
+    pub version: String,
+    /// "Apple Silicon" / "Intel", as a Mac owner names it.
+    pub arch: String,
+    /// `~`-abbreviated so the screen doesn't leak the account name.
+    pub data_dir: String,
+    /// None until the database exists (first run, before the first index).
+    pub database: Option<String>,
+}
+
+/// Put `~` back so a screenshot of About doesn't carry the user's home path.
+fn tildify(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => match s.strip_prefix(&h) {
+            Some(rest) => format!("~{rest}"),
+            None => s,
+        },
+        _ => s,
+    }
+}
+
+#[tauri::command]
+pub async fn system_info() -> Result<SystemInfoDto, ApiError> {
+    run(|| {
+        let home = piggy_core::config::piggy_home();
+        let db = home.join("piggy.db");
+        Ok(SystemInfoDto {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            arch: match std::env::consts::ARCH {
+                "aarch64" => "Apple Silicon",
+                "x86_64" => "Intel",
+                other => other,
+            }
+            .to_string(),
+            data_dir: tildify(&home),
+            database: std::fs::metadata(&db).ok().map(|m| {
+                format!("SQLite · {:.1} MB", m.len() as f64 / 1_048_576.0)
+            }),
+        })
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------

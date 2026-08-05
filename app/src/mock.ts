@@ -25,6 +25,8 @@ import type {
   StatsOverview,
   SweepItem,
   SweepReport,
+  SystemInfo,
+  TaskTable,
   UsageSeries,
 } from "./types";
 
@@ -36,7 +38,7 @@ const NO_CLAUDE = MOCK_MODE === "noclaude";
 // ---------------------------------------------------------------------------
 
 function populatedSavers(): SaverRow[] {
-  return [
+  const rows: SaverRow[] = [
     {
       id: "sweep",
       name: "Sweep",
@@ -182,14 +184,26 @@ function populatedSavers(): SaverRow[] {
       launchCommand: null,
       badge: { kind: "measuring", delta: null, n: 4, nOn: 4, nOff: 0 },
     },
+    // The per-saver stream breakdown is grafted on from the real report, so the
+    // rows that expand in dev:mock expand onto the same comparison the product
+    // shows - and a saver with no attribution yet stays a plain row, as it does
+    // in the app.
   ];
+  return rows.map((s) => ({ ...s, ...(saverStreams[s.id] ?? {}) }));
 }
+
+const saverStreams = snapshot.saverStreams as Record<
+  string,
+  Pick<SaverRow, "streams" | "turns" | "summary" | "caveat">
+>;
 
 function emptySavers(): SaverRow[] {
   return populatedSavers().map((s) => ({
     ...s,
     installed: false,
     enabled: false,
+    streams: [],
+    turns: null,
     badge: { kind: "measuring", delta: null, n: 0, nOn: 0, nOff: 0 },
   }));
 }
@@ -372,10 +386,15 @@ function statsOverview(period: Period): StatsOverview {
         nBaseline: 0,
         baselineKind: "none",
         onRandomized: false,
+        nFullOnRandomized: 0,
         baselineClean: false,
+        multiplierState: "no_data",
         minGroup: 10,
         streams: [],
         turns: null,
+        waiting: null,
+        nCarried: 0,
+        carriedSavers: [],
       },
     };
   }
@@ -623,6 +642,18 @@ function ledgerInsights(): Insight[] {
   return EMPTY ? [] : (snapshot.insights as Insight[]);
 }
 
+/** Same rule as the ledger: a snapshot of the real database, never authored.
+ *  The task columns in particular must not be invented: a fabricated failure
+ *  rate is exactly the kind of number this product exists to refuse. */
+function taskTable(period: Period): TaskTable {
+  const label =
+    period === "today" ? "Today" : period === "week" ? "Last 7 days" : period === "month" ? "Last 30 days" : "All time";
+  if (EMPTY) {
+    return { period, periodLabel: label, rows: [], tasksUnrecorded: false, empty: true };
+  }
+  return { ...(snapshot.tasks as Omit<TaskTable, "period">), period };
+}
+
 // --- the local advisor ------------------------------------------------------
 
 /** An 8GB Mac: only the models that fit are listed, which is the real gate. */
@@ -698,6 +729,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return ledgerOverview((a.period as Period) ?? "week");
       case "ledger_insights":
         return ledgerInsights();
+      case "task_table":
+        return taskTable((a.period as Period) ?? "week");
       case "savers_list":
         return saversState();
       case "saver_config_get":
@@ -790,6 +823,11 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return advisorStatus;
       case "advisor_annotate":
         return advisorStatus.state === "ready" ? advisorAnnotations() : [];
+      // No inference in a browser. The per-saver panel renders its deterministic
+      // summary and caveat either way, which is exactly what a user without the
+      // advisor sees.
+      case "advisor_savers":
+        return [];
       case "restore_defaults":
         savers = EMPTY ? emptySavers() : populatedSavers();
         sweepItems = EMPTY ? [] : initialSweepItems();
@@ -802,6 +840,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         } satisfies RestoreResult;
       case "doctor":
         return doctor();
+      case "system_info":
+        return {
+          version: "0.1.0",
+          arch: "Apple Silicon",
+          dataDir: "~/.piggy",
+          // No database in a browser build, and the About table says so rather
+          // than inventing a size.
+          database: null,
+        } satisfies SystemInfo;
+      case "open_data_folder":
+        return undefined;
       case "reindex":
         return {
           ran: !NO_CLAUDE,

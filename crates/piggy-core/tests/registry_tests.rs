@@ -7,7 +7,7 @@ use piggy_core::registry::{step_kind, Catalog, KNOWN_STEP_KINDS};
 fn embedded_catalog_parses_and_has_v1_savers() {
     let c = Catalog::embedded();
     assert!(c.registry_version >= 1);
-    for id in ["rtk", "caveman", "ponytail", "sweep"] {
+    for id in ["rtk", "caveman", "ponytail", "sweep", "honey"] {
         assert!(c.get(id).is_some(), "{id} present in catalog");
     }
 }
@@ -28,6 +28,7 @@ fn v1_savers_are_installable_and_deferred_ones_are_not() {
         "token-optimizer",
         "barber",
         "nadir-route",
+        "honey",
     ] {
         assert!(
             c.get(id).unwrap().installable().is_ok(),
@@ -103,6 +104,7 @@ fn every_v1_step_kind_is_known() {
         "token-optimizer",
         "barber",
         "nadir-route",
+        "honey",
     ] {
         let e = c.get(id).unwrap();
         for kind in e.install.kinds().iter().chain(e.uninstall.kinds().iter()) {
@@ -149,6 +151,88 @@ fn nadir_route_is_pinned_to_the_file_the_site_tells_users_to_curl() {
     // The router and the skill both decide the same thing; running both makes
     // either one's measurement unreadable.
     assert!(e.conflicts_with.iter().any(|x| x == "nadirclaw"));
+}
+
+#[test]
+fn honey_activates_itself_on_install_and_stands_down_on_uninstall() {
+    // Honey's plugin installs INERT: every hook and the skill directive are
+    // gated on ${CLAUDE_DIR}/.honey-active, which upstream writes only when the
+    // user types `/honey`. Without the activation step Piggy would report an
+    // installed saver that saves nothing, so lock the shape:
+    //   install   → plugin, then `honey-state.js set full`
+    //   uninstall → `honey-state.js off` BEFORE the plugin goes away, then the
+    //               state files upstream's own --uninstall leaves behind.
+    let c = Catalog::embedded();
+    let e = c.get("honey").unwrap();
+    assert_eq!(e.install_type, "claude_plugin");
+    assert!(!e.default_on, "opt-in until a Piggy holdout says otherwise");
+
+    let activate = e
+        .install
+        .steps
+        .iter()
+        .find(|s| step_kind(s) == "run_plugin_script")
+        .expect("honey activates itself on install");
+    assert_eq!(activate["script"], "hooks/honey-state.js");
+    assert_eq!(activate["args"][0], "set");
+    assert_eq!(activate["args"][1], "full", "never the PX-fetching 'ultra'");
+    let plugin_step = e
+        .install
+        .steps
+        .iter()
+        .position(|s| step_kind(s) == "claude_cli")
+        .unwrap();
+    let activate_at = e
+        .install
+        .steps
+        .iter()
+        .position(|s| step_kind(s) == "run_plugin_script")
+        .unwrap();
+    assert!(
+        activate_at > plugin_step,
+        "the script only exists once the plugin is installed"
+    );
+
+    let kinds = e.uninstall.kinds();
+    assert_eq!(
+        kinds.first().map(String::as_str),
+        Some("run_plugin_script"),
+        "stand down while the script is still on disk"
+    );
+    let deleted: Vec<&str> = e
+        .uninstall
+        .steps
+        .iter()
+        .filter(|s| step_kind(s) == "delete_file")
+        .filter_map(|s| s["path"].as_str())
+        .collect();
+    for leftover in [
+        "${CLAUDE_DIR}/.honey-active",
+        "${CLAUDE_DIR}/.honey-warned",
+        "${CLAUDE_DIR}/.honey-usage-ledger.jsonl",
+    ] {
+        assert!(deleted.contains(&leftover), "uninstall must clear {leftover}");
+    }
+
+    // Same layer as the two savers it supersedes; running any two would make
+    // every measurement unreadable.
+    assert!(e.conflicts_with.iter().any(|x| x == "caveman"));
+    assert!(e.conflicts_with.iter().any(|x| x == "ponytail"));
+}
+
+#[test]
+fn honey_intensity_never_offers_the_px_level() {
+    // `ultra` tells Claude to fetch the third-party `pxpipe-proxy` package at
+    // run time and read files as images — lossy on exact strings. Piggy caps
+    // the option at `full`; the flag file itself is the value.
+    let c = Catalog::embedded();
+    let opt = &c.get("honey").unwrap().config_options[0];
+    assert_eq!(opt.key, "defaultMode");
+    assert_eq!(opt.apply["kind"], "text_file");
+    assert_eq!(opt.apply["path"], "${CLAUDE_DIR}/.honey-active");
+    assert_eq!(opt.default, "full");
+    let values: Vec<&str> = opt.choices.iter().map(|ch| ch.value.as_str()).collect();
+    assert_eq!(values, ["lite", "full"]);
 }
 
 #[test]

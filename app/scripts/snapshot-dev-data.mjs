@@ -48,6 +48,13 @@ const stats = JSON.parse(
   execFileSync(piggy, ["stats", "--period", "week", "--json"], { maxBuffer: 64 << 20 }),
 ).week;
 const report = JSON.parse(execFileSync(piggy, ["report", "--json"], { maxBuffer: 64 << 20 }));
+// `tasks` windows by --period (it needs a window LENGTH to size the prior-period
+// comparison), so it is called the same way `stats` is rather than with --since.
+const tasks = JSON.parse(
+  execFileSync(piggy, ["tasks", "--period", "week", "--projects", "40", "--json"], {
+    maxBuffer: 64 << 20,
+  }),
+);
 
 const db = join(process.env.HOME, ".piggy", "piggy.db");
 // Mirrors `Store::by_source` exactly: INNER join (a session with no model rows
@@ -88,6 +95,21 @@ const unknown = grid.filter((g) => !CELLS.some(([s, i]) => s === g[0] && i === g
 
 const leaf = (p) => p.split("/").filter(Boolean).pop() ?? p;
 
+// One CLI stream stat onto the GUI's wire shape. The CLI reports a
+// positive-is-a-saving percent; the GUI's convention is a negative fraction
+// (same as `Badge.delta`). Convert once, here.
+const stream = (s) => ({
+  stream: s.stream,
+  kind: s.badge,
+  nOn: s.nOn,
+  nOff: s.nOff,
+  medianOn: s.medianOn,
+  medianOff: s.medianOff,
+  delta: s.deltaPct == null ? null : -s.deltaPct / 100,
+  note: s.note ?? null,
+  reading: s.reading ?? null,
+});
+
 const snapshot = {
   // Stamped so a stale fixture is visible rather than silently old.
   generatedAt: new Date().toISOString(),
@@ -121,6 +143,29 @@ const snapshot = {
     empty: ledger.total_tokens === 0,
   },
   insights,
+  tasks: {
+    periodLabel: "Last 7 days",
+    rows: tasks.projects.map((p) => ({
+      project: p.project,
+      name: leaf(p.project),
+      sessions: p.sessions,
+      floorTokens: p.floor_tokens,
+      workTokens: p.work_tokens,
+      totalTokens: p.total_tokens,
+      share: p.share,
+      tasks: p.tasks,
+      turns: p.turns,
+      turnsPerTask: p.turns_per_task,
+      toolErrors: p.tool_errors,
+      failedTasks: p.failed_tasks,
+      failureRate: p.failure_rate,
+      daily: p.daily,
+      delta: p.delta,
+    })),
+    tasksUnrecorded:
+      tasks.projects.length > 0 && tasks.projects.every((p) => p.tasks === 0),
+    empty: tasks.projects.length === 0,
+  },
   stats: {
     periodLabel: "Last 7 days",
     streams: {
@@ -157,33 +202,34 @@ const snapshot = {
       nBaseline: report.headline.nBaseline,
       baselineKind: report.headline.baseline,
       onRandomized: report.headline.onRandomized,
+      // The measured-eligible subset of `nFullOn`. Without it the dev fixture
+      // cannot reproduce the pooled-arm state at all, which is the state a real
+      // store spends most of its life in.
+      nFullOnRandomized: report.headline.nFullOnRandomized ?? 0,
       baselineClean: report.headline.baselineClean,
+      multiplierState: report.headline.multiplierState ?? "no_data",
       minGroup: report.headline.minGroup,
-      turns: report.headline.turns
-        ? {
-            stream: report.headline.turns.stream,
-            kind: report.headline.turns.badge,
-            nOn: report.headline.turns.nOn,
-            nOff: report.headline.turns.nOff,
-            medianOn: report.headline.turns.medianOn,
-            medianOff: report.headline.turns.medianOff,
-            delta:
-              report.headline.turns.deltaPct == null ? null : -report.headline.turns.deltaPct / 100,
-          }
-        : null,
-      streams: report.headline.streams.map((s) => ({
-        stream: s.stream,
-        kind: s.badge,
-        nOn: s.nOn,
-        nOff: s.nOff,
-        medianOn: s.medianOn,
-        medianOff: s.medianOff,
-        // The CLI reports positive-is-a-saving percent; the GUI's convention is
-        // a negative fraction (same as `Badge.delta`). Convert once, here.
-        delta: s.deltaPct == null ? null : -s.deltaPct / 100,
-      })),
+      waiting: report.headline.waiting ?? null,
+      nCarried: report.headline.nCarried ?? 0,
+      carriedSavers: report.headline.carriedSavers ?? [],
+      turns: report.headline.turns ? stream(report.headline.turns) : null,
+      streams: report.headline.streams.map(stream),
     },
   },
+  // Per-saver stream breakdown, keyed by saver id so the saver list can graft
+  // the real comparison onto the row with the same id. Same shape as the
+  // headline's streams because the UI renders both with one component.
+  saverStreams: Object.fromEntries(
+    report.savers.map((s) => [
+      s.saver,
+      {
+        streams: s.streams.map(stream),
+        turns: stream(s.turns),
+        summary: s.summary,
+        caveat: s.caveat ?? null,
+      },
+    ]),
+  ),
   sources: {
     cells,
     unknownTokens: unknown.reduce((n, g) => n + Number(g[3]), 0),

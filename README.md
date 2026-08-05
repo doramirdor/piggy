@@ -104,6 +104,7 @@ install path lands in a later update:
 | **Headroom** | Deep compression on the sessions you start with `piggy-claude` | Apache-2.0 |
 | **Caveman** | Nudges Claude to answer in fewer words, same code | MIT |
 | **Ponytail** | Nudges Claude to build only what you asked for, no gold-plating | MIT |
+| **Honey** | Both at once: the smallest thing that works, explained in fewer words | MIT |
 | **Nadir Route** | Claude asks [getnadir.com](https://getnadir.com/skill) which tier a task needs, then runs subagents on the cheapest capable model | Proprietary &sup1; |
 | **Claude Token Optimizer** &sup2; | Restructures your `CLAUDE.md` so sessions start lighter | MIT |
 | **Token Optimizer** | Sends Claude only what changed in files it already saw | PolyForm-Noncommercial &sup1; |

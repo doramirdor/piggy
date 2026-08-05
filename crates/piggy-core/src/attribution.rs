@@ -57,6 +57,36 @@ pub const CI_ALPHA: f64 = 0.10;
 // workload ever runs every stream this thin, where the floor would mute a real
 // saving instead of noise.
 pub const MIN_RATE_DENOM: f64 = 10.0;
+/// The same floor for the **turns** arm, in that arm's own units.
+///
+/// [`MIN_RATE_DENOM`] is calibrated on tokens per turn, where the streams that
+/// carry traffic sit in the thousands and 10 is noise. Turns per session is a
+/// different scale entirely: a normal session is single digits to low tens, so
+/// applying the token floor here muted the arm on ordinary data. Worse,
+/// [`SaverAttribution::is_negligible`] reads "both arms under the floor" as a
+/// proven null, which certified a saver that doubled the turn count from 4 to 9
+/// as having done nothing.
+///
+/// `turn_vectors` drops zero-turn sessions, so the smallest median possible is
+/// 1, where the ratio can only move in whole-session jumps (1 -> 2 turns reads
+/// as -100%). Two turns is the first denominator a ratio has any resolution
+/// against, and below it there is no multi-turn behaviour to compare.
+pub const MIN_TURNS_DENOM: f64 = 2.0;
+/// Half-width of the band a saver's effect must sit **entirely inside** before
+/// its eras may be folded into the headline's ON arm (see
+/// [`SaverAttribution::is_negligible`]).
+///
+/// This is an equivalence bound, not a significance test, and the difference is
+/// the whole point. "The CI includes zero" means *we did not detect an effect*,
+/// which is also what a 3-session sample says; folding eras together on that
+/// basis would pool on ignorance. Requiring the entire interval to fall within
+/// ±5% says something stronger: we looked, we had the resolution to see a real
+/// effect, and there was not one bigger than this.
+///
+/// 5% is chosen against what the headline actually prints. The multiplier is
+/// shown to one decimal ("1.4× longer"), so a saver that could only ever have
+/// moved a stream by a twentieth cannot move the digit the user reads.
+pub const NULL_BAND: f64 = 0.05;
 /// Number of per-stream badges shown together for one saver/headline. The badge
 /// gate is Bonferroni-corrected across this family so the *family-wise* chance a
 /// truly-null saver lights up any green badge stays near the ~10% a reader infers
@@ -72,6 +102,11 @@ pub enum Stream {
     Output,
     CacheCreate,
     CacheRead,
+    /// Assistant turns per session. Deliberately NOT in [`Stream::ALL`]: it is
+    /// the denominator the four token streams divide by, not a fifth stream.
+    /// It gets its own arm because a per-turn metric cannot see a saver that
+    /// buys cheaper turns by needing more of them.
+    Turns,
 }
 
 impl Stream {
@@ -90,6 +125,19 @@ impl Stream {
             Stream::Output => "output",
             Stream::CacheCreate => "cache write",
             Stream::CacheRead => "cache read",
+            Stream::Turns => "turns per session",
+        }
+    }
+
+    /// The floor this arm's OFF median must clear before a ratio against it is
+    /// worth taking, in the arm's OWN units. One constant cannot gate both: the
+    /// token streams are tokens per turn (thousands when in use), turns is turns
+    /// per session (single digits), and a floor set for the first silences the
+    /// second on every ordinary workload.
+    pub fn min_denom(&self) -> f64 {
+        match self {
+            Stream::Turns => MIN_TURNS_DENOM,
+            _ => MIN_RATE_DENOM,
         }
     }
 
@@ -99,6 +147,8 @@ impl Stream {
             Stream::Output => r.output,
             Stream::CacheCreate => r.cache_create,
             Stream::CacheRead => r.cache_read,
+            // Never divided by anything: see `turn_vectors`.
+            Stream::Turns => r.turns,
         }
     }
 }
@@ -219,6 +269,117 @@ impl StreamStat {
             _ => None,
         }
     }
+
+    /// What this stream actually tells the reader. See [`Reading`].
+    pub fn reading(&self) -> Reading {
+        if self.badge.shows_number() {
+            return Reading::Delta;
+        }
+        if self.n_on < MIN_GROUP || self.n_off < MIN_GROUP {
+            return Reading::Waiting {
+                need_on: MIN_GROUP.saturating_sub(self.n_on),
+                need_off: MIN_GROUP.saturating_sub(self.n_off),
+            };
+        }
+        // No ratio at all: the OFF median sat under this arm's `min_denom`,
+        // which is the case those floors exist for.
+        if self.delta.is_none() {
+            return Reading::Quiet;
+        }
+        match self.ci {
+            Some((lo, hi)) if lo <= 0.0 && hi >= 0.0 => {
+                let bound = lo.abs().max(hi.abs());
+                if bound <= NULL_BAND {
+                    Reading::NoChange { bound }
+                } else {
+                    Reading::Inconclusive
+                }
+            }
+            // An interval that excludes zero yet earned no badge was withheld by
+            // the family-corrected gate (or the plausibility check). Quoting it
+            // here would hand back the number that gate just refused.
+            _ => Reading::Inconclusive,
+        }
+    }
+
+    /// The row's sentence for the states where no number may be shown. `None`
+    /// when the badge shows a delta: there the number is the sentence.
+    pub fn note(&self) -> Option<String> {
+        match self.reading() {
+            Reading::Delta => None,
+            Reading::Waiting { need_on, need_off } => Some(match (need_on, need_off) {
+                (0, off) => format!("needs {off} more {} with it off", sessions(off)),
+                (on, 0) => format!("needs {on} more {} with it on", sessions(on)),
+                (on, off) => format!(
+                    "needs {on} more {} with it on and {off} with it off",
+                    sessions(on)
+                ),
+            }),
+            Reading::Quiet => Some(match self.stream {
+                Stream::Turns => "too few turns per session to compare".to_string(),
+                _ => format!(
+                    "under {} tokens a turn on both sides, too small to compare",
+                    MIN_RATE_DENOM as u64
+                ),
+            }),
+            // Rounded AWAY from zero, so the sentence claims less than the
+            // interval supports rather than more.
+            Reading::NoChange { bound } => Some(format!(
+                "measured, and there is no change bigger than {}% either way",
+                ((bound * 100.0).ceil() as u64).max(1)
+            )),
+            Reading::Inconclusive => {
+                Some("compared, but the result is still too noisy to call".to_string())
+            }
+        }
+    }
+}
+
+fn sessions(n: usize) -> &'static str {
+    if n == 1 {
+        "session"
+    } else {
+        "sessions"
+    }
+}
+
+/// What a stream's comparison tells the reader, once the badge has decided
+/// whether a number may be shown.
+///
+/// [`Badge::Measuring`] covers three situations the UI used to render with one
+/// word, and they call for opposite things from the reader. "Not enough
+/// sessions yet" is a wait. "Both sides are too small to divide" is a
+/// permanent no. "We compared and found nothing bigger than 1%" is a **result**
+/// — the most common honest outcome in the catalogue, and the one that reads as
+/// a broken progress bar when it is labelled the same as the other two.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Reading {
+    /// The badge shows a delta; that number is the reading.
+    Delta,
+    /// An arm is still short of [`MIN_GROUP`].
+    Waiting { need_on: usize, need_off: usize },
+    /// The OFF median is under the arm's [`Stream::min_denom`], so no ratio is
+    /// worth taking.
+    Quiet,
+    /// Both arms are full, and the whole 90% interval lies within `±bound`.
+    NoChange { bound: f64 },
+    /// Both arms are full, but the interval is too wide (or was withheld by the
+    /// badge gate) to conclude anything from.
+    Inconclusive,
+}
+
+impl Reading {
+    /// Stable key for the wire and for UI switches. Never derived from the
+    /// sentence: prose is for reading, this is for branching.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Reading::Delta => "delta",
+            Reading::Waiting { .. } => "waiting",
+            Reading::Quiet => "quiet",
+            Reading::NoChange { .. } => "no_change",
+            Reading::Inconclusive => "inconclusive",
+        }
+    }
 }
 
 /// Full attribution for one saver.
@@ -231,12 +392,224 @@ pub struct SaverAttribution {
     /// so the report can flag the pre-install baseline separately.
     pub off_by_source: BTreeMap<String, usize>,
     pub streams: Vec<StreamStat>,
+    /// Turns per session with this saver on vs off. Not one of `streams` for the
+    /// same reason it is not one of [`Headline::streams`]: it is the denominator
+    /// they divide by, and a saver that buys cheaper turns by needing more of
+    /// them looks green on every stream above while costing more overall.
+    pub turns: StreamStat,
 }
 
 impl SaverAttribution {
     /// The output-stream stat (the headline per-saver number).
     pub fn output(&self) -> Option<&StreamStat> {
         self.streams.iter().find(|s| s.stream == Stream::Output)
+    }
+
+    /// Every arm of the comparison, the denominator included. Turns is not a
+    /// fifth stream, but it is a fifth thing that was compared, and a reader
+    /// asking "what did this saver do" is owed it in the same breath.
+    pub fn arms(&self) -> impl Iterator<Item = &StreamStat> {
+        self.streams.iter().chain(std::iter::once(&self.turns))
+    }
+
+    /// The one-line learning: what this saver's comparison has shown, in the
+    /// reader's terms rather than the badge's.
+    ///
+    /// Ordered by what the reader can act on. A settled figure outranks
+    /// everything (it is the answer they came for); a full comparison that
+    /// found nothing is the next most useful thing to know and is stated as a
+    /// result, not as a wait; only then does the sentence talk about sessions
+    /// still to gather.
+    pub fn summary(&self) -> String {
+        let moved: Vec<String> = self
+            .arms()
+            .filter_map(|s| Some((s, s.shown_pct()?)))
+            .map(|(s, pct)| {
+                let mag = pct.abs().round() as i64;
+                match (s.stream, pct > 0.0) {
+                    (Stream::Turns, true) => format!("{mag}% fewer turns per session"),
+                    (Stream::Turns, false) => format!("{mag}% more turns per session"),
+                    (st, true) => format!("{mag}% less {}", st.label()),
+                    (st, false) => format!("{mag}% more {}", st.label()),
+                }
+            })
+            .collect();
+        if !moved.is_empty() {
+            return format!("{} with it on", join(&moved));
+        }
+
+        // Nothing settled. Say which of the two silences this is: a comparison
+        // that ran and found nothing, or one that has not run yet.
+        let full = self
+            .arms()
+            .all(|s| matches!(s.reading(), Reading::NoChange { .. } | Reading::Quiet));
+        if full {
+            return format!(
+                "no change worth measuring on any stream, over {} sessions with it on and {} with it off",
+                self.n_on, self.n_off
+            );
+        }
+        if let Some(need) = self
+            .arms()
+            .filter_map(|s| match s.reading() {
+                Reading::Waiting { need_on, need_off } => Some(need_on.max(need_off)),
+                _ => None,
+            })
+            .max()
+        {
+            return format!(
+                "still measuring: needs about {need} more {} on the thinner side",
+                sessions(need)
+            );
+        }
+
+        // Mixed: every arm was compared, some settled on "no change" and some
+        // are too noisy. Lead with what was established. "Nothing has settled"
+        // would throw away the half of the comparison that did.
+        let mut bound: f64 = 0.0;
+        let mut flat: Vec<String> = Vec::new();
+        let mut noisy: Vec<String> = Vec::new();
+        for s in self.arms() {
+            match s.reading() {
+                Reading::NoChange { bound: b } => {
+                    bound = bound.max(b);
+                    flat.push(s.stream.label().to_string());
+                }
+                Reading::Inconclusive => noisy.push(s.stream.label().to_string()),
+                _ => {}
+            }
+        }
+        let mut parts = Vec::new();
+        if !flat.is_empty() {
+            parts.push(format!(
+                "no change bigger than {}% on {}",
+                ((bound * 100.0).ceil() as u64).max(1),
+                join(&flat)
+            ));
+        }
+        if !noisy.is_empty() {
+            parts.push(format!("{} still too noisy to call", join(&noisy)));
+        }
+        if parts.is_empty() {
+            // Every arm quiet: there was never anything here to divide.
+            return "every stream is too small to compare on this workload".to_string();
+        }
+        parts.join("; ")
+    }
+}
+
+impl SaverAttribution {
+    /// The thing about this saver's measurement a reader would otherwise miss.
+    ///
+    /// [`Self::summary`] says what the comparison found. This says what the
+    /// finding does not cover, and it is the half that changes decisions: a
+    /// per-turn saving on a saver that needs more turns is not a saving, and a
+    /// figure resting on a handful of sessions on one side is not the same
+    /// claim as one resting on thousands.
+    ///
+    /// `None` is the common and correct answer for a settled saver with a full
+    /// comparison: there is nothing the summary is hiding.
+    pub fn caveat(&self) -> Option<String> {
+        let settled = self.streams.iter().any(|s| s.shown_pct().is_some());
+        match self.turns.reading() {
+            // Fewer tokens per turn, more turns. Every other figure on this
+            // saver divides by the number that went up.
+            Reading::Delta if self.turns.delta.is_some_and(|d| d < 0.0) => {
+                return Some(format!(
+                    "each session took about {}% more turns with it on, and every other figure here is per turn",
+                    self.turns.shown_pct().map(|p| p.abs().round()).unwrap_or(0.0)
+                ));
+            }
+            // The failure mode a live 4B walked into twice: an unmeasurable
+            // turn count read as "no increase in turns".
+            Reading::Delta | Reading::NoChange { .. } => {}
+            _ if settled => {
+                return Some(
+                    "the turn count could not be compared, so a per-turn saving here is not proof of a saving overall"
+                        .to_string(),
+                )
+            }
+            _ => {}
+        }
+        // Ratios this lopsided are still honest (both arms clear MIN_GROUP), but
+        // "thousands of sessions" and "eleven sessions" are not the same
+        // sentence, and the badge does not distinguish them.
+        let (weak, strong) = (self.n_on.min(self.n_off), self.n_on.max(self.n_off));
+        if settled && weak * 20 < strong {
+            let side = if self.n_on < self.n_off { "on" } else { "off" };
+            return Some(format!(
+                "one side of the comparison is thin: {weak} {} with it {side}, against {strong} the other way",
+                sessions(weak)
+            ));
+        }
+        None
+    }
+}
+
+/// "a", "a and b", "a, b and c" — the list voice the summaries are written in.
+fn join(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [a] => a.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+impl SaverAttribution {
+
+    /// Whether this saver has been **shown to do nothing worth measuring** —
+    /// as opposed to merely not having been shown to do something.
+    ///
+    /// The distinction is the entire safety argument for folding one saver set's
+    /// sessions in with another's ([`headline_with_map`]). A saver with no OFF
+    /// sessions has an unknown effect, and unknown is not null: pooling across
+    /// an era that differs by it would let that saver's real effect land on the
+    /// headline. So this demands three things:
+    ///
+    /// * **Power.** [`MIN_GROUP`] sessions on each arm, the same bar every other
+    ///   claim in this module clears.
+    /// * **Equivalence, not non-significance.** The whole 90% interval inside
+    ///   ±[`NULL_BAND`], so "no effect" is a measurement rather than an absence
+    ///   of one.
+    /// * **Every stream the multiplier is built from.** Input, output, cache
+    ///   write and *turns*. Cache read is excluded deliberately, matching the
+    ///   price-weighted spend the `×` is computed on (`docs/measurement.md`);
+    ///   turns is included because it is that spend's denominator.
+    ///
+    /// A stream too quiet to have a ratio at all counts as null rather than as
+    /// unknown, but only when **both** arms are under that arm's
+    /// [`Stream::min_denom`]. That is the case the floors exist for: at 2 tokens
+    /// a turn (or one turn a session) there is no percentage worth computing
+    /// and halving it saves five tokens. A tiny OFF median against a large ON
+    /// one is the opposite situation - the one that printed `-20071%` - and
+    /// stays disqualifying.
+    pub fn is_negligible(&self) -> bool {
+        if self.n_on < MIN_GROUP || self.n_off < MIN_GROUP {
+            return false;
+        }
+        // Turns first: it is the one that can invert every other stream's sign.
+        let mut checked = vec![&self.turns];
+        for want in [Stream::Input, Stream::Output, Stream::CacheCreate] {
+            match self.streams.iter().find(|s| s.stream == want) {
+                Some(s) => checked.push(s),
+                // A stream the caller never computed is not a stream we may
+                // assume nothing happened on.
+                None => return false,
+            }
+        }
+        checked.iter().all(|s| {
+            // The floor has to be the arm's own: `MIN_RATE_DENOM` applied to
+            // turns per session is above a normal session's turn count, so every
+            // turn regression short of ten turns a side passed as proven-null.
+            let floor = s.stream.min_denom();
+            if s.median_off < floor && s.median_on < floor {
+                return true;
+            }
+            match s.ci {
+                Some((lo, hi)) => lo >= -NULL_BAND && hi <= NULL_BAND,
+                None => false,
+            }
+        })
     }
 }
 
@@ -305,6 +678,94 @@ pub enum MultiplierState {
     WithheldCostMore,
 }
 
+/// How fast one arm of the experiment is filling up.
+///
+/// Exists because "measuring" with no end in sight is indistinguishable from
+/// broken. Both arms have a hard reason they are where they are - the ON arm
+/// restarts whenever the saver set changes, the baseline only fills on holdout
+/// slots - and a user can only judge whether to wait if they are told when the
+/// count started and roughly how much longer it has to run.
+///
+/// The clock is the **data's own**: first to last session in the arm, never
+/// `Utc::now()`. That keeps this a pure function of the store, so the same
+/// database gives the same answer in a test, in the CLI, and in the app, and a
+/// machine left idle for a week does not report a pace that silently decayed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pace {
+    /// RFC3339 timestamp of the arm's first session — when this count started.
+    pub since: String,
+    /// Sessions per day across the arm's span. `None` when the arm spans no
+    /// measurable time (one session, or several inside the same instant): a
+    /// rate over a zero window is a division by zero dressed up as an estimate.
+    pub per_day: Option<f64>,
+}
+
+impl Pace {
+    /// Days still to run before this arm reaches `target`, at the pace observed
+    /// so far. `None` when the target is already met or there is no pace to
+    /// extrapolate from — the caller then says "not yet" without inventing a
+    /// date.
+    pub fn days_to(&self, have: usize, target: usize) -> Option<f64> {
+        let per_day = self.per_day?;
+        if have >= target || per_day <= 0.0 {
+            return None;
+        }
+        Some((target - have) as f64 / per_day)
+    }
+}
+
+/// Build a [`Pace`] from an arm's session timestamps.
+///
+/// `n - 1` intervals over `n` sessions, not `n`: five sessions spread over four
+/// days is a pace of one a day, and dividing by the count instead would report
+/// 1.25 and promise a finish line that arrives late every time.
+fn pace_of<'a>(dates: impl Iterator<Item = &'a str>) -> Option<Pace> {
+    let mut sorted: Vec<&str> = dates.collect();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_unstable();
+    // Lexicographic ordering is the real ordering here only because these are
+    // RFC3339 UTC strings straight out of the session logs; parse to compare.
+    let first = chrono::DateTime::parse_from_rfc3339(sorted[0]).ok()?;
+    let last = chrono::DateTime::parse_from_rfc3339(sorted[sorted.len() - 1]).ok()?;
+    let days = (last - first).num_seconds() as f64 / 86_400.0;
+    Some(Pace {
+        since: sorted[0].to_string(),
+        per_day: if days > 0.0 && sorted.len() > 1 {
+            Some((sorted.len() - 1) as f64 / days)
+        } else {
+            None
+        },
+    })
+}
+
+/// Which side of the experiment is still short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingArm {
+    /// Sessions running the user's current saver set.
+    On,
+    /// All-off sessions to compare it against.
+    Baseline,
+}
+
+/// What the headline is still waiting for, in enough detail for a surface to
+/// tell the user why, what for, and roughly how much longer. One shared answer
+/// so the CLI, the app and the report cannot drift into three different stories
+/// about the same database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Waiting {
+    pub arm: WaitingArm,
+    pub have: usize,
+    pub need: usize,
+    /// When this arm's count started. For [`WaitingArm::On`] that is the moment
+    /// the current saver set came together — the restart the user never sees.
+    pub since: Option<String>,
+    /// Days left at the pace observed so far, `None` when there is no pace to
+    /// extrapolate from (a single session, or a fixed pre-install baseline).
+    pub days_left: Option<f64>,
+}
+
 /// The dashboard headline.
 #[derive(Debug, Clone)]
 pub struct Headline {
@@ -324,6 +785,18 @@ pub struct Headline {
     /// of them there are. Carried so the CLI can say *why* a figure is only
     /// estimated.
     pub on_randomized: bool,
+    /// How many of the ON arm's sessions are the randomized ones: current saver
+    /// set, every saver on because the scheduler said so, before any
+    /// observational pooling.
+    ///
+    /// Carried because `on_randomized` alone cannot tell a surface which of two
+    /// very different situations it is in, and they want opposite words. Zero
+    /// means nothing is rotating and waiting fixes nothing. Non-zero but under
+    /// [`MIN_GROUP`] means rotation IS running and this is the count that is
+    /// still filling — the only honest progress figure for that case, since
+    /// `n_full_on` is the pooled total and can sit in the thousands while the
+    /// arm that decides the badge holds five.
+    pub n_full_on_randomized: usize,
     /// Whether the baseline is a **clean** all-off holdout. False when the only
     /// holdouts available had a pinned saver running through them, so the
     /// "no savers at all" counterfactual was never actually observed.
@@ -337,6 +810,59 @@ pub struct Headline {
     pub multiplier_state: MultiplierState,
     /// Per-stream measured deltas (full-on vs baseline), shown before the ×.
     pub streams: Vec<StreamStat>,
+    /// Turns per session, on vs off. Not one of `streams`: it is the thing they
+    /// are divided by. A negative delta here means the savers made the agent
+    /// take MORE turns, which every per-turn figure above is blind to.
+    pub turns: StreamStat,
+    /// When the ON arm's count started and how fast it is filling.
+    ///
+    /// `since` is the load-bearing half: the ON arm is scoped to the saver set
+    /// the user runs *now* (see `live_set`), so installing, removing, or
+    /// hand-toggling one saver silently restarts it at zero. Without this the
+    /// screen could only ever say "4 of 10" and never "…since your set changed
+    /// on Tuesday", which is the difference between an experiment running and
+    /// one that looks stuck.
+    pub on_pace: Option<Pace>,
+    /// When the baseline arm's first session landed and how fast it is filling.
+    /// Holdouts are ~1 session in 10 by design, so a new user's baseline is the
+    /// slow arm and deserves the same honesty about how long it will take.
+    pub baseline_pace: Option<Pace>,
+    /// Sessions the ON arm gained from earlier saver sets that differ from the
+    /// current one only by savers measured as null. Zero when the live era stood
+    /// on its own, which is the normal case and the preferred one.
+    pub n_carried: usize,
+    /// The null savers that made that fold-in legal, so a surface can name them.
+    /// Empty whenever `n_carried` is zero.
+    pub carried_savers: Vec<String>,
+}
+
+impl Headline {
+    /// The arm still short of [`MIN_GROUP`], if either is.
+    ///
+    /// Reports the arm that needs the most sessions, ties going to the baseline:
+    /// that is the one the user cannot hurry, so it is the honest thing to quote
+    /// a wait against. `None` once both arms are full — at which point the
+    /// headline is held up by something other than sample size, and saying
+    /// "still gathering" would be a lie the caller must not tell.
+    pub fn waiting(&self) -> Option<Waiting> {
+        let on_short = MIN_GROUP.saturating_sub(self.n_full_on);
+        let base_short = MIN_GROUP.saturating_sub(self.n_baseline);
+        if on_short == 0 && base_short == 0 {
+            return None;
+        }
+        let (arm, have, pace) = if on_short > base_short {
+            (WaitingArm::On, self.n_full_on, self.on_pace.as_ref())
+        } else {
+            (WaitingArm::Baseline, self.n_baseline, self.baseline_pace.as_ref())
+        };
+        Some(Waiting {
+            arm,
+            have,
+            need: MIN_GROUP,
+            since: pace.map(|p| p.since.clone()),
+            days_left: pace.and_then(|p| p.days_to(have, MIN_GROUP)),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -530,8 +1056,16 @@ impl Store {
             /// forever, and treating that as a single-off slot classified every
             /// one of their sessions Mixed and killed the headline for good.
             any_scheduler_disabled: bool,
-            /// Every tag came from Piggy's scheduler rather than the user.
-            all_randomized: bool,
+            /// Every saver that was actually ON came from Piggy's scheduler
+            /// rather than the user. Deliberately scoped to the ON set, for the
+            /// same reason `any_scheduler_disabled` is: a saver the user
+            /// switched off by hand is not in the contrast at all (it is off in
+            /// both arms), so its provenance cannot decide whether the contrast
+            /// was randomized. Reading every row instead meant one saver
+            /// hand-disabled once, ever, made every later session observational
+            /// for good and put `measured` permanently out of reach no matter
+            /// how long rotation ran.
+            on_set_randomized: bool,
         }
         impl Facts {
             fn new() -> Self {
@@ -542,7 +1076,7 @@ impl Store {
                     on_set: std::collections::BTreeSet::new(),
                     started_at: None,
                     any_scheduler_disabled: false,
-                    all_randomized: true,
+                    on_set_randomized: true,
                 }
             }
         }
@@ -557,10 +1091,10 @@ impl Store {
             if enabled {
                 f.any_enabled = true;
                 f.on_set.insert(saver_id);
+                f.on_set_randomized &= is_randomized(&src);
             } else if is_randomized(&src) {
                 f.any_scheduler_disabled = true;
             }
-            f.all_randomized &= is_randomized(&src);
             if f.started_at.is_none() {
                 f.started_at = started_at;
             }
@@ -600,11 +1134,14 @@ impl Store {
                 // user with every saver off. "Everything else on" needs there to
                 // be an everything else.
                 //
-                // Provenance still governs the claim. Any hand-set saver, on or
-                // off, makes this observational: Piggy is not rotating it, and
-                // the toggle splits history into a before and an after that the
-                // scheduler did not randomize across.
-                if f.all_randomized {
+                // Provenance still governs the claim. A saver the user pinned ON
+                // makes this observational: Piggy is not rotating it, and the
+                // toggle splits history into a before and an after that the
+                // scheduler did not randomize across. A saver pinned OFF does
+                // not, on the same grounds that keep it out of the full-on test
+                // two paragraphs up - it is off in the holdout too, so it is a
+                // constant across the contrast rather than a confounder in it.
+                if f.on_set_randomized {
                     SessionGroup::FullOn
                 } else {
                     SessionGroup::FullOnObservational
@@ -647,9 +1184,10 @@ pub fn median(xs: &[f64]) -> f64 {
 }
 
 /// The delta `1 - median(on)/median(off)`, or `None` when there is nothing to
-/// compare: an empty ON group, or an OFF group whose median is below
-/// [`MIN_RATE_DENOM`] (a stream the baseline doesn't meaningfully use).
-fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
+/// compare: an empty ON group, or an OFF group whose median is below `floor`
+/// (a stream the baseline doesn't meaningfully use). `floor` is the arm's own
+/// [`Stream::min_denom`], never a shared constant: see [`MIN_TURNS_DENOM`].
+fn delta_of(on: &[f64], off: &[f64], floor: f64) -> Option<f64> {
     // `median(&[])` is 0.0, so an empty ON group computes `1 - 0/mo == 1.0`: a
     // nominal 100% saving conjured out of no data at all. Downstream gates do
     // already suppress it (MIN_GROUP in `stream_stat`, and the bootstrap, which
@@ -665,7 +1203,7 @@ fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
         return None;
     }
     let mo = median(off);
-    if mo < MIN_RATE_DENOM {
+    if mo < floor {
         return None;
     }
     Some(1.0 - median(on) / mo)
@@ -674,7 +1212,7 @@ fn delta_of(on: &[f64], off: &[f64]) -> Option<f64> {
 /// Bootstrap the sorted delta distribution by resampling both groups with
 /// replacement. Deterministic given `seed`. Returns `None` if either group is
 /// empty or every resample hit a degenerate off-median.
-fn bootstrap_deltas(on: &[f64], off: &[f64], seed: u64) -> Option<Vec<f64>> {
+fn bootstrap_deltas(on: &[f64], off: &[f64], seed: u64, floor: f64) -> Option<Vec<f64>> {
     if on.is_empty() || off.is_empty() {
         return None;
     }
@@ -695,7 +1233,7 @@ fn bootstrap_deltas(on: &[f64], off: &[f64], seed: u64) -> Option<Vec<f64>> {
         // Same floor as `delta_of`: a resample that lands on a near-zero
         // denominator would widen the CI with ratios the point estimate refuses
         // to compute.
-        if mo < MIN_RATE_DENOM {
+        if mo < floor {
             continue;
         }
         deltas.push(1.0 - median(&on_s) / mo);
@@ -761,8 +1299,9 @@ fn stream_stat(stream: Stream, on: &[f64], off: &[f64], ceiling: Badge, seed: u6
         ceiling.shows_number(),
         "ceiling must be Measured or Estimated"
     );
-    let delta = delta_of(on, off);
-    let deltas = bootstrap_deltas(on, off, seed);
+    let floor = stream.min_denom();
+    let delta = delta_of(on, off, floor);
+    let deltas = bootstrap_deltas(on, off, seed, floor);
     // Displayed CI: the spec-mandated 90%.
     let ci = deltas.as_ref().map(|d| ci_at(d, CI_ALPHA));
     // Gate CI: family-corrected, so the *family-wise* rate stays near nominal.
@@ -799,6 +1338,25 @@ fn stream_stat(stream: Stream, on: &[f64], off: &[f64], ceiling: Badge, seed: u6
 fn rate_vectors<'a>(stream: Stream, sessions: impl Iterator<Item = &'a SessionRates>) -> Vec<f64> {
     sessions
         .filter_map(|s| s.rate(stream.tokens_of(s)))
+        .collect()
+}
+
+/// Raw turn counts, deliberately **unnormalised**.
+///
+/// Every other figure in this module is tokens per assistant turn, which makes
+/// the turn count a free denominator: a saver that needs more turns to finish
+/// the same job divides its tokens by a bigger number and scores as a win on
+/// all four streams while costing the user more in total. Terser output and
+/// compressed tool results both invite exactly that ("say less" and "show less"
+/// are both invitations to ask again), so it is the likeliest failure mode in
+/// the catalogue rather than a hypothetical one.
+///
+/// Sign convention matches the streams: `1 - median_on/median_off`, so more
+/// turns with the saver on comes out negative and reads as a regression.
+fn turn_vectors<'a>(sessions: impl Iterator<Item = &'a SessionRates>) -> Vec<f64> {
+    sessions
+        .filter(|s| s.turns > 0)
+        .map(|s| s.turns as f64)
         .collect()
 }
 
@@ -1003,12 +1561,25 @@ pub fn attribute_with_map(
         })
         .collect();
 
+    // The denominator, as its own arm. Same machinery and same gate as the
+    // headline's: a saver that needs more turns to do the same job has to be
+    // able to say so somewhere, and until now the per-saver path had no slot
+    // for it at all.
+    let turns = stream_stat(
+        Stream::Turns,
+        &turn_vectors(on.iter()),
+        &turn_vectors(off_used.iter()),
+        ceiling,
+        seed ^ 0x3C6E_F372,
+    );
+
     Ok(SaverAttribution {
         saver_id: saver_id.to_string(),
         n_on: on.len(),
         n_off: off_used.len(),
         off_by_source,
         streams,
+        turns,
     })
 }
 
@@ -1058,15 +1629,84 @@ pub fn headline_with_map(
         })
         .map(|c| c.on_set.as_str());
 
-    let full_on_of = |want: SessionGroup| -> Vec<SessionRates> {
+    // Which savers separate the live set from an abandoned one.
+    //
+    // Scoping the ON arm to one saver set is right, and it has a cost nobody was
+    // paying attention to: trying a saver restarts the count at zero, so a user
+    // who evaluates savers - the entire point of this app - can sit at "4 of 10"
+    // indefinitely while thousands of usable sessions go unread. This recovers
+    // them in the one case where it is sound: when the saver that separates two
+    // eras has been MEASURED to do nothing (`is_negligible`), those eras are the
+    // same treatment wearing different names.
+    let members = |set: &str| -> std::collections::BTreeSet<String> {
+        set.split('+').filter(|s| !s.is_empty()).map(str::to_string).collect()
+    };
+    let live_members = members(live_set.unwrap_or(""));
+    let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for c in classified.iter().filter(|c| is_full_on(c.group)) {
+        if Some(c.on_set.as_str()) == live_set {
+            continue;
+        }
+        candidates.extend(
+            live_members
+                .symmetric_difference(&members(&c.on_set))
+                .cloned(),
+        );
+    }
+    // Tested once each, and only for savers that actually separate two eras -
+    // usually one or two, not the whole catalogue. A saver with no OFF sessions
+    // fails this, which is what keeps an uninstalled saver of unknown effect from
+    // dragging its era in behind it.
+    let negligible: std::collections::BTreeSet<String> = candidates
+        .iter()
+        .filter(|id| {
+            attribute_with_map(store, rate_map, id, seed ^ 0x5DEE_CE66)
+                .map(|a| a.is_negligible())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    let foldable = |on_set: &str| -> bool {
+        !negligible.is_empty()
+            && live_members
+                .symmetric_difference(&members(on_set))
+                .all(|s| negligible.contains(s))
+    };
+
+    // `live` is the era the user runs now; `carried` is every other era that
+    // differs from it only by a proven-null saver.
+    let full_on_of = |want: SessionGroup, live: bool| -> Vec<SessionRates> {
         classified
             .iter()
-            .filter(|c| c.group == want && Some(c.on_set.as_str()) == live_set)
+            .filter(|c| c.group == want)
+            .filter(|c| {
+                let is_live = Some(c.on_set.as_str()) == live_set;
+                if live {
+                    is_live
+                } else {
+                    !is_live && foldable(&c.on_set)
+                }
+            })
             .map(|c| c.rates.clone())
             .collect()
     };
-    let full_on_randomized = full_on_of(SessionGroup::FullOn);
-    let full_on_observational = full_on_of(SessionGroup::FullOnObservational);
+    let full_on_randomized = full_on_of(SessionGroup::FullOn, true);
+    // Captured before `pick_group` pools this side with the observational rows:
+    // afterwards the count is gone, and it is the only number that says how far
+    // the measured-eligible arm has actually got.
+    let n_full_on_randomized = full_on_randomized.len();
+    let full_on_observational = full_on_of(SessionGroup::FullOnObservational, true);
+    let carried_randomized = full_on_of(SessionGroup::FullOn, false);
+    let carried_observational = full_on_of(SessionGroup::FullOnObservational, false);
+
+    // Both flavours, because the pace is only ever read while the arm is short,
+    // and a short arm is exactly the case where `pick_group` pools the two.
+    let on_pace = pace_of(
+        classified
+            .iter()
+            .filter(|c| is_full_on(c.group) && Some(c.on_set.as_str()) == live_set)
+            .filter_map(|c| c.started_at.as_deref()),
+    );
 
     // The baseline is deliberately NOT scoped the same way, and the reason is a
     // trade rather than a symmetry. Every holdout is "nothing on", so the
@@ -1137,17 +1777,77 @@ pub fn headline_with_map(
             (HeadlineBaseline::None, Vec::new(), Badge::Estimated, false)
         };
 
+    // Only a holdout baseline has a pace worth quoting. A pre-install baseline is
+    // fixed history: it is as big as it will ever be, and extrapolating it would
+    // promise a wait that finishes nothing. The honest answer there is no
+    // estimate, which is what `None` says.
+    let baseline_pace = match (baseline_kind, baseline_clean) {
+        (HeadlineBaseline::Holdout, clean) => {
+            let want = if clean {
+                SessionGroup::Holdout
+            } else {
+                SessionGroup::HoldoutContaminated
+            };
+            pace_of(
+                classified
+                    .iter()
+                    .filter(|c| c.group == want)
+                    .filter_map(|c| c.started_at.as_deref()),
+            )
+        }
+        _ => None,
+    };
+
     // The ON side gets the same treatment as the baseline, and as the per-saver
     // path in `attribute_with_map`. A randomized holdout on one side cannot make
     // a manual-on era on the other side measured: randomization is a property of
     // the contrast, not of the off-switch.
-    let (full_on, on_ceiling) = pick_group(full_on_randomized, full_on_observational);
+    let (live_on, live_ceiling) = pick_group(full_on_randomized, full_on_observational);
+    // The live era stands alone whenever it can, exactly like `pick_group`'s
+    // randomized side: folding in another era is a fallback for a thin arm, never
+    // an upgrade to a healthy one.
+    //
+    // And when it IS needed, the badge drops to `estimated`. Proving the
+    // differing saver null closes one hole - the treatments really are the same -
+    // but not the other: two eras are two stretches of calendar, and the work
+    // itself drifts between them in ways no saver measurement speaks to. That is
+    // the same trade `pick_group` makes for observational rows, priced the same
+    // way, so a carried-forward headline shows a number and never calls it
+    // measured.
+    // Captured before the merge: whether the carried sessions were themselves
+    // scheduler-chosen is a fact about their provenance, and it must not get
+    // read off the capped badge below (see `on_randomized`).
+    let carried_all_randomized = carried_observational.is_empty();
+    let carried: Vec<SessionRates> = carried_randomized
+        .into_iter()
+        .chain(carried_observational)
+        .collect();
+    let carried_savers: Vec<String> = negligible.iter().cloned().collect();
+    let (full_on, on_ceiling, n_carried) = if live_on.len() >= MIN_GROUP || carried.is_empty() {
+        (live_on, live_ceiling, 0)
+    } else {
+        let n = carried.len();
+        let mut pooled = live_on;
+        pooled.extend(carried);
+        (pooled, Badge::Estimated, n)
+    };
+    // Named only when they actually did something, so a surface can say "counting
+    // your older sessions too, because X measured as no change" without inventing
+    // a reason on a headline that never needed one.
+    let carried_savers = if n_carried > 0 { carried_savers } else { Vec::new() };
     let ceiling = if baseline_ceiling == Badge::Measured && on_ceiling == Badge::Measured {
         Badge::Measured
     } else {
         Badge::Estimated
     };
-    let on_randomized = on_ceiling == Badge::Measured;
+    // Provenance, NOT the badge. These used to be the same expression, which was
+    // safe only while the badge could be capped for exactly one reason. The
+    // carry-forward cap broke that: it lowers `on_ceiling` for a calendar
+    // argument, not a randomization one, and reading this off it would tell every
+    // surface "your savers are pinned by hand" about an arm the scheduler chose
+    // every session of - complete with an un-pin button for savers that are not
+    // pinned.
+    let on_randomized = live_ceiling == Badge::Measured && (n_carried == 0 || carried_all_randomized);
     let n_baseline = baseline.len();
 
     // Price-weighted "lasts N.N× longer" (estimated).
@@ -1196,15 +1896,31 @@ pub fn headline_with_map(
         })
         .collect();
 
+    // The denominator, measured as its own arm. Same machinery, same CI gate,
+    // same badge rules: this is a claim like any other and has to earn itself.
+    let turns = stream_stat(
+        Stream::Turns,
+        &turn_vectors(full_on.iter()),
+        &turn_vectors(baseline.iter()),
+        ceiling,
+        seed ^ 0x7A5C_9E31,
+    );
+
     Ok(Headline {
         baseline: baseline_kind,
         n_full_on: full_on.len(),
         n_baseline,
         ceiling,
         on_randomized,
+        n_full_on_randomized,
         baseline_clean,
         multiplier,
         multiplier_state,
         streams,
+        turns,
+        on_pace,
+        baseline_pace,
+        n_carried,
+        carried_savers,
     })
 }
