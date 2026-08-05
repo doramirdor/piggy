@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import { formatTokens } from "../lib/format";
-import type { SweepReport } from "../types";
+import type { RestoreFailure, SweepReport } from "../types";
 
 const KIND_LABEL: Record<string, string> = {
   mcp: "MCP server",
@@ -14,6 +14,7 @@ const KIND_LABEL: Record<string, string> = {
 /** Modal listing Sweep's unused add-ons, with reversible one-click turn-off. */
 export function SweepSheet({ onClose }: { onClose: () => void }) {
   const [report, setReport] = useState<SweepReport | null>(null);
+  const [restoreFailures, setRestoreFailures] = useState<RestoreFailure[]>([]);
   const [busy, setBusy] = useState(false);
   const showError = useStore((s) => s.showError);
 
@@ -43,7 +44,9 @@ export function SweepSheet({ onClose }: { onClose: () => void }) {
   const undoAll = async () => {
     setBusy(true);
     try {
-      setReport(await api.sweepRestore([]));
+      const res = await api.sweepRestore();
+      setReport(res.report);
+      setRestoreFailures(res.failures);
     } catch (e) {
       showError(e);
     } finally {
@@ -108,6 +111,29 @@ export function SweepSheet({ onClose }: { onClose: () => void }) {
               ))}
             </div>
           </>
+        )}
+
+        {restoreFailures.length > 0 && (
+          <div className="banner" role="alert" style={{ marginTop: 12, marginBottom: 0 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="btitle">
+                {restoreFailures.length === 1
+                  ? "1 item couldn't be put back"
+                  : `${restoreFailures.length} items couldn't be put back`}
+              </div>
+              {restoreFailures.map((f) => (
+                <div className="bbody" key={f.id} style={{ whiteSpace: "normal" }}>
+                  <b>{f.id}</b> · {f.reason}
+                </div>
+              ))}
+              <div className="bbody" style={{ whiteSpace: "normal", color: "var(--text-2)" }}>
+                Nothing was lost: these stay saved and you can retry Undo all once the file is fixed.
+              </div>
+            </div>
+            <button className="bclose" onClick={() => setRestoreFailures([])} aria-label="Dismiss">
+              ×
+            </button>
+          </div>
         )}
 
         <div className="sactions">

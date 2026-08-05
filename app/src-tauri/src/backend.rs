@@ -167,6 +167,35 @@ fn attr_recompute() -> anyhow::Result<Arc<AttrBundle>> {
 }
 
 // ---------------------------------------------------------------------------
+// State write lock
+//
+// `PiggyState::save` is atomic per write but has no compare-and-swap: it replaces
+// the whole document, so two writers that each loaded before either saved leave
+// only the last one's changes. This process has more than one writer - the
+// background watcher thread steps the scheduler (`rotation_tick_if_enabled` ->
+// `rotation::tick_now`, which loads and saves on its own) while the user is free
+// to sweep, flip a saver or change settings - and the sweep pass holds its
+// read-modify-write open across two full scans of the session store, which is
+// long enough for a tick to land inside it. Losing that tick is not a lost
+// preference: it puts Piggy's ledger and Claude's settings.json out of step, and
+// every session after it is attributed to a saver set that is not the one
+// running. Every mutator below takes this guard for its whole cycle so the
+// in-process writers queue instead of clobbering one another, and loads state as
+// late as it can so the window a separate `piggy` CLI process could still slip
+// into is one write wide.
+// ---------------------------------------------------------------------------
+
+static STATE_WRITE: Mutex<()> = Mutex::new(());
+
+/// Take [`STATE_WRITE`] for a whole read-modify-write of `state.json`. A poisoned
+/// lock reads as free, the way `attr_recompute` treats its compute guard: the
+/// panic belongs to the writer that hit it, and refusing every later write would
+/// wedge the app until a restart.
+fn state_write() -> std::sync::MutexGuard<'static, ()> {
+    STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// ---------------------------------------------------------------------------
 // Error payload (plain-language; never raw JSON in the UI)
 // ---------------------------------------------------------------------------
 
@@ -673,24 +702,34 @@ fn map_headline(hl: &CoreHeadline) -> Headline {
              cannot measure them"
                 .to_string(),
         )
-    } else if !hl.on_randomized {
-        // Rotation is running; this arm just has not filled yet. Same correction as
-        // the no-multiplier branch above: "Piggy is not rotating them" is false here
-        // and hides a count that is nearly at the bar.
-        Some(format!(
-            "estimated: {} of {} sessions so far ran a setup Piggy chose · the rest you turned \
-             on by hand, so they can back an estimate but not a measurement",
-            hl.n_full_on_randomized, MIN_GROUP,
-        ))
     } else if hl.n_carried > 0 {
         // The ON arm was topped up from an earlier saver set. That is the reason
         // this figure is estimated rather than measured, and it outranks the
         // generic "vs your history" line below, which would name the wrong cause
         // entirely for a headline whose baseline is a perfectly clean holdout.
+        //
+        // It also has to come before the hand-set branch: a fold-in is only
+        // `on_randomized` when *every* carried session was scheduler-chosen
+        // (`carried_all_randomized` in `piggy-core`), so a mixed carry drops the
+        // flag on a live arm the scheduler chose every session of. Read below
+        // that, the same state rendered "the rest you turned on by hand" about
+        // sessions Piggy itself chose - they just ran an earlier saver set - and
+        // the carry-forward explanation written for it never appeared at all.
         Some(format!(
             "estimated: counting {} sessions from before you changed savers, since {} measured as no change · same setup, different weeks",
             hl.n_carried,
             hl.carried_savers.join(" and "),
+        ))
+    } else if !hl.on_randomized {
+        // Rotation is running; this arm just has not filled yet. Same correction as
+        // the no-multiplier branch above: "Piggy is not rotating them" is false here
+        // and hides a count that is nearly at the bar. Nothing was carried (the
+        // branch above owns that case), so the rest of the pool really is the
+        // sessions the user switched on by hand.
+        Some(format!(
+            "estimated: {} of {} sessions so far ran a setup Piggy chose · the rest you turned \
+             on by hand, so they can back an estimate but not a measurement",
+            hl.n_full_on_randomized, MIN_GROUP,
         ))
     } else if !hl.baseline_clean && hl.baseline == HeadlineBaseline::Holdout {
         // Only a real holdout baseline can be "dirtied" by a saver running through
@@ -1292,6 +1331,7 @@ pub fn savers_list() -> Result<SaversState, ApiError> {
 /// Turn a single saver on or off. `on` when not installed installs it (with the
 /// engine's own health-check + rollback); `off` uses the fast A/B disable path.
 pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
+    let _guard = state_write();
     let catalog = Catalog::embedded();
     let before_enabled = PiggyState::load()
         .map(|s| enabled_ids(&s))
@@ -1361,6 +1401,7 @@ pub fn saver_toggle(id: String, on: bool) -> Result<SaversState, ApiError> {
 /// saver's *current* on/off state (no flip now), so the next scheduler tick can
 /// start the on/off comparison. This is the missing inverse of the manual toggle.
 pub fn saver_unpin(id: String) -> Result<SaversState, ApiError> {
+    let _guard = state_write();
     let catalog = Catalog::embedded();
     let enabled = PiggyState::load()
         .ok()
@@ -1387,6 +1428,7 @@ pub fn saver_unpin(id: String) -> Result<SaversState, ApiError> {
 /// The master switch. On installs/enables the curated default-on set in
 /// `ordering` order; off disables every Piggy-managed saver (kept installed).
 pub fn master_toggle(on: bool) -> Result<SaversState, ApiError> {
+    let _guard = state_write();
     let catalog = Catalog::embedded();
     // What was on before, so we can tell the user which savers a conflict silently
     // turned off (e.g. enabling the default-on Headroom auto-disables rtk).
@@ -1558,6 +1600,7 @@ pub fn saver_config_set(
     key: String,
     value: String,
 ) -> Result<Vec<ConfigOptionDto>, ApiError> {
+    let _guard = state_write();
     (|| -> anyhow::Result<Vec<ConfigOptionDto>> {
         let catalog = Catalog::embedded();
         Ok(config_dtos(piggy_core::saver_config::set_config(
@@ -1645,9 +1688,9 @@ pub fn sweep_report() -> Result<SweepReportDto, ApiError> {
 }
 
 pub fn sweep_apply(ids: Vec<String>) -> Result<SweepReportDto, ApiError> {
+    let _guard = state_write();
     (|| -> anyhow::Result<SweepReportDto> {
         let store = Store::open(&config::piggy_home())?;
-        let mut state = PiggyState::load()?;
         let wanted: HashSet<String> = ids.into_iter().collect();
         // Re-scan between each disable: applying by index is only valid against a
         // fresh scan (indices renumber as items drop out), so we resolve each
@@ -1658,6 +1701,12 @@ pub fn sweep_apply(ids: Vec<String>) -> Result<SweepReportDto, ApiError> {
                 i.kind != "hook" && wanted.contains(&stable_id(&i.kind, &i.id, i.source.as_deref()))
             });
             let Some(item) = next else { break };
+            // Load per pass, never once around the loop: `sweep::apply` writes the
+            // whole document back, so an instance carried across the scans would
+            // undo anything written between them - and each scan re-reads
+            // `~/.claude.json`, `settings.json` and the skills dir, which is the
+            // slowest stretch in this module.
+            let mut state = PiggyState::load()?;
             sweep::apply(&store, &mut state, item.idx, sweep::DEFAULT_N_SESSIONS)?;
         }
         Ok(dto_from(sweep::scan(&store, sweep::DEFAULT_N_SESSIONS)?))
@@ -1665,16 +1714,41 @@ pub fn sweep_apply(ids: Vec<String>) -> Result<SweepReportDto, ApiError> {
     .map_err(generic("Couldn't switch those off"))
 }
 
-/// Restore swept items. NOTE: this worktree's `piggy-core` only exposes
-/// `sweep::restore_all` (per-item restore is private), so this restores **every**
-/// swept item, then re-scans. `ids` is accepted for a future per-item API.
-pub fn sweep_restore(_ids: Vec<String>) -> Result<SweepReportDto, ApiError> {
-    (|| -> anyhow::Result<SweepReportDto> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreFailureDto {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepRestoreDto {
+    pub report: SweepReportDto,
+    /// Items still on the disabled list because putting them back failed; the
+    /// reason names the file and missing key.
+    pub failures: Vec<RestoreFailureDto>,
+}
+
+/// Restore all swept items (`piggy-core` has no per-item restore), then re-scan.
+pub fn sweep_restore() -> Result<SweepRestoreDto, ApiError> {
+    let _guard = state_write();
+    (|| -> anyhow::Result<SweepRestoreDto> {
         let mut state = PiggyState::load()?;
-        sweep::restore_all(&mut state)?;
+        let outcome = sweep::restore_all(&mut state)?;
         state.save()?;
         let store = Store::open(&config::piggy_home())?;
-        Ok(dto_from(sweep::scan(&store, sweep::DEFAULT_N_SESSIONS)?))
+        Ok(SweepRestoreDto {
+            report: dto_from(sweep::scan(&store, sweep::DEFAULT_N_SESSIONS)?),
+            failures: outcome
+                .failures
+                .into_iter()
+                .map(|f| RestoreFailureDto {
+                    id: f.id,
+                    reason: f.reason,
+                })
+                .collect(),
+        })
     })()
     .map_err(generic("Couldn't restore those"))
 }
@@ -2053,6 +2127,7 @@ pub fn load_prefs() -> AppPrefs {
 /// fraction) and anchor the pre-install baseline so rotation/attribution have a
 /// cutoff to reason from.
 pub fn save_prefs(prefs: &AppPrefs) -> Result<(), ApiError> {
+    let _guard = state_write();
     migrate_legacy_prefs();
     (|| -> anyhow::Result<()> {
         let mut state = PiggyState::load()?;
@@ -2080,6 +2155,7 @@ pub struct RestoreDto {
 }
 
 pub fn restore_defaults() -> Result<RestoreDto, ApiError> {
+    let _guard = state_write();
     engine::restore_defaults()
         .map(|r| RestoreDto {
             byte_restored: r.byte_restored,
@@ -2257,6 +2333,7 @@ pub fn reindex() -> Result<ReindexDto, ApiError> {
 /// and backfill the `pre_install` tags. Best-effort — a failure here just means
 /// attribution has less to compare against, never a crash.
 pub fn anchor_baseline() {
+    let _guard = state_write();
     let Ok(mut state) = PiggyState::load() else {
         return;
     };
@@ -2280,6 +2357,9 @@ pub fn anchor_baseline() {
 /// `rotation::tick_now` self-gates on the 10-minute idle window, so calling it is
 /// always safe; it never perturbs a running session.
 pub fn rotation_tick_if_enabled() -> bool {
+    // `rotation::tick_now` runs its own load/modify/save, so the tick queues
+    // behind whatever the user is doing rather than landing inside it.
+    let _guard = state_write();
     let Ok(state) = PiggyState::load() else {
         return false;
     };
@@ -2459,6 +2539,70 @@ mod tests {
         );
     }
 
+    /// A carried-forward ON arm whose older sessions were not *all* scheduler-
+    /// chosen comes back with `on_randomized: false` even though the live arm is
+    /// rotation's own. The hand-set note used to win that state and tell the user
+    /// "the rest you turned on by hand" about sessions Piggy chose itself, while
+    /// the carry-forward sentence written for it never rendered.
+    #[test]
+    fn carried_arm_gets_the_carry_note_not_the_hand_set_one() {
+        use super::map_headline;
+        use piggy_core::attribution::{
+            Badge, Headline as CoreHeadline, HeadlineBaseline, MultiplierState,
+        };
+
+        // 5 live sessions the scheduler chose, topped up with 8 from before the
+        // saver set changed. Enough on both sides for a number, capped to
+        // `estimated` by the fold-in.
+        let carried = CoreHeadline {
+            baseline: HeadlineBaseline::Holdout,
+            n_full_on: 13,
+            n_baseline: 12,
+            ceiling: Badge::Estimated,
+            on_randomized: false,
+            n_full_on_randomized: 5,
+            baseline_clean: true,
+            multiplier: Some(1.4),
+            multiplier_state: MultiplierState::Shown,
+            streams: vec![],
+            turns: piggy_core::attribution::StreamStat {
+                stream: piggy_core::attribution::Stream::Turns,
+                n_on: 0,
+                n_off: 0,
+                median_on: 0.0,
+                median_off: 0.0,
+                delta: None,
+                ci: None,
+                badge: Badge::Measuring,
+            },
+            on_pace: None,
+            baseline_pace: None,
+            n_carried: 8,
+            carried_savers: vec!["rtk".to_string()],
+        };
+        let h = map_headline(&carried);
+        assert_eq!(h.label, "estimated");
+        let note = h.note.expect("a reason");
+        assert!(
+            note.contains("counting 8 sessions from before you changed savers")
+                && !note.contains("by hand"),
+            "a carried arm must name the fold-in, never blame the user, got {note:?}"
+        );
+
+        // Same flag, nothing carried: the hand-set count is the right reason again.
+        let hand_set = CoreHeadline {
+            n_full_on: 9792,
+            n_carried: 0,
+            carried_savers: Vec::new(),
+            ..carried.clone()
+        };
+        let note = map_headline(&hand_set).note.expect("a reason");
+        assert!(
+            note.contains("5 of 10") && note.contains("by hand"),
+            "an uncarried arm short of the bar keeps its own count, got {note:?}"
+        );
+    }
+
     // The pure-fn test above covers the message; this covers the wiring - that
     // `saver_row` reads the pin/holdout/binary state off a real catalog entry and
     // attaches the note to the row the UI renders.
@@ -2631,7 +2775,10 @@ pub fn ledger_overview(period_s: String) -> Result<LedgerOverview, ApiError> {
             empty: total == 0,
         })
     })()
-    .map_err(|e| ApiError::new("Could not build the context ledger", e.to_string(), true))
+    // A read cannot have rolled anything back, and the raw chain carries the
+    // SQLite message plus the absolute db path into the banner. `generic` is the
+    // contract every other read command in this module uses.
+    .map_err(generic("Couldn't build the context ledger"))
 }
 
 /// One row of the task table: a project's spend, its outcome, and its history.
@@ -2749,7 +2896,8 @@ pub fn task_table(period_s: String) -> Result<TaskTable, ApiError> {
             rows,
         })
     })()
-    .map_err(|e| ApiError::new("Could not build the task table", e.to_string(), true))
+    // Read-only, like the overview above: no rollback to report, no raw chain.
+    .map_err(generic("Couldn't build the task table"))
 }
 
 /// One ledger finding for the UI.
@@ -2786,5 +2934,6 @@ pub fn ledger_insights(period_s: String) -> Result<Vec<InsightDto>, ApiError> {
             })
             .collect())
     })()
-    .map_err(|e| ApiError::new("Could not derive insights", e.to_string(), true))
+    // Read-only, like the overview above: no rollback to report, no raw chain.
+    .map_err(generic("Couldn't derive insights"))
 }

@@ -24,6 +24,7 @@ import type {
   SourcesOverview,
   StatsOverview,
   SweepReport,
+  SweepRestoreResult,
   SystemInfo,
   TaskTable,
   UpdateInfo,
@@ -75,7 +76,8 @@ export const api = {
   masterToggle: (on: boolean) => call<SaversState>("master_toggle", { on }),
   sweepReport: () => call<SweepReport>("sweep_report"),
   sweepApply: (itemIds: string[]) => call<SweepReport>("sweep_apply", { itemIds }),
-  sweepRestore: (itemIds: string[]) => call<SweepReport>("sweep_restore", { itemIds }),
+  /** Restores every swept item (no per-item restore in piggy-core). */
+  sweepRestore: () => call<SweepRestoreResult>("sweep_restore"),
   discoveredList: () => call<DiscoverDto>("discovered_list"),
   refreshDiscovered: () => call<DiscoverDto>("refresh_discovered"),
   shareCardData: (period: Period) => call<ShareCardData>("share_card_data", { period }),

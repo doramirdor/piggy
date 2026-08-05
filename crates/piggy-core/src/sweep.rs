@@ -418,6 +418,9 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
 
 /// Disable the item at 1-based `idx` from a fresh scan, recording a restore
 /// snapshot in `state`. Returns the disabled item's human id.
+///
+/// Items carrying a [`SweepItem::scope_to`] are refused: that row's advice is
+/// about *where* an in-use server is configured, not about removing it.
 pub fn apply(
     store: &Store,
     state: &mut PiggyState,
@@ -431,6 +434,19 @@ pub fn apply(
         .find(|i| i.idx == idx)
         .ok_or_else(|| anyhow!("no sweep item #{idx} (run `piggy sweep` to see the list)"))?
         .clone();
+
+    // A "scope to <project>" row belongs to a server the user actually calls, so
+    // disabling it would take away the tool its own suggestion told them to keep,
+    // and re-scoping it here would be Piggy moving config it did not write. Refuse
+    // and point at the manual re-add, the way the hook arm below bails.
+    if let Some(project) = item.scope_to.as_deref().filter(|_| !item.recommend_disable) {
+        bail!(
+            "'{}' is in use ({} tool call(s) in the window) and only needs re-scoping, not removing. \
+             Re-add it in {project} yourself and then drop the user-scope copy: Piggy will not move config it did not write.",
+            item.id,
+            item.used
+        );
+    }
 
     match item.kind.as_str() {
         "mcp" => disable_mcp(state, &item)?,

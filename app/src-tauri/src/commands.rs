@@ -9,6 +9,7 @@ use crate::advisor::{self, AdvisorStatusDto, AnnotationDto};
 use crate::backend::{
     self, ApiError, AppPrefs, ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ReindexDto,
     RestoreDto, SaversState, ShareCardData, SourcesOverview, StatsOverview, SweepReportDto,
+    SweepRestoreDto,
     InsightDto, LedgerOverview, TaskTable, UsageSeries,
 };
 
@@ -154,8 +155,8 @@ pub async fn sweep_apply(item_ids: Vec<String>) -> Result<SweepReportDto, ApiErr
 }
 
 #[tauri::command]
-pub async fn sweep_restore(item_ids: Vec<String>) -> Result<SweepReportDto, ApiError> {
-    run(move || backend::sweep_restore(item_ids)).await
+pub async fn sweep_restore() -> Result<SweepRestoreDto, ApiError> {
+    run(backend::sweep_restore).await
 }
 
 #[tauri::command]
@@ -235,8 +236,11 @@ pub async fn settings_set(app: AppHandle, settings: SettingsInput) -> Result<Set
     };
     run(move || backend::save_prefs(&prefs)).await?;
 
+    // Held, not dropped: an unwritable `~/Library/LaunchAgents` used to make the
+    // switch snap back with no explanation. Reported after the rest of the
+    // settings land, so one failing toggle doesn't swallow the others.
     let al = app.autolaunch();
-    let _ = if settings.launch_at_login {
+    let autostart = if settings.launch_at_login {
         al.enable()
     } else {
         al.disable()
@@ -249,6 +253,9 @@ pub async fn settings_set(app: AppHandle, settings: SettingsInput) -> Result<Set
     if cli_changed {
         run(move || backend::set_cli_tool(want_cli)).await?;
     }
+
+    autostart
+        .map_err(|e| ApiError::new("Couldn't change launch at login", e.to_string(), false))?;
 
     let saved = run(|| Ok(backend::load_prefs())).await?;
     Ok(Settings {
@@ -274,10 +281,38 @@ pub async fn reindex() -> Result<ReindexDto, ApiError> {
     run(backend::reindex).await
 }
 
+/// True only for `http`/`https`, which is every link the UI actually offers:
+/// the About screen's fixed URLs and a Discover row's repo URL.
+///
+/// Default-deny on purpose. `file:`, `javascript:`, and any scheme some other
+/// installed app registered are refused rather than handed to the system opener.
+fn is_web_url(url: &str) -> bool {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            !rest.is_empty()
+                && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        }
+        None => false,
+    }
+}
+
 /// Open an external URL in the user's browser (used for "View on GitHub").
+///
+/// The scheme is checked here because `OpenerExt::open_url` is the raw Rust
+/// primitive: it skips the opener plugin's URL scope, which only guards the
+/// plugin's own JS command. The strings this command is fed are remote-derived
+/// (a Discover row's repo URL comes verbatim from the GitHub response or the
+/// on-disk discovery cache), so an unchecked one reaches macOS `open`.
 #[tauri::command]
 pub async fn open_external(app: AppHandle, url: String) -> Result<(), ApiError> {
     use tauri_plugin_opener::OpenerExt;
+    if !is_web_url(&url) {
+        return Err(ApiError::new(
+            "Couldn't open the link",
+            "Piggy only opens http and https links.",
+            false,
+        ));
+    }
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| ApiError::new("Couldn't open the link", e.to_string(), false))
@@ -315,13 +350,24 @@ pub struct SystemInfoDto {
 
 /// Put `~` back so a screenshot of About doesn't carry the user's home path.
 fn tildify(p: &std::path::Path) -> String {
-    let s = p.to_string_lossy().to_string();
     match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() => match s.strip_prefix(&h) {
-            Some(rest) => format!("~{rest}"),
-            None => s,
-        },
-        _ => s,
+        Ok(h) if !h.is_empty() => tildify_under(p, std::path::Path::new(&h)),
+        _ => p.to_string_lossy().to_string(),
+    }
+}
+
+/// Abbreviate only on a real path-component match. `PIGGY_HOME` can point
+/// anywhere, so a textual prefix strip would turn `/Users/dorothy/piggy-data`
+/// under `HOME=/Users/dor` into `~othy/piggy-data`: a path that doesn't exist,
+/// and one that still carries half the account name this exists to hide.
+fn tildify_under(p: &std::path::Path, home: &std::path::Path) -> String {
+    match p.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => std::path::Path::new("~")
+            .join(rest)
+            .to_string_lossy()
+            .into_owned(),
+        Err(_) => p.to_string_lossy().to_string(),
     }
 }
 
@@ -406,4 +452,55 @@ pub async fn install_update(app: AppHandle) -> Result<(), ApiError> {
         .map_err(|e| ApiError::new("Couldn't install the update", e.to_string(), false))?;
 
     app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_web_url, tildify_under};
+    use std::path::Path;
+
+    #[test]
+    fn only_web_schemes_reach_the_system_opener() {
+        assert!(is_web_url("https://github.com/doramirdor/piggy"));
+        assert!(is_web_url("http://localhost:1420"));
+        assert!(is_web_url("HTTPS://getnadir.com"));
+
+        // The scheme a tampered discovery cache would need to do damage.
+        assert!(!is_web_url("file:///Users/you/.ssh/id_rsa"));
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(!is_web_url("some-other-app://run?cmd=rm"));
+        assert!(!is_web_url("https://"));
+        assert!(!is_web_url(" https://getnadir.com"));
+        assert!(!is_web_url(""));
+    }
+
+    #[test]
+    fn tildify_abbreviates_whole_components_only() {
+        assert_eq!(
+            tildify_under(Path::new("/Users/dor/.piggy"), Path::new("/Users/dor")),
+            "~/.piggy"
+        );
+        // A sibling account whose name merely starts with the home name is not
+        // under it, so it must come back untouched rather than as `~othy/...`.
+        assert_eq!(
+            tildify_under(
+                Path::new("/Users/dorothy/piggy-data"),
+                Path::new("/Users/dor")
+            ),
+            "/Users/dorothy/piggy-data"
+        );
+        // A trailing slash on HOME is still a component match.
+        assert_eq!(
+            tildify_under(Path::new("/Users/dor/.piggy"), Path::new("/Users/dor/")),
+            "~/.piggy"
+        );
+        assert_eq!(
+            tildify_under(Path::new("/Users/dor"), Path::new("/Users/dor")),
+            "~"
+        );
+        assert_eq!(
+            tildify_under(Path::new("/opt/piggy"), Path::new("/Users/dor")),
+            "/opt/piggy"
+        );
+    }
 }

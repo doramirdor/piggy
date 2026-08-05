@@ -272,6 +272,16 @@ export interface SweepReport {
   items: SweepItem[];
 }
 
+export interface RestoreFailure {
+  id: string;
+  reason: string;
+}
+
+export interface SweepRestoreResult {
+  report: SweepReport;
+  failures: RestoreFailure[];
+}
+
 export interface DiscoverEntry {
   id: string;
   name: string;

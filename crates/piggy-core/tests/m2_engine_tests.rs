@@ -1083,7 +1083,7 @@ fn sweep_flags_unused_mcp_server_and_apply_restore_round_trips() {
 
     // Restore everything.
     let mut state = PiggyState::load().unwrap();
-    let restored = sweep::restore_all(&mut state).unwrap();
+    let restored = sweep::restore_all(&mut state).unwrap().restored;
     state.save().unwrap();
     assert_eq!(restored, 1);
     let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
@@ -1179,10 +1179,68 @@ fn sweep_separates_global_from_single_project_user_scope_servers() {
     assert!(cj["mcpServers"].get("onlyhere").is_some());
 
     let mut state = PiggyState::load().unwrap();
-    assert_eq!(sweep::restore_all(&mut state).unwrap(), 1);
+    assert_eq!(sweep::restore_all(&mut state).unwrap().restored, 1);
     state.save().unwrap();
     let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
     assert_eq!(cj["mcpServers"]["deadserver"]["args"], json!(["dead"]));
+}
+
+/// A "scope to <project>" row is advice about where an in-use server lives, not
+/// a removal, so `--apply` on it must refuse rather than delete a server the
+/// user calls all day. Applying the row its own suggestion column labels "scope
+/// to /a" and getting "disabled" back is the failure this guards.
+#[test]
+fn sweep_apply_refuses_to_remove_a_server_that_only_needs_rescoping() {
+    let sb = Sandbox::new();
+    let claude_json = json!({
+        "mcpServers": {
+            "onlyhere": { "command": "npx", "args": ["only"] }
+        },
+        "projects": {},
+        "pluginUsage": {},
+        "skillUsage": {}
+    });
+    std::fs::write(
+        sb.claude_json(),
+        format!("{}\n", serde_json::to_string_pretty(&claude_json).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(sb.settings_path(), "{}\n").unwrap();
+
+    let home = piggy_core::config::piggy_home();
+    let mut store = Store::open(&home).unwrap();
+    seed_session_in_project(
+        &mut store,
+        "s1",
+        "/a",
+        "2026-07-12T10:00:00.000Z",
+        &[("mcp__onlyhere__x", 6)],
+    );
+
+    let report = sweep::scan(&store, 50).unwrap();
+    let only = report.items.iter().find(|i| i.id == "onlyhere").unwrap();
+    assert_eq!(only.scope_to.as_deref(), Some("/a"), "the row says re-scope");
+    assert!(!only.recommend_disable);
+
+    let mut state = PiggyState::load().unwrap();
+    let err = sweep::apply(&store, &mut state, only.idx, 50).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("/a") && msg.contains("re-scoping"),
+        "the refusal names the project to re-add it in: {msg}"
+    );
+
+    // The server is still there to be called, and nothing was recorded as swept.
+    let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
+    assert_eq!(
+        cj["mcpServers"]["onlyhere"]["args"],
+        json!(["only"]),
+        "an in-use server survives an apply aimed at it"
+    );
+    assert!(
+        PiggyState::load().unwrap().sweep_disabled.is_empty(),
+        "a refused apply records no restore entry"
+    );
 }
 
 /// The snapshot in `state.json` is the only copy of a swept server's config, so a
@@ -1225,10 +1283,17 @@ fn sweep_restore_fails_when_the_target_map_is_gone() {
     std::fs::write(sb.claude_json(), replaced).unwrap();
 
     let mut state = PiggyState::load().unwrap();
+    let outcome = sweep::restore_all(&mut state).unwrap();
     assert_eq!(
-        sweep::restore_all(&mut state).unwrap(),
-        0,
+        outcome.restored, 0,
         "a restore with nowhere to write is not a restore"
+    );
+    assert_eq!(outcome.failures.len(), 1, "the failure is reported");
+    assert_eq!(outcome.failures[0].id, "deadserver");
+    assert!(
+        outcome.failures[0].reason.contains("mcpServers"),
+        "the reason names the missing key: {}",
+        outcome.failures[0].reason
     );
     state.save().unwrap();
 

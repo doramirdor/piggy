@@ -622,7 +622,7 @@ function environment(): Environment {
  *
  *      node scripts/snapshot-dev-data.mjs [--since YYYY-MM-DD]
  *
- *  Hand-written figures drift from the product and hide bugs — one did exactly
+ *  Hand-written figures drift from the product and hide bugs. One did exactly
  *  that, disagreeing with the real ledger while a broken headroom multiplier
  *  went unnoticed. If these look wrong on screen, they are wrong for real. */
 function ledgerOverview(period: Period): LedgerOverview {
@@ -791,7 +791,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       }
       case "sweep_restore": {
         sweepItems = EMPTY ? [] : initialSweepItems();
-        return sweepReport();
+        return { report: sweepReport(), failures: [] };
       }
       case "discovered_list":
       case "refresh_discovered":
