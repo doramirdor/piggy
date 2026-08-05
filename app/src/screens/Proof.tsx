@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useStore } from "../store";
+import { saverNotesKey, useStore } from "../store";
 import { StatusChip } from "../components/StatusChip";
 import { PiggyMark } from "../components/PiggyMark";
 import { badgeView } from "../lib/badge";
@@ -268,11 +268,18 @@ export function Proof() {
   const [shareOpen, setShareOpen] = useState(false);
 
   const rows = savers?.savers ?? [];
-  // The local model, once, and only from this screen: it is the only place the
+  // The local model, and only from this screen: it is the only place the
   // per-saver prose is shown, and a load is ~3GB resident.
+  //
+  // Keyed on the reading rather than on the row count, because the rows keep
+  // their identity while the measurement under them moves. A saver that settles
+  // from "still measuring" to a delta, or from one delta to another, needs its
+  // note written again; the key changes only when something the reader can see
+  // changes, and `loadSaverNotes` no-ops for a key it already has.
+  const notesKey = useStore((s) => saverNotesKey(s.savers));
   useEffect(() => {
-    if (rows.length > 0) void loadSaverNotes();
-  }, [rows.length, loadSaverNotes]);
+    if (notesKey) void loadSaverNotes();
+  }, [notesKey, loadSaverNotes]);
   const noteFor = (id: string) => saverNotes.find((n) => n.insightId === `saver:${id}`);
   const view = proofView(stats?.headline ?? null, rows);
   // THE STAMP. Keyed by the identity of the claim, not by mount: the verdict

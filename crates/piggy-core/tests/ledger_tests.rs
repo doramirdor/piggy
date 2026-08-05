@@ -73,7 +73,7 @@ fn ledger_aggregates_kinds_and_flags_removable() {
     assert_eq!(l.rows[0].tokens, 16_000);
     // Only the attachment kinds are configuration, not the floor or the work.
     assert_eq!(l.removable_tokens(), 1_500);
-    assert!(l.rows.iter().find(|r| r.kind == CTX_FLOOR).unwrap().removable() == false);
+    assert!(!l.rows.iter().find(|r| r.kind == CTX_FLOOR).unwrap().removable());
     assert!(l.rows.iter().find(|r| r.kind == "hook_success").unwrap().removable());
     // 2000 floor of 19500 total.
     assert!((l.overhead() - 2000.0 / 19_500.0).abs() < 1e-9);

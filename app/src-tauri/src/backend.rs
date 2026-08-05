@@ -1835,46 +1835,47 @@ fn listed_only_entries(catalog: &Catalog) -> Vec<DiscoverEntry> {
 }
 
 /// The live discovery feed (GitHub search), mapped to the UI item. Best-effort:
-/// `discovery::discover` serves a cached result, degrades to a stale cache on
-/// rate-limit/offline, and never errors — so an `Err` here just means an empty
-/// feed while the catalog's listed-only rows keep the tab useful. We carry no
-/// `authorClaims` for wild repos: a GitHub result has no vetted savings claim, and
-/// Piggy never invents one.
-fn discovery_feed(force: bool) -> Vec<DiscoverFeedItem> {
-    match discovery::discover(force) {
-        Ok(cache) => cache
-            .repos
-            .into_iter()
-            .filter(|r| !r.listed_only)
-            .map(|r| DiscoverFeedItem {
-                name: r.full_name,
-                description: r.description.unwrap_or_default(),
-                stars: Some(r.stars),
-                author_claims: None,
-                repo_url: if r.url.is_empty() { None } else { Some(r.url) },
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+/// We carry no `authorClaims` for wild repos: a GitHub result has no vetted
+/// savings claim, and Piggy never invents one.
+fn feed_items(cache: discovery::DiscoveryCache) -> Vec<DiscoverFeedItem> {
+    cache
+        .repos
+        .into_iter()
+        .filter(|r| !r.listed_only)
+        .map(|r| DiscoverFeedItem {
+            name: r.full_name,
+            description: r.description.unwrap_or_default(),
+            stars: Some(r.stars),
+            author_claims: None,
+            repo_url: if r.url.is_empty() { None } else { Some(r.url) },
+        })
+        .collect()
 }
 
-fn discovered(force: bool) -> DiscoverDto {
+/// The Discover section's feed, cache only. Savers mounts this on render, and
+/// a primary tab must not phone GitHub unprompted; the live search runs behind
+/// the explicit refresh alone.
+pub fn discovered_list() -> DiscoverDto {
     let catalog = Catalog::embedded();
     DiscoverDto {
-        feed: discovery_feed(force),
+        feed: feed_items(discovery::discover_cached()),
         listed_only: listed_only_entries(&catalog),
     }
 }
 
-/// The Discover tab feed. Refreshes from GitHub at most once a day (handled inside
-/// `piggy-core`); reads the cache otherwise.
-pub fn discovered_list() -> DiscoverDto {
-    discovered(false)
-}
-
-/// Manual "check now" refresh — forces a live GitHub search past the daily cache.
+/// Manual "check now" refresh: the one path that performs a live GitHub search
+/// past the daily cache. `discovery::discover` degrades to a stale cache on
+/// rate-limit/offline and never errors, so an `Err` here just means an empty
+/// feed while the catalog's listed-only rows keep the section useful.
 pub fn refresh_discovered() -> DiscoverDto {
-    discovered(true)
+    let catalog = Catalog::embedded();
+    DiscoverDto {
+        feed: match discovery::discover(true) {
+            Ok(cache) => feed_items(cache),
+            Err(_) => Vec::new(),
+        },
+        listed_only: listed_only_entries(&catalog),
+    }
 }
 
 // ---------------------------------------------------------------------------

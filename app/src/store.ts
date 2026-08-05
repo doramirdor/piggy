@@ -17,9 +17,36 @@ import type {
 // Four destinations, one per question a user actually arrives with: where did
 // my tokens go, what do I turn on, did it work, and how do I control Piggy.
 // Dashboard and Reports were folded into Spend (they answered the same
-// question in different cuts) and Discovery became a section of Savers, which
-// is the tab that installs things.
+// question in different cuts), and Discovery and Sweep became sections of
+// Savers, which is the tab that installs things.
 export type Tab = "spend" | "savers" | "proof" | "settings" | "about";
+
+/**
+ * The identity of the measurement per-saver advice is written against.
+ *
+ * The prose sits directly beside the row's own finding and caveat, and those
+ * refresh on every `refresh()`. Pinning the prose to the reading it explains is
+ * what stops a note written about "still measuring" surviving into a settled
+ * delta, or a note about one delta surviving into another.
+ *
+ * Coarse on purpose. Re-asking means loading a ~3GB model, so the key must not
+ * move with every indexed session: the delta enters it at the precision the row
+ * actually prints (whole percent, `pctMagnitude`), and the medians behind it do
+ * not enter at all. What does move it is what the reader can see move: a saver
+ * appearing, being switched on or off, settling, or changing its printed number.
+ *
+ * `null` when there is no saver to advise on, which is also what keeps the
+ * fetch from firing at all.
+ */
+export function saverNotesKey(savers: SaversState | null): string | null {
+  const rows = savers?.savers ?? [];
+  if (rows.length === 0) return null;
+  const rowKeys = rows.map((s) => {
+    const pct = s.badge.delta == null ? "-" : Math.round(s.badge.delta * 100);
+    return `${s.id}:${s.enabled ? 1 : 0}:${s.badge.kind}:${pct}`;
+  });
+  return `${savers?.masterOn ? "on" : "off"}|${rowKeys.join("|")}`;
+}
 
 interface AppState {
   tab: Tab;
@@ -38,9 +65,10 @@ interface AppState {
   /** Per-saver advice from the same local model, keyed by `saver:<id>`. Not
    *  period-scoped: the comparison behind it counts every session ever run. */
   saverNotes: Annotation[];
-  /** Whether the saver pass has already been asked this session. One load is
-   *  ~3GB resident, so Proof asks once and never on a refresh. */
-  saverNotesAsked: boolean;
+  /** The reading `saverNotes` was written against (see `saverNotesKey`), or
+   *  `null` for "not asked yet". One load is ~3GB resident, so Proof asks once
+   *  per reading and never on a refresh. */
+  saverNotesFor: string | null;
   sources: SourcesOverview | null;
   series: UsageSeries | null;
   /** The task table, fetched only when the Tasks view is opened. `null` means
@@ -113,7 +141,7 @@ export const useStore = create<AppState>((set, get) => {
   insights: [],
   annotations: [],
   saverNotes: [],
-  saverNotesAsked: false,
+  saverNotesFor: null,
   annotatedPeriod: null,
   sources: null,
   series: null,
@@ -186,19 +214,31 @@ export const useStore = create<AppState>((set, get) => {
     }
   },
 
-  /** Ask the local model for per-saver advice. Called by Proof, once.
+  /** Ask the local model for per-saver advice. Called by Proof, once per
+   *  reading.
    *
-   *  Deliberately not part of `refresh`: without the guard of `saverNotesAsked`
-   *  a 4B would load on every session-log write, whichever tab is open. */
+   *  Deliberately not part of `refresh`: without the guard of `saverNotesFor` a
+   *  4B would load on every session-log write, whichever tab is open. But
+   *  "asked once, ever" was the other error: the row's finding and caveat move
+   *  under the note on every refresh, and in a menu bar app left open for days
+   *  the prose ends up describing a reading the row no longer shows. The key is
+   *  what makes once mean once per reading. */
   loadSaverNotes: async () => {
-    if (get().saverNotesAsked) return;
-    set({ saverNotesAsked: true });
+    const key = saverNotesKey(get().savers);
+    if (key === null || get().saverNotesFor === key) return;
+    // Claim the reading BEFORE awaiting, so two visits cannot start two models
+    // at once. Each load is ~3GB resident. The previous prose goes with the
+    // claim: it was written about a reading that has since moved, which is the
+    // mismatch `setPeriod` discards annotations to avoid.
+    set({ saverNotesFor: key, saverNotes: [] });
     try {
-      set({ saverNotes: await api.advisorSavers() });
+      const saverNotes = await api.advisorSavers();
+      // The reading may have moved while the model was thinking.
+      if (get().saverNotesFor === key) set({ saverNotes });
     } catch {
       // Silent: the deterministic summary on each row is the product, and it is
       // already rendered. Re-arm so a later visit can retry.
-      set({ saverNotesAsked: false });
+      if (get().saverNotesFor === key) set({ saverNotesFor: null });
     }
   },
 

@@ -249,7 +249,7 @@ pub fn tick(
     let controlled = controlled_savers(catalog, &state);
     // Nothing to do only when there is neither a per-saver rotation to run nor a
     // holdout to hold the pinned savers out for.
-    if controlled.is_empty() && !(holdout_enabled && !pinned.is_empty()) {
+    if controlled.is_empty() && (!holdout_enabled || pinned.is_empty()) {
         return Ok(RotationOutcome::NothingToRotate);
     }
 

@@ -87,13 +87,21 @@ pub const MIN_TURNS_DENOM: f64 = 2.0;
 /// shown to one decimal ("1.4× longer"), so a saver that could only ever have
 /// moved a stream by a twentieth cannot move the digit the user reads.
 pub const NULL_BAND: f64 = 0.05;
-/// Number of per-stream badges shown together for one saver/headline. The badge
-/// gate is Bonferroni-corrected across this family so the *family-wise* chance a
+/// Number of badges shown together for one saver/headline. The badge gate is
+/// Bonferroni-corrected across this family so the *family-wise* chance a
 /// truly-null saver lights up any green badge stays near the ~10% a reader infers
-/// from a single 90% CI — rather than the ~1-0.9^4 ≈ 34% of four naive gates. The
+/// from a single 90% CI, rather than the ~1-0.9^5 ≈ 41% of five naive gates. The
 /// displayed CI is still the spec-mandated 90%; the correction only ever
 /// *withholds* a badge, never invents one.
-pub const STREAM_FAMILY: usize = Stream::ALL.len();
+///
+/// The `+ 1` is the turns arm. It is deliberately outside [`Stream::ALL`] (it is
+/// the denominator the four streams divide by, not a fifth stream), but it runs
+/// the same `stream_stat` gate and is displayed right beside them, in the
+/// per-saver table ([`SaverAttribution::arms`], [`SaverAttribution::summary`])
+/// and in the headline ([`Headline::turns`]). Five gates corrected for four is a
+/// family-wise rate above what the doc above promises, so the family has to be
+/// the number of badges actually shown, not the length of one list of them.
+pub const STREAM_FAMILY: usize = Stream::ALL.len() + 1;
 
 /// The four token streams a saver can move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,13 +323,29 @@ impl StreamStat {
                     sessions(on)
                 ),
             }),
-            Reading::Quiet => Some(match self.stream {
-                Stream::Turns => "too few turns per session to compare".to_string(),
-                _ => format!(
-                    "under {} tokens a turn on both sides, too small to compare",
-                    MIN_RATE_DENOM as u64
-                ),
-            }),
+            // `Quiet` is decided by the OFF median alone (`delta_of` never looks
+            // at the ON side), so only the "both sides" wording may claim both.
+            // The asymmetric case is real and is the one the floor was written
+            // for: ~2 tokens a turn served from cache with the saver off against
+            // ~400 with it on. Telling that reader both sides are too small is
+            // false about the arm that is 40x the floor.
+            Reading::Quiet => {
+                let on_quiet = self.median_on < self.stream.min_denom();
+                Some(match (self.stream, on_quiet) {
+                    (Stream::Turns, true) => "too few turns per session to compare".to_string(),
+                    (Stream::Turns, false) => {
+                        "too few turns per session with it off to compare against".to_string()
+                    }
+                    (_, true) => format!(
+                        "under {} tokens a turn on both sides, too small to compare",
+                        MIN_RATE_DENOM as u64
+                    ),
+                    (_, false) => format!(
+                        "under {} tokens a turn with it off, too small to take a ratio against",
+                        MIN_RATE_DENOM as u64
+                    ),
+                })
+            }
             // Rounded AWAY from zero, so the sentence claims less than the
             // interval supports rather than more.
             Reading::NoChange { bound } => Some(format!(
@@ -1293,7 +1317,8 @@ fn ci_is_significant(ci: (f64, f64)) -> bool {
 ///
 /// The **displayed** interval is the spec's 90% CI, but the badge *gate* uses a
 /// Bonferroni-corrected interval (alpha `CI_ALPHA / STREAM_FAMILY`) so showing
-/// four per-stream badges doesn't inflate the family-wise false-positive rate.
+/// the whole family of badges together (four streams and the turns arm) doesn't
+/// inflate the family-wise false-positive rate.
 fn stream_stat(stream: Stream, on: &[f64], off: &[f64], ceiling: Badge, seed: u64) -> StreamStat {
     debug_assert!(
         ceiling.shows_number(),

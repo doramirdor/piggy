@@ -100,7 +100,7 @@ fn every_catalog_model_runs_on_8gb() {
 #[test]
 fn budget_reserves_room_for_the_rest_of_the_machine() {
     // Never plan around more than 60% of RAM, and never less than 3 GB reserved.
-    assert_eq!(budget(8 * GB), 8 * GB - (8 * GB as u64) * 2 / 5);
+    assert_eq!(budget(8 * GB), 8 * GB - (8 * GB) * 2 / 5);
     assert!(budget(4 * GB) < 2 * GB);
     assert!(budget(64 * GB) < 40 * GB);
 }

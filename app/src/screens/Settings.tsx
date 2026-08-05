@@ -7,7 +7,7 @@ import type { Doctor, Settings as SettingsData, UpdateInfo } from "../types";
 
 // Single source of truth for the version shown in the UI (the sidebar imports it
 // too). Bump this in step with tauri.conf.json / Cargo.toml / package.json.
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "0.2.0";
 
 export function Settings() {
   const showError = useStore((s) => s.showError);
@@ -26,12 +26,26 @@ export function Settings() {
     api.doctor().then(setDoctor).catch((e) => showError(e));
   }, [showError]);
 
+  // Optimistic, then corrected. A refused change is not a rare path here: "Open
+  // Piggy at login" writes a launch agent the OS can decline, and leaving the
+  // switch sitting where the user put it would have the screen state something
+  // about their Mac that is not true. So the banner says why, and the row goes
+  // back to what the backend actually has rather than to what was asked for.
   const commit = async (next: SettingsData) => {
+    const before = settings;
     setSettings(next);
     try {
       setSettings(await api.settingsSet(next));
     } catch (e) {
       showError(e);
+      try {
+        // Re-read rather than restore `before`: the call may have saved some of
+        // the prefs before the step that failed, and the switch has to show the
+        // state that survived.
+        setSettings(await api.settingsGet());
+      } catch {
+        setSettings(before);
+      }
     }
   };
 
@@ -105,8 +119,8 @@ export function Settings() {
           <div className="smeta">
             <div className="sname">Holdout for measuring</div>
             <div className="sdesc">
-              Piggy runs {holdoutPct}% of sessions with every saver off — including ones you've
-              pinned on — then switches them back, so it can prove real savings even for a pinned
+              Piggy runs {holdoutPct}% of sessions with every saver off (including ones you've
+              pinned on), then switches them back, so it can prove real savings even for a pinned
               setup.
             </div>
           </div>

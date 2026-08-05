@@ -219,7 +219,7 @@ pub fn fits(m: &AdvisorModel, total: u64) -> bool {
 /// letting the user find out after 2.5 GB is not a choice, it is a trap.
 pub fn available(total: u64) -> Vec<&'static AdvisorModel> {
     let mut out: Vec<_> = CATALOG.iter().filter(|m| fits(m, total)).collect();
-    out.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    out.sort_by_key(|m| std::cmp::Reverse(m.bytes));
     out
 }
 
@@ -239,7 +239,7 @@ pub fn host_ram() -> Option<u64> {
             .args(["-n", "hw.memsize"])
             .output()
             .ok()?;
-        return String::from_utf8_lossy(&out.stdout).trim().parse().ok();
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
     #[cfg(target_os = "linux")]
     {

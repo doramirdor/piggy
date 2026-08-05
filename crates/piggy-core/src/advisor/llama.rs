@@ -84,6 +84,20 @@ fn backend() -> Result<&'static LlamaBackend> {
         .map_err(|e| anyhow::anyhow!("could not start the local model backend: {e}"))
 }
 
+/// Whether a prompt of `prompt_tokens` leaves room to answer in a `ctx_size`
+/// window.
+///
+/// The reserve is generation's real ceiling, not a token or two of slack. The KV
+/// cache holds exactly `ctx_size` entries and [`Advisor::generate`] walks `pos`
+/// forward once per generated token, so a sheet that clears a smaller reserve
+/// passes the pre-flight and then dies inside the loop: `ctx.decode` runs out of
+/// slots, `generate` returns `Err`, and every annotation already written is
+/// discarded with it. Rejecting up front is what makes the bail report the real
+/// cause instead of "generating".
+fn fits_context(prompt_tokens: usize, ctx_size: u32) -> bool {
+    prompt_tokens + MAX_TOKENS < ctx_size as usize
+}
+
 /// A loaded model, kept alive across queries.
 ///
 /// Loading is seconds of mmap and Metal warm-up for a 2.5 GB file, so the app
@@ -220,9 +234,10 @@ impl Advisor {
             .model
             .str_to_token(prompt, AddBos::Always)
             .context("tokenizing the fact sheet")?;
-        if tokens.len() + 64 >= ctx_size as usize {
+        if !fits_context(tokens.len(), ctx_size) {
             anyhow::bail!(
-                "the fact sheet is {} tokens, too large for this model's {ctx_size}-token window",
+                "the fact sheet is {} tokens, too large to answer inside this \
+                 model's {ctx_size}-token window",
                 tokens.len()
             );
         }
@@ -467,5 +482,22 @@ mod tests {
             prompt.contains(guard::EXAMPLE_WHY),
             "guard's needle `why` is not in the prompt: {prompt}"
         );
+    }
+
+    /// The pre-flight has to reserve what generation actually spends.
+    ///
+    /// A sheet that fits the window but not the answer used to clear a 64-token
+    /// reserve and then die at `ctx.decode` a few dozen tokens in, throwing away
+    /// the annotations written up to that point and reporting "generating" in
+    /// place of the size that caused it. Asserted here rather than in `tests/`
+    /// because reaching the check through [`Advisor::generate`] needs weights.
+    #[test]
+    fn the_preflight_reserves_the_whole_generation_budget() {
+        // The catalog's smallest window.
+        let ctx = 4096u32;
+        // What the old 64-token reserve let through.
+        assert!(!fits_context(ctx as usize - 65, ctx));
+        assert!(!fits_context(ctx as usize - MAX_TOKENS, ctx));
+        assert!(fits_context(ctx as usize - MAX_TOKENS - 1, ctx));
     }
 }

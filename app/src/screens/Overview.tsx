@@ -162,7 +162,7 @@ export function Overview() {
               // The A/B headline needs randomization and can sit at "measuring"
               // for weeks. The ledger needs neither, so rather than show nothing
               // we show what IS known: exact token arithmetic on how much of the
-              // context is configurable. Worded "could" throughout — this is
+              // context is configurable. Worded "could" throughout: this is
               // available headroom, never a saving already banked.
               // `em.exact`, not a bare `em`: the hero's green is reserved for a
               // holdout-backed claim, and headroom is exact arithmetic on

@@ -3,7 +3,16 @@ import { api } from "../ipc";
 import { useStore } from "../store";
 import type { DiscoverDto } from "../types";
 
-export function Discover() {
+/**
+ * Candidates Piggy spotted on GitHub, as a section of Savers rather than a tab
+ * of its own.
+ *
+ * Savers is the tab that installs things, so a feed of things Piggy will *not*
+ * install reads as the tail of that list: here is what Piggy runs and measures,
+ * and here is what exists that it does not vouch for. As its own destination it
+ * was a fifth nav item competing with the four questions the sidebar answers.
+ */
+export function DiscoverSection() {
   const [data, setData] = useState<DiscoverDto | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const showError = useStore((s) => s.showError);
@@ -32,14 +41,9 @@ export function Discover() {
 
   return (
     <>
-      <div className="head">
-        <div>
-          <h1>Discover</h1>
-          <div className="sub">
-            Candidates Piggy spotted on GitHub. Piggy has not vetted or measured any of them, and
-            nothing here installs. Read them on GitHub and judge for yourself.
-          </div>
-        </div>
+      <div className="sect-head">
+        <h2>Discover</h2>
+        <span className="helper">Spotted on GitHub. Not measured, and nothing here installs.</span>
         <button className="btn" disabled={refreshing} onClick={refresh}>
           {refreshing ? "Checking…" : "Check now"}
         </button>

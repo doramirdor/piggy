@@ -190,7 +190,7 @@ impl Ledger {
         // Cost-weighted, NOT token-weighted: the denominator is the whole bill,
         // not just the part of it the ledger buckets.
         let share = (removable as f64 * self.write_weight) / self.cost_units;
-        if share < HEADROOM_MIN_SHARE || share >= 1.0 {
+        if !(HEADROOM_MIN_SHARE..1.0).contains(&share) {
             return None;
         }
         Some(1.0 / (1.0 - share))

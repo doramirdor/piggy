@@ -241,10 +241,11 @@ fn null_per_stream_false_positive_rate() {
 // 2. Per-SAVER honesty: chance that a truly-null saver shows >=1 green stream.
 // ---------------------------------------------------------------------------
 //
-// A saver has FOUR stream badges. Even if each stream's null FP rate is ~10%,
-// the chance that AT LEAST ONE of the four badges lights up green is ~1-0.9^4
-// ~= 0.34. This surfaces the honesty-relevant number: how often a do-nothing
-// saver displays some green "measured savings".
+// A saver shows FIVE badges together: the four token streams and the turns arm
+// beside them. Even if each arm's null FP rate is ~10%, the chance that AT LEAST
+// ONE of the five lights up green is ~1-0.9^5 ~= 0.41. This surfaces the
+// honesty-relevant number: how often a do-nothing saver displays some green
+// "measured savings" anywhere the reader is looking.
 
 #[test]
 fn null_saver_any_stream_false_positive_rate() {
@@ -282,14 +283,16 @@ fn null_saver_any_stream_false_positive_rate() {
             }
         }
         let a = attribution::attribute(&store, &pricing, "rtk", 0xF00D ^ t as u64).unwrap();
-        if a.streams.iter().any(|s| s.badge == Badge::Measured) {
+        // Every arm, not just `streams`: the turns arm carries the same badge and
+        // is printed in the same table, so a green one there is the same lie.
+        if a.arms().any(|s| s.badge == Badge::Measured) {
             any_green += 1;
         }
     }
     let rate = any_green as f64 / trials as f64;
     eprintln!(
-        "[null_saver_any_stream_false_positive_rate] truly-null savers showing >=1 GREEN stream: \
-         {any_green}/{trials} = {rate:.3}  (expected ~1-0.9^4 = 0.34 for independent 90% CIs)"
+        "[null_saver_any_stream_false_positive_rate] truly-null savers showing >=1 GREEN arm: \
+         {any_green}/{trials} = {rate:.3}  (expected ~1-0.9^5 = 0.41 for independent 90% CIs)"
     );
     // Only a sanity ceiling; the point is the printed number.
     assert!(
@@ -2253,4 +2256,145 @@ fn a_turn_regression_on_short_sessions_is_not_certified_as_null() {
     );
     let summary = a.summary();
     assert!(summary.contains("more turns per session"), "{summary}");
+}
+
+// ---------------------------------------------------------------------------
+// The Bonferroni family has to be every badge that is gated, not every stream.
+// ---------------------------------------------------------------------------
+//
+// `STREAM_FAMILY` divides the gate's alpha, so the constant is a promise about
+// how many gates the reader is shown at once. The turns arm is not one of
+// `Stream::ALL` - it is the denominator the four streams divide by - but it runs
+// the same `stream_stat` gate and is printed in the same table and the same
+// headline. Correcting for four while gating five leaves the family-wise
+// false-positive rate above the ~10% the constant's doc commits to, and it fails
+// silently: nothing about adding a sixth arm would flag it either.
+
+#[test]
+fn the_correction_family_counts_every_gated_arm() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    for i in 0..12 {
+        for (enabled, tag) in [(false, "off"), (true, "on")] {
+            let id = format!("{tag}-{i}");
+            insert_session(
+                &mut store,
+                &pricing,
+                &id,
+                "claude-sonnet-4-5",
+                10,
+                4_000,
+                10_000,
+                3_000,
+                20_000,
+                false,
+            );
+            store
+                .set_session_savers(&id, &[SaverTag::new("rtk", enabled, source::ROTATION)])
+                .unwrap();
+        }
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x0FAB).unwrap();
+    assert_eq!(
+        a.arms().count(),
+        attribution::STREAM_FAMILY,
+        "every arm `arms()` hands the reader ran the same badge gate, so the \
+         correction has to be computed over all of them"
+    );
+
+    let hl = attribution::headline(&store, &pricing, 0x0FAB).unwrap();
+    assert_eq!(
+        hl.streams.len() + 1,
+        attribution::STREAM_FAMILY,
+        "the headline shows the same family: its streams plus its turns arm"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A quiet stream may only say what was actually tested.
+// ---------------------------------------------------------------------------
+//
+// `Reading::Quiet` is decided by the OFF median alone: `delta_of` refuses the
+// ratio the moment the denominator is under the floor and never looks at the ON
+// side. The note nevertheless told every reader "under 10 tokens a turn on both
+// sides". The asymmetric case is the exact profile the floor was written for -
+// input served from cache at ~2 tokens a turn with the saver off, ~400 with it
+// on - where that sentence is false about the arm sitting 40x above the floor,
+// and hides that the saver looks like a large regression on that stream.
+
+#[test]
+fn a_one_sided_quiet_stream_does_not_claim_both_sides_were_tested() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    const T: u64 = 10;
+
+    for i in 0..12 {
+        // OFF: everything served from cache, 2 input tokens a turn.
+        let id = format!("off-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            T,
+            2 * T,
+            nudged(1000.0, T, i),
+            0,
+            0,
+            false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", false, source::ROTATION)])
+            .unwrap();
+
+        // ON: 400 input tokens a turn, 200x the OFF side and 40x the floor.
+        let id = format!("on-{i}");
+        insert_session(
+            &mut store,
+            &pricing,
+            &id,
+            "claude-sonnet-4-5",
+            T,
+            400 * T,
+            nudged(1000.0, T, i),
+            0,
+            0,
+            false,
+        );
+        store
+            .set_session_savers(&id, &[SaverTag::new("rtk", true, source::ROTATION)])
+            .unwrap();
+    }
+
+    let a = attribution::attribute(&store, &pricing, "rtk", 0x0217).unwrap();
+    let input = a
+        .streams
+        .iter()
+        .find(|s| s.stream == attribution::Stream::Input)
+        .unwrap();
+    let note = input.note().unwrap();
+    eprintln!(
+        "[one_sided_quiet] median_on={:.1} median_off={:.1} reading={:?} note={note:?}",
+        input.median_on,
+        input.median_off,
+        input.reading()
+    );
+
+    assert_eq!(input.reading(), attribution::Reading::Quiet);
+    assert!(
+        input.median_off < 10.0 && input.median_on > 100.0,
+        "the fixture only bites when one side is under the floor and the other is far above it"
+    );
+    assert!(
+        !note.contains("both sides"),
+        "only the OFF median was tested, and the ON side is {:.0} tokens a turn: {note}",
+        input.median_on
+    );
+    assert!(
+        note.contains("with it off"),
+        "the note has to name the side that was actually too small: {note}"
+    );
 }

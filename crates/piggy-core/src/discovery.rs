@@ -282,6 +282,22 @@ fn fetch_all() -> Result<Vec<Vec<DiscoveredRepo>>> {
     Ok(batches)
 }
 
+/// The cache as it stands, without touching the network: the fresh cache, the
+/// stale cache marked as such, else the catalog-only view. Savers mounts the
+/// Discover section, and rendering a primary tab must not phone GitHub; the
+/// live search runs only behind the user's explicit refresh.
+pub fn discover_cached() -> DiscoveryCache {
+    if let Some(mut c) = load_cache() {
+        c.stale = !is_fresh(&c.refreshed_at);
+        return c;
+    }
+    DiscoveryCache {
+        refreshed_at: chrono::Utc::now().to_rfc3339(),
+        repos: merge_and_filter(Vec::new(), &Catalog::embedded()),
+        stale: true,
+    }
+}
+
 /// Get discovery results, refreshing from GitHub at most once a day.
 ///
 /// * If a fresh cache exists and `force` is false → return it.

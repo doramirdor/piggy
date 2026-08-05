@@ -12,6 +12,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+#[cfg(any(feature = "local-llm", test))]
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -217,7 +219,7 @@ pub fn start_download(app: AppHandle, model_id: String) -> Result<(), ApiError> 
         // 2,500 IPC round trips the UI cannot use.
         let mut last_pct = u64::MAX;
         let result = download::fetch(m, &cancel, |received, total| {
-            let pct = if total == 0 { 0 } else { received * 100 / total };
+            let pct = (received * 100).checked_div(total).unwrap_or(0);
             if pct != last_pct {
                 last_pct = pct;
                 emit(received, total, false, None);
@@ -320,12 +322,54 @@ pub fn explain_savers() -> Result<Vec<AnnotationDto>, ApiError> {
     run_saver_model(spec, &facts)
 }
 
+/// The single inference slot. Weights are roughly three gigabytes resident and
+/// [`advisor::fits`] sizes the host for exactly one copy, so runs are serialised
+/// process wide rather than left to the frontend: `annotatedPeriod` and
+/// `saverNotesFor` are independent guards, so a Ledger annotation and a Proof
+/// saver note can otherwise land on two `spawn_blocking` threads at once.
+///
+/// Compiled without the feature too, so the slot keeps its test in the default
+/// build that ships.
+#[cfg(any(feature = "local-llm", test))]
+static INFERENCE: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Take the inference slot, or `None` when another run already holds it.
+///
+/// Poisoning is deliberately ignored: the guarded value is `()`, so a run that
+/// panicked left nothing to corrupt, and switching the advisor off for the rest
+/// of the process would be a worse answer than letting the next call try.
+#[cfg(any(feature = "local-llm", test))]
+fn claim_inference() -> Option<MutexGuard<'static, ()>> {
+    match INFERENCE.get_or_init(|| Mutex::new(())).try_lock() {
+        Ok(slot) => Some(slot),
+        Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
 #[cfg(feature = "local-llm")]
 fn run_model(
     spec: &'static piggy_core::AdvisorModel,
     facts: &Facts,
 ) -> Result<Vec<AnnotationDto>, ApiError> {
     use piggy_core::advisor::llama::Advisor;
+
+    // Refused rather than queued: a second load would double the resident
+    // weights, and an answer that arrives after a queued twenty second run is
+    // about a period the user has already left. Refused as an ERROR, not an
+    // empty Ok: the store claims its guard key before awaiting, and records an
+    // Ok as answered, so an empty success would suppress the prose until the
+    // reading moves. The catch path re-arms silently, which is the retry.
+    //
+    // Claimed before the model is loaded, so drop order frees the weights first
+    // and the slot only afterwards: the next run never overlaps this one.
+    let Some(_slot) = claim_inference() else {
+        return Err(ApiError::new(
+            "The local advisor is busy",
+            "another annotation pass holds the inference slot; the caller re-arms and retries",
+            false,
+        ));
+    };
 
     // Loaded per call and dropped at the end of it. An earlier version cached the
     // model in a `static OnceLock` to save the ~1.6s load, and that **aborted the
@@ -370,6 +414,16 @@ fn run_saver_model(
 ) -> Result<Vec<AnnotationDto>, ApiError> {
     use piggy_core::advisor::llama::Advisor;
 
+    // One run at a time, and busy is an error rather than an empty answer, for
+    // the reasons spelled out in `run_model`.
+    let Some(_slot) = claim_inference() else {
+        return Err(ApiError::new(
+            "The local advisor is busy",
+            "another annotation pass holds the inference slot; the caller re-arms and retries",
+            false,
+        ));
+    };
+
     // Loaded and dropped per call, for the reason spelled out in `run_model`.
     let advisor = Advisor::load(spec)
         .map_err(|e| ApiError::new("Could not load the local model", e.to_string(), true))?;
@@ -404,4 +458,27 @@ fn run_model(
     _facts: &Facts,
 ) -> Result<Vec<AnnotationDto>, ApiError> {
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claim_inference;
+
+    #[test]
+    fn only_one_model_run_holds_the_slot() {
+        // A Ledger annotation is in flight.
+        let held = claim_inference().expect("the slot starts free");
+        // Proof asks for saver notes on its own blocking thread: refused, so a
+        // second copy of the weights is never loaded beside the first.
+        assert!(
+            claim_inference().is_none(),
+            "a second run must not load its own weights"
+        );
+        // The first run finishes and the next visit can ask again.
+        drop(held);
+        assert!(
+            claim_inference().is_some(),
+            "the slot is free once the run drops it"
+        );
+    }
 }

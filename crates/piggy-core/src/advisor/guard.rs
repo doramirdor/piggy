@@ -98,7 +98,7 @@ impl Allowlist {
         numbers_in(text)
             .into_iter()
             .filter(|n| !self.0.contains(&key(*n)))
-            .map(|n| key(n))
+            .map(key)
             .collect()
     }
 
