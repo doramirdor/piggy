@@ -1085,7 +1085,8 @@ fn sweep_flags_unused_mcp_server_and_apply_restore_round_trips() {
     let mut state = PiggyState::load().unwrap();
     let restored = sweep::restore_all(&mut state).unwrap();
     state.save().unwrap();
-    assert_eq!(restored, 1);
+    assert_eq!(restored.restored, 1);
+    assert!(restored.failures.is_empty());
     let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
     assert_eq!(
         cj["projects"]["/proj"]["mcpServers"]["unusedserver"]["args"],
@@ -1179,7 +1180,7 @@ fn sweep_separates_global_from_single_project_user_scope_servers() {
     assert!(cj["mcpServers"].get("onlyhere").is_some());
 
     let mut state = PiggyState::load().unwrap();
-    assert_eq!(sweep::restore_all(&mut state).unwrap(), 1);
+    assert_eq!(sweep::restore_all(&mut state).unwrap().restored, 1);
     state.save().unwrap();
     let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
     assert_eq!(cj["mcpServers"]["deadserver"]["args"], json!(["dead"]));
@@ -1225,11 +1226,13 @@ fn sweep_restore_fails_when_the_target_map_is_gone() {
     std::fs::write(sb.claude_json(), replaced).unwrap();
 
     let mut state = PiggyState::load().unwrap();
+    let outcome = sweep::restore_all(&mut state).unwrap();
     assert_eq!(
-        sweep::restore_all(&mut state).unwrap(),
-        0,
+        outcome.restored, 0,
         "a restore with nowhere to write is not a restore"
     );
+    assert_eq!(outcome.failures.len(), 1, "the failure is reported");
+    assert_eq!(outcome.failures[0].id, "deadserver");
     state.save().unwrap();
 
     let kept = PiggyState::load().unwrap();
