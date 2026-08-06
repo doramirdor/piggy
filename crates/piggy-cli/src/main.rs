@@ -9,6 +9,7 @@
 //!   * `install` / `remove` - turn a saver on (install) or fully off (uninstall).
 //!   * `on` / `off` - fast toggle without uninstalling (the A/B path).
 //!   * `sweep`  - find unused add-ons that cost tokens; `--apply N` disables one.
+//!   * `probe`  - measure an MCP server's tool-schema cost by launching it once.
 //!   * `report` - measured savings: per-saver attribution table + honest headline.
 //!   * `ledger` - where context tokens come from; exact, needs no A/B.
 //!   * `insights` - ledger findings, each with the lever that acts on it.
@@ -26,7 +27,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
     attribution::{self, Badge, HeadlineBaseline},
-    claudemd, config, discovery, engine, parse_file,
+    claudemd, config, discovery, engine, parse_file, probe,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -94,6 +95,23 @@ enum Cmd {
         /// Look back over this many recent sessions for usage (default 50).
         #[arg(long, value_name = "N")]
         sessions: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure what your MCP servers' tool schemas cost, by launching one once.
+    ///
+    /// With no arguments this only lists what is configured and what has been
+    /// measured; nothing is launched until you name a server or pass `--all`.
+    Probe {
+        /// Measure just this server (its key in `~/.claude.json`).
+        #[arg(long, value_name = "KEY", conflicts_with = "all")]
+        server: Option<String>,
+        /// Measure every configured stdio server (requires `--yes`).
+        #[arg(long)]
+        all: bool,
+        /// Confirm launching each configured server once.
+        #[arg(long)]
+        yes: bool,
         #[arg(long)]
         json: bool,
     },
@@ -219,6 +237,12 @@ fn main() -> Result<()> {
             sessions,
             json,
         } => cmd_sweep(apply, sessions, json),
+        Cmd::Probe {
+            server,
+            all,
+            yes,
+            json,
+        } => cmd_probe(server.as_deref(), all, yes, json),
         Cmd::RestoreDefaults => cmd_restore_defaults(),
         Cmd::Backups => cmd_backups(),
         Cmd::Report { json } => cmd_report(json),
@@ -452,7 +476,10 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                         _ => "lifetime",
                     },
                     "estTokens": i.est_tokens,
-                    "estimated": true,
+                    "estimated": i.cost_basis != sweep::COST_BASIS_MEASURED,
+                    // "rough estimate" (config-size heuristic) or "measured
+                    // manifest" (this server's schemas, as probed).
+                    "costBasis": i.cost_basis,
                     "recommendDisable": i.recommend_disable,
                     // The project a user-scope MCP server should move to,
                     // when its calls all come from one.
@@ -464,7 +491,10 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         let out = serde_json::json!({
             "sessionsConsidered": report.sessions_considered,
             "estRecoverableTokens": report.est_recoverable_tokens(),
-            "estimated": true,
+            // The total is only fully measured when every item behind it is.
+            "estimated": report
+                .recommended()
+                .any(|i| i.cost_basis != sweep::COST_BASIS_MEASURED),
             "items": arr,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -479,7 +509,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         println!("  found no plugins, MCP servers, or skills to check.");
         return Ok(());
     }
-    let headers = ["#", "Kind", "Add-on", "Used", "Est. tokens", "Suggestion"];
+    let headers = ["#", "Kind", "Add-on", "Used", "Tokens/session", "Suggestion"];
     let rows: Vec<Vec<String>> = report
         .items
         .iter()
@@ -489,7 +519,11 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                 i.kind.clone(),
                 i.id.clone(),
                 commafy(i.used),
-                format!("~{}", commafy(i.est_tokens)),
+                if i.cost_basis == sweep::COST_BASIS_MEASURED {
+                    format!("{} measured", commafy(i.est_tokens))
+                } else {
+                    format!("~{}", commafy(i.est_tokens))
+                },
                 if i.recommend_disable {
                     format!("turn off - {}", i.reason)
                 } else if let Some(project) = &i.scope_to {
@@ -504,8 +538,22 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     println!();
     let rec = report.recommended().count();
     if rec > 0 {
+        // The total mixes bases the moment one server has been probed, so say so
+        // rather than calling a measured figure a guess.
+        let basis = match (
+            report
+                .recommended()
+                .any(|i| i.cost_basis == sweep::COST_BASIS_MEASURED),
+            report
+                .recommended()
+                .any(|i| i.cost_basis != sweep::COST_BASIS_MEASURED),
+        ) {
+            (true, true) => "measured where probed, estimated elsewhere",
+            (true, false) => "measured manifests, estimated session impact",
+            _ => "estimated",
+        };
         println!(
-            "{rec} unused add-on(s), ~{} tokens/session (estimated). Turn one off: `piggy sweep --apply <#>`.",
+            "{rec} unused add-on(s), ~{} tokens/session ({basis}). Turn one off: `piggy sweep --apply <#>`.",
             commafy(report.est_recoverable_tokens())
         );
     } else {
@@ -517,7 +565,15 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
             "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. Re-add each from its own project to stop that; Piggy will not move config it did not write."
         );
     }
-    println!("token costs are estimates (config-size heuristic), not measured.");
+    if report
+        .items
+        .iter()
+        .any(|i| i.cost_basis == sweep::COST_BASIS_MEASURED)
+    {
+        println!("token costs are estimates (config-size heuristic) except the rows marked measured, whose tool schemas `piggy probe` read from the server itself.");
+    } else {
+        println!("token costs are estimates (config-size heuristic), not measured. `piggy probe` measures an MCP server's real tool schemas.");
+    }
     println!(
         "MCP usage is over the last {} session(s); plugin/skill usage is a lifetime total (Claude Code keeps no per-session count for those); hooks are informational.",
         report.sessions_considered
@@ -529,6 +585,184 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// probe
+// ---------------------------------------------------------------------------
+
+fn cmd_probe(server: Option<&str>, all: bool, yes: bool, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let servers = probe::configured_servers()?;
+
+    // Which servers this run will launch, if any. No arguments launches nothing:
+    // it is the listing.
+    let targets: Vec<probe::ConfiguredServer> = match (server, all) {
+        (Some(key), _) => {
+            let hits: Vec<_> = servers.iter().filter(|s| s.key == key).cloned().collect();
+            if hits.is_empty() {
+                bail!(
+                    "no MCP server named '{key}' in {} (run `piggy probe` to see the list)",
+                    config::claude_json_path().display()
+                );
+            }
+            hits
+        }
+        (None, true) => {
+            let stdio = servers
+                .iter()
+                .filter(|s| s.transport == probe::Transport::Stdio)
+                .count();
+            // The user already told Claude Code to run these every session, but
+            // Piggy does not execute anything on its own say-so.
+            if !yes {
+                bail!(
+                    "`piggy probe --all` starts each of your {stdio} stdio MCP server(s) once, \
+                     asks for its tool list, and stops it again. Nothing is installed, changed, \
+                     or left running. Re-run with `--yes` if that is what you want."
+                );
+            }
+            servers.clone()
+        }
+        (None, false) => Vec::new(),
+    };
+
+    // A failed probe is stored as a row like any other, so only a DB error stops
+    // the run part-way.
+    probe::probe_all(&mut store, &targets, &probe::ProbeOptions::default())?;
+
+    // Report from the stored rows, so one server's line reads the same whether
+    // it was just measured or measured last week.
+    let manifests = store.mcp_manifests()?;
+    let shown: Vec<&probe::ConfiguredServer> = if targets.is_empty() {
+        servers.iter().collect()
+    } else {
+        servers
+            .iter()
+            .filter(|s| targets.iter().any(|t| t.key == s.key && t.scope() == s.scope()))
+            .collect()
+    };
+
+    if json {
+        let arr: Vec<serde_json::Value> = shown
+            .iter()
+            .map(|s| server_json(s, &probe::status(&manifests, s)))
+            .collect();
+        let out = serde_json::json!({
+            "configPath": config::claude_json_path().display().to_string(),
+            "probed": !targets.is_empty(),
+            "servers": arr,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if servers.is_empty() {
+        println!(
+            "no MCP servers configured in {}.",
+            config::claude_json_path().display()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "MCP manifests - {} server(s) configured in {}",
+        servers.len(),
+        config::claude_json_path().display()
+    );
+    let headers = ["Server", "Scope", "Transport", "Tools", "Measurement"];
+    let rows: Vec<Vec<String>> = shown
+        .iter()
+        .map(|s| {
+            let status = probe::status(&manifests, s);
+            let tools = match &status {
+                probe::MeasurementStatus::Measured(m) => m.tool_count.to_string(),
+                _ => "-".to_string(),
+            };
+            vec![
+                s.key.clone(),
+                match &s.project {
+                    None => "user".to_string(),
+                    Some(p) => truncate_path(p, 32),
+                },
+                s.transport.label().to_string(),
+                tools,
+                measurement_cell(&status),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+    println!();
+    if servers
+        .iter()
+        .any(|s| s.transport == probe::Transport::Remote)
+    {
+        println!(
+            "http/sse servers are not probed in v1 (signing in as you is a different problem); sweep keeps its estimate for those."
+        );
+    }
+    if targets.is_empty() {
+        println!(
+            "measure one with `piggy probe --server <name>`, or all of them with `piggy probe --all --yes`."
+        );
+        println!(
+            "probing starts the server once and stops it: it is the only way to see the tool schemas it sends every session."
+        );
+    } else {
+        println!("token counts are {} (schema bytes are measured; how the client charges them is not).", probe::TOKENIZER_BYTES_ESTIMATE);
+    }
+    Ok(())
+}
+
+/// One server's measurement state as a table cell: measured and when, stale,
+/// never, or failed and why.
+fn measurement_cell(status: &probe::MeasurementStatus) -> String {
+    match status {
+        probe::MeasurementStatus::Deferred => "deferred - http/sse".to_string(),
+        probe::MeasurementStatus::Never => "never probed".to_string(),
+        probe::MeasurementStatus::Stale(m) => format!(
+            "stale - config changed since {}",
+            day(&m.measured_at)
+        ),
+        probe::MeasurementStatus::Measured(m) => format!(
+            "~{} tokens, {} bytes ({})",
+            commafy(m.schema_tokens.max(0) as u64),
+            commafy(m.schema_bytes.max(0) as u64),
+            day(&m.measured_at)
+        ),
+        probe::MeasurementStatus::Failed(m) => format!(
+            "failed {} - {}",
+            day(&m.measured_at),
+            truncate(m.error.as_deref().unwrap_or("no reason recorded"), 72)
+        ),
+    }
+}
+
+fn server_json(s: &probe::ConfiguredServer, status: &probe::MeasurementStatus) -> serde_json::Value {
+    let m = status.manifest();
+    serde_json::json!({
+        "server": s.key,
+        "scope": s.scope(),
+        "scopeLabel": s.project.as_deref().unwrap_or("user"),
+        "transport": s.transport.label(),
+        "configHash": s.config_hash(),
+        "status": status.tag(),
+        "measuredAt": m.map(|m| m.measured_at.clone()),
+        "toolCount": m.filter(|m| m.ok).map(|m| m.tool_count),
+        "schemaBytes": m.filter(|m| m.ok).map(|m| m.schema_bytes),
+        "schemaTokens": m.filter(|m| m.ok).map(|m| m.schema_tokens),
+        "tokenizer": m.map(|m| m.tokenizer.clone()),
+        // Schema bytes are measured; the token count is only as good as the
+        // tokenizer that produced it.
+        "estimated": m.map(|m| m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE),
+        "error": m.and_then(|m| m.error.clone()),
+    })
+}
+
+/// The date half of an RFC3339 stamp, which is all a table cell has room for.
+fn day(ts: &str) -> &str {
+    ts.split('T').next().unwrap_or(ts)
 }
 
 // ---------------------------------------------------------------------------
