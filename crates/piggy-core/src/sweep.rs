@@ -762,19 +762,31 @@ fn read_usage(v: Option<&Value>, out: &mut BTreeMap<String, u64>) {
 pub(crate) fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
     let mut out: BTreeMap<String, u64> = BTreeMap::new();
     for (project, n) in by_project {
-        let root = by_project
-            .keys()
-            .filter(|p| {
-                !p.is_empty()
-                    && project
-                        .strip_prefix(p.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-            .min_by_key(|p| p.len())
-            .unwrap_or(project);
-        *out.entry(root.clone()).or_insert(0) += n;
+        *out.entry(fold_root_of(by_project, project).to_string())
+            .or_insert(0) += n;
     }
     out
+}
+
+/// The key `project` folds into: the shortest key in the map it sits under, or
+/// itself when none of them is an ancestor of it.
+///
+/// Split out of [`fold_subpaths`] so a caller that has to go the other way -
+/// from a folded root back to the exact working directories behind it, which is
+/// what `~/.claude.json` is keyed by - asks the same function instead of
+/// carrying a second copy of the rule.
+pub(crate) fn fold_root_of<'a>(by_project: &'a BTreeMap<String, u64>, project: &'a str) -> &'a str {
+    by_project
+        .keys()
+        .filter(|p| {
+            !p.is_empty()
+                && project
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .min_by_key(|p| p.len())
+        .map(String::as_str)
+        .unwrap_or(project)
 }
 
 /// The `mcpServers` map a server lives in inside `~/.claude.json`: the top level

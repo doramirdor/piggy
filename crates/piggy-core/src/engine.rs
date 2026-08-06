@@ -610,7 +610,7 @@ pub fn restore_defaults() -> Result<RestoreReport> {
     // before the first edit.
     let snapshots = state.file_snapshots.clone();
     if !snapshots.is_empty() {
-        let outcome = crate::snapshots::restore(&snapshots);
+        let outcome = crate::snapshots::restore(&snapshots, &mut state);
         report.files_restored = outcome.restored;
         for f in &outcome.failures {
             report

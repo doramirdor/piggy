@@ -331,6 +331,73 @@ fn a_server_used_from_one_project_is_proposed_for_pinning_to_it() {
     assert!(candidate.est_tokens_month > 0);
 }
 
+/// `~/.claude.json` keys `projects` by the exact working directory a session
+/// started in. Folding `…/repo/app` into `…/repo` is right for the *decision*
+/// (one checkout, not two projects) and wrong for the write: an entry under the
+/// repo root does nothing for a session started in the subdirectory, which is
+/// where half the calls came from.
+#[test]
+fn a_server_called_from_a_repo_and_its_subdirectory_is_pinned_to_both() {
+    let sb = Sandbox::new();
+    let repo = sb.project("repo").to_string_lossy().into_owned();
+    let app = sb.project("repo/app").to_string_lossy().into_owned();
+    let other = sb.project("other").to_string_lossy().into_owned();
+    sb.write_claude_json(&json!({
+        "mcpServers": { "github": { "command": "npx", "args": ["gh-mcp"] } },
+        "projects": {}
+    }));
+
+    let mut store = sb.store();
+    for (i, project) in [&repo, &app].iter().enumerate() {
+        for j in 0..3 {
+            seed_session(
+                &mut store,
+                &format!("s{i}{j}"),
+                project,
+                &[("mcp__github__search", 5)],
+                5,
+                0,
+                0,
+                0,
+            );
+        }
+    }
+    for i in 0..2 {
+        seed_session(&mut store, &format!("o{i}"), &other, &[], 5, 0, 0, 0);
+    }
+
+    let mut state = PiggyState::default();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ServerScope).clone();
+    let Params::ServerScope { projects, .. } = &candidate.params else {
+        panic!("wrong params: {:?}", candidate.params);
+    };
+    assert_eq!(
+        projects,
+        &vec![repo.clone(), app.clone()],
+        "one checkout for the decision, both working directories for the write"
+    );
+    let freed = candidate
+        .evidence
+        .iter()
+        .find(|e| e.label == "Sessions a month that would stop loading it")
+        .expect("a freed-sessions row");
+    assert_eq!(
+        freed.value, "2",
+        "only the sessions that are not pinned stop loading it, and six of the eight are"
+    );
+
+    let catalog = Catalog::embedded();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+    let after = sb.read_claude_json();
+    for project in [&repo, &app] {
+        assert_eq!(
+            after["projects"][project]["mcpServers"]["github"]["args"],
+            json!(["gh-mcp"]),
+            "the subdirectory needs its own entry or it loses the server: {after}"
+        );
+    }
+}
+
 #[test]
 fn a_server_used_everywhere_is_left_at_user_scope() {
     let sb = Sandbox::new();
@@ -458,9 +525,16 @@ fn a_route_that_looks_like_a_path_is_never_deleted() {
          - Sign-in lives at /login.\n\
          - The schema is published at /openapi.json.\n\
          - The bundle is served from /static/app.js.\n\
+         - The device manifest is at /etc/piggy-no-such-file.json.\n\
          - The build script is at scripts/build.sh.\n",
     );
     seed_session(&mut store, "s1", &proj.to_string_lossy(), &[], 5, 0, 0, 0);
+    // The last route is the sharp one: its parent directory is real, so any
+    // "does the neighbourhood exist" test would delete its line.
+    assert!(
+        Path::new("/etc").is_dir(),
+        "the case only bites where the parent is real"
+    );
 
     // The two extension-less routes are not references at all, so they are not
     // findings. The two that carry an extension are indistinguishable from a
@@ -478,6 +552,7 @@ fn a_route_that_looks_like_a_path_is_never_deleted() {
         vec![
             "/openapi.json".to_string(),
             "/static/app.js".to_string(),
+            "/etc/piggy-no-such-file.json".to_string(),
             "scripts/build.sh".to_string(),
         ],
         "route findings"
@@ -486,13 +561,86 @@ fn a_route_that_looks_like_a_path_is_never_deleted() {
     let state = PiggyState::default();
     let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
     let new = candidate.new_content.as_deref().unwrap();
-    for route in ["/api/healthz", "/login", "/openapi.json", "/static/app.js"] {
+    for route in [
+        "/api/healthz",
+        "/login",
+        "/openapi.json",
+        "/static/app.js",
+        "/etc/piggy-no-such-file.json",
+    ] {
         assert!(new.contains(route), "the {route} line went:\n{new}");
     }
     assert!(!new.contains("scripts/build.sh"), "the file reference goes");
     assert_eq!(
         candidate.title,
         "Drop 1 dead reference from proj's CLAUDE.md"
+    );
+}
+
+/// A global rule file has no project root, so a relative reference in it
+/// resolves against the home directory - which is nowhere its author meant.
+/// Every unanchored reference in one is therefore dead by construction, and this
+/// transform deletes whole lines, so it must leave them alone. `~/` is the one
+/// anchor that means the same thing wherever the file is read from.
+#[test]
+fn a_global_rule_files_repo_relative_reference_keeps_its_line() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let rules = sb.claude_dir().join("rules").join("carveout.md");
+    sb.write(
+        &rules,
+        "# Carve-out\n\n\
+         - Reproduce with bench/src/report.js and read what it prints.\n\
+         - The old note lived at ~/notes/gone.md and can go.\n\
+         - Keep the tests fast.\n",
+    );
+    seed_session(
+        &mut store,
+        "s1",
+        &sb.project("proj").to_string_lossy(),
+        &[],
+        5,
+        0,
+        0,
+        0,
+    );
+
+    // Detection is unchanged: neither resolves, so both are still reported.
+    let report = piggy_core::claudemd::scan(&mut store).unwrap();
+    let flagged: Vec<String> = report
+        .findings()
+        .filter_map(|f| match &f.kind {
+            piggy_core::FindingKind::DeadRef { reference, .. } => Some(reference.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![
+            "bench/src/report.js".to_string(),
+            "~/notes/gone.md".to_string()
+        ],
+        "both are reported"
+    );
+
+    let state = PiggyState::default();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    assert_eq!(candidate.target, rules.to_string_lossy());
+    let new = candidate.new_content.as_deref().unwrap();
+    assert!(
+        new.contains("bench/src/report.js"),
+        "a repo-relative reference in a global file resolves against $HOME, which is not \
+         evidence that the line is stale:\n{new}"
+    );
+    assert!(
+        !new.contains("~/notes/gone.md"),
+        "a `~/` reference means one thing everywhere, so it is still deletable:\n{new}"
+    );
+    assert!(new.contains("Keep the tests fast."));
+    assert_eq!(
+        candidate.title,
+        "Drop 1 dead reference from your global carveout.md"
     );
 }
 
@@ -687,6 +835,52 @@ fn a_behaviour_changing_saver_that_moved_nothing_proposes_off() {
     assert_eq!(candidate.evidence[0].value, "40 with it on, 40 with it off");
 }
 
+/// A routing saver's whole effect is on price: it sends much the same tokens to
+/// a cheaper model, so four flat per-stream deltas are the outcome
+/// docs/measurement.md predicts for it rather than a null result. Piggy has no
+/// cost-side A/B yet, so "it did nothing, turn it off" is the one thing it must
+/// not say about one.
+#[test]
+fn a_routing_saver_that_measured_flat_is_never_proposed_for_turning_off() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    // The same 40-a-side flat comparison that proposes dropping `caveman`.
+    for i in 0..40u64 {
+        for (side, enabled) in [("on", true), ("off", false)] {
+            let id = format!("nadir-route-{side}-{i}");
+            let output = 1000 + (i % 5) * 5;
+            seed_session(&mut store, &id, "/proj", &[], 10, 2000, output * 10, 5000);
+            store
+                .set_session_savers(
+                    &id,
+                    &[SaverTag::new("nadir-route", enabled, source::ROTATION)],
+                )
+                .unwrap();
+        }
+    }
+
+    let catalog = Catalog::embedded();
+    let entry = catalog.get("nadir-route").expect("a catalog entry");
+    assert_eq!(entry.layer, "routing");
+    assert!(
+        entry.behavior_changing,
+        "the exemption is only interesting for a saver the turn-off branch would otherwise reach"
+    );
+
+    let mut state = PiggyState::default();
+    install(&mut state, "nadir-route", true);
+    let candidates = generate(&mut store, &state);
+    assert!(
+        of_kind(&candidates, ActionKind::SaverMix).is_empty(),
+        "flat streams are what this saver was predicted to do: {:?}",
+        candidates
+            .iter()
+            .map(|c| c.title.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn a_thin_comparison_never_proposes_dropping_a_saver() {
     let sb = Sandbox::new();
@@ -749,6 +943,62 @@ fn the_same_inputs_give_the_same_id_and_moved_evidence_gives_a_new_one() {
 }
 
 // ---------------------------------------------------------------------------
+// What the list is worth
+// ---------------------------------------------------------------------------
+
+/// `ClaudemdTrim`'s figure is what a file *costs*; every other kind's is what
+/// applying it *saves*. It is also the largest number Piggy computes, so one
+/// total over both would be a cost presented as money back, several times over,
+/// on the strength of the one kind v1 cannot even apply.
+#[test]
+fn a_burden_is_reported_apart_from_the_savings_it_would_otherwise_swamp() {
+    let sb = Sandbox::new();
+    let proj = sb.project("proj").to_string_lossy().into_owned();
+    sb.write_claude_json(&json!({
+        "mcpServers": { "idlesrv": { "command": "npx", "args": ["idle"] } },
+        "projects": {}
+    }));
+    let mut store = sb.store();
+    let body = "Prefer plain words over clever ones and say the thing you mean. ".repeat(140);
+    sb.write(
+        &sb.claude_dir().join("rules").join("style.md"),
+        &format!("# Style\n\n{body}\n"),
+    );
+    for i in 0..3 {
+        seed_session(&mut store, &format!("s{i}"), &proj, &[], 5, 0, 0, 0);
+    }
+
+    let state = PiggyState::default();
+    let candidates = generate(&mut store, &state);
+    let trim = one_of_kind(&candidates, ActionKind::ClaudemdTrim).est_tokens_month;
+    let disable = one_of_kind(&candidates, ActionKind::ServerDisable).est_tokens_month;
+    assert!(
+        trim > disable,
+        "the burden is the bigger number, as it is in life"
+    );
+
+    assert_eq!(
+        advice::total_savings(&candidates),
+        disable,
+        "the headline is what applying this list gives back"
+    );
+    assert_eq!(
+        advice::total_burden(&candidates),
+        trim,
+        "and the burden is its own clause"
+    );
+    assert!(ActionKind::ClaudemdTrim.est_is_burden());
+    for kind in [
+        ActionKind::ServerDisable,
+        ActionKind::ServerScope,
+        ActionKind::ClaudemdFix,
+        ActionKind::SaverMix,
+    ] {
+        assert!(!kind.est_is_burden(), "{} is a saving", kind.as_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle: stale, dismissed, reopened
 // ---------------------------------------------------------------------------
 
@@ -791,6 +1041,68 @@ fn an_open_row_whose_evidence_moved_goes_stale() {
         1,
         "exactly one live row per target"
     );
+}
+
+/// A candidate's id hashes its evidence, and evidence oscillates: the look-back
+/// window is a flag on `piggy advise`, and a rolling 30-day count comes back
+/// down as well as up. So the id retired an hour ago is regularly the plan the
+/// world supports now, and `stale` being a one-way door left it permanently
+/// unapplyable - which contradicts the spec's "re-scan regenerates".
+#[test]
+fn a_stale_row_comes_back_open_when_its_candidate_regenerates() {
+    let sb = Sandbox::new();
+    let proj = sb.project("proj").to_string_lossy().into_owned();
+    sb.write_claude_json(&json!({
+        "mcpServers": { "idlesrv": { "command": "npx", "args": ["idle"] } },
+        "projects": {}
+    }));
+    let mut store = sb.store();
+    for i in 0..4 {
+        seed_session(&mut store, &format!("s{i}"), &proj, &[], 5, 0, 0, 0);
+    }
+
+    let catalog = Catalog::embedded();
+    let pricing = Pricing::embedded();
+    let state = PiggyState::default();
+    let window = |n: usize| {
+        let mut opts = GenerateOptions::new(&catalog, &pricing, &state);
+        opts.n_sessions = n;
+        opts
+    };
+    let disable_id = |c: &[Candidate]| one_of_kind(c, ActionKind::ServerDisable).id.clone();
+
+    let wide = disable_id(&advice::generate(&mut store, &window(4)).unwrap());
+    // A narrower window says "uses in the last 2 sessions" instead, which is a
+    // different evidence row and so a different suggestion.
+    let narrow = disable_id(&advice::generate(&mut store, &window(2)).unwrap());
+    assert_ne!(wide, narrow);
+    assert_eq!(
+        store.advice(&wide).unwrap().unwrap().status,
+        advice_status::STALE
+    );
+
+    // Back to the wider window: the retired plan is the live one again.
+    let back = advice::generate(&mut store, &window(4)).unwrap();
+    let again = one_of_kind(&back, ActionKind::ServerDisable).clone();
+    assert_eq!(again.id, wide);
+    assert_eq!(
+        again.status,
+        advice_status::OPEN,
+        "regenerating is proof the plan is live, and nothing else would ever move a row out \
+         of stale"
+    );
+    assert_eq!(
+        store.advice(&wide).unwrap().unwrap().status,
+        advice_status::OPEN
+    );
+
+    // And the point of all that: it can be applied.
+    let mut state = PiggyState::default();
+    advice::apply(&mut store, &mut state, &catalog, &again).unwrap();
+    assert!(sb.read_claude_json()["mcpServers"]
+        .as_object()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -985,6 +1297,158 @@ fn a_content_edit_refuses_a_changed_file_and_restores_an_unchanged_one_byte_for_
         store.advice(&candidate.id).unwrap().unwrap().status,
         advice_status::OPEN
     );
+}
+
+/// Undo must not be a weaker gate than apply. Apply refuses to write a file
+/// whose hash moved; a restore cannot refuse, because somebody who fixed a typo
+/// the week after applying still has to be able to undo. So it keeps their bytes
+/// instead of guarding against them.
+#[test]
+fn undoing_a_file_edited_since_the_apply_backs_that_edit_up_first() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (_, proj) = seed_claudemd(&sb, &mut store);
+    let target = proj.join("CLAUDE.md");
+    let before = std::fs::read(&target).unwrap();
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+
+    // Three weeks of the user's own writing on top of Piggy's edit.
+    let theirs = format!(
+        "{}- Always run the linter before you push.\n",
+        std::fs::read_to_string(&target).unwrap()
+    );
+    std::fs::write(&target, &theirs).unwrap();
+
+    let undone = advice::undo(&mut store, &mut state, &catalog, &candidate.id).unwrap();
+    assert!(undone.complete(), "failures: {:?}", undone.failures);
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        before,
+        "the undo still puts the original back"
+    );
+
+    let kept: Vec<&piggy_core::snapshots::FileSnapshot> = state
+        .file_snapshots
+        .iter()
+        .filter(|s| s.path == target.to_string_lossy())
+        .collect();
+    assert_eq!(
+        kept.len(),
+        1,
+        "what the user wrote after the apply is snapshotted, not overwritten unrecorded: {:?}",
+        state.file_snapshots
+    );
+    assert!(
+        kept[0].advice_id.is_none(),
+        "it is a backup of their content, not an edit of Piggy's for something to reverse later"
+    );
+    assert_eq!(std::fs::read_to_string(&kept[0].backup).unwrap(), theirs);
+
+    // A file that is exactly as the apply left it costs no second copy.
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+    let recorded = state.file_snapshots.len();
+    advice::undo(&mut store, &mut state, &catalog, &candidate.id).unwrap();
+    assert_eq!(
+        state.file_snapshots.len(),
+        recorded - 1,
+        "an untouched file is restored with nothing else recorded: {:?}",
+        state.file_snapshots
+    );
+}
+
+/// Two Piggy edits to one file come off the stack newest first. Undoing the
+/// older one writes the content from before *both* over the newer one's result
+/// and leaves its record behind pointing at bytes that are now nobody's, which a
+/// later Restore Defaults would then write back over the user.
+#[test]
+fn undoing_the_older_of_two_edits_to_one_file_is_refused_by_name() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (_, proj) = seed_claudemd(&sb, &mut store);
+    let target = proj.join("CLAUDE.md");
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let first = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &first).unwrap();
+
+    // The user adds a line pointing at something that is not there, so Piggy
+    // proposes a second edit to the same file.
+    let after_first = std::fs::read_to_string(&target).unwrap();
+    std::fs::write(
+        &target,
+        format!("{after_first}- See docs/vanished.md for the rest.\n"),
+    )
+    .unwrap();
+    let second = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    assert_ne!(second.id, first.id);
+    advice::apply(&mut store, &mut state, &catalog, &second).unwrap();
+    let after_second = std::fs::read(&target).unwrap();
+
+    let err = advice::undo(&mut store, &mut state, &catalog, &first.id).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains(&second.title),
+        "the later edit is named so the user can act on it: {msg}"
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        after_second,
+        "a refused undo writes nothing"
+    );
+    assert_eq!(
+        store.advice(&first.id).unwrap().unwrap().status,
+        advice_status::APPLIED,
+        "and leaves the row applied, with its restore reference"
+    );
+    assert_eq!(state.file_snapshots.len(), 2, "both records survive");
+
+    // Newest first is what it asked for, and then the older one goes back too.
+    assert!(advice::undo(&mut store, &mut state, &catalog, &second.id)
+        .unwrap()
+        .complete());
+    assert!(advice::undo(&mut store, &mut state, &catalog, &first.id)
+        .unwrap()
+        .complete());
+}
+
+/// "Not for me" is a thing to say about a suggestion, not about a change that is
+/// already on disk: `dismissed` carries no `applied_at` or `restore_ref`, so the
+/// transition would drop the only handle Undo has.
+#[test]
+fn dismissing_an_applied_row_is_refused_so_its_undo_survives() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    seed_claudemd(&sb, &mut store);
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+
+    let err = advice::dismiss(&mut store, &candidate.id, Some("on reflection, fine")).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("undo it first"),
+        "error: {err:#}"
+    );
+    let row = store.advice(&candidate.id).unwrap().unwrap();
+    assert_eq!(row.status, advice_status::APPLIED);
+    assert!(
+        row.applied_at.is_some() && row.restore_ref.is_some(),
+        "the stamps Undo reads are still there: {row:?}"
+    );
+    let undone = advice::undo(&mut store, &mut state, &catalog, &candidate.id).unwrap();
+    assert!(undone.complete(), "failures: {:?}", undone.failures);
+    // Once it is only a suggestion again, waving it away is fine.
+    assert!(advice::dismiss(&mut store, &candidate.id, None).unwrap());
 }
 
 #[test]
@@ -1225,6 +1689,89 @@ fn the_stored_payload_never_carries_the_file_it_rewrites() {
     assert!(
         rebuilt.new_content.is_none(),
         "a row read back has no draft in it"
+    );
+}
+
+/// The mirror of the CLAUDE.md rule, for the other secret Piggy can see. An MCP
+/// server's `env` is where API tokens live, `~/.claude.json` is 0600 and
+/// `piggy.db` is not, and `payload_json` is written for every candidate the
+/// generator produces - no apply, no consent, and nothing ever deletes the row.
+#[test]
+fn the_stored_payload_never_carries_a_servers_env() {
+    let sb = Sandbox::new();
+    let alpha = sb.project("alpha").to_string_lossy().into_owned();
+    let beta = sb.project("beta").to_string_lossy().into_owned();
+    sb.write_claude_json(&json!({
+        "mcpServers": {
+            "github": {
+                "command": "npx",
+                "args": ["gh-mcp"],
+                "env": { "GITHUB_TOKEN": "ghp-not-a-real-secret" }
+            }
+        },
+        "projects": {}
+    }));
+
+    let mut store = sb.store();
+    for i in 0..3 {
+        seed_session(
+            &mut store,
+            &format!("a{i}"),
+            &alpha,
+            &[("mcp__github__search", 5)],
+            5,
+            0,
+            0,
+            0,
+        );
+    }
+    seed_session(&mut store, "b0", &beta, &[], 5, 0, 0, 0);
+
+    let mut state = PiggyState::default();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ServerScope).clone();
+    let payload = store
+        .advice(&candidate.id)
+        .unwrap()
+        .unwrap()
+        .payload_json
+        .expect("a payload");
+    assert!(
+        !payload.contains("ghp-not-a-real-secret") && !payload.contains("GITHUB_TOKEN"),
+        "listing advice must not copy an MCP server's env into the database: {payload}"
+    );
+
+    // A payload written by the build that did carry it still reads back, so an
+    // Undo recorded before this change is not stranded.
+    let legacy: Params = serde_json::from_value(json!({
+        "server-scope": {
+            "server": "github",
+            "projects": [alpha.clone()],
+            "config": { "command": "npx", "env": { "GITHUB_TOKEN": "ghp-not-a-real-secret" } }
+        }
+    }))
+    .expect("an older payload still deserializes");
+    assert!(matches!(legacy, Params::ServerScope { .. }));
+
+    // A key the config hash does not cover, added between generate and apply.
+    // The fingerprint check still passes, so the move goes ahead - and it has to
+    // carry the key, which a copy taken at generation time could not have known
+    // about.
+    let mut edited = sb.read_claude_json();
+    edited["mcpServers"]["github"]["timeout"] = json!(60);
+    sb.write_claude_json(&edited);
+
+    let catalog = Catalog::embedded();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+    let moved = &sb.read_claude_json()["projects"][&alpha]["mcpServers"]["github"];
+    assert_eq!(
+        moved["env"]["GITHUB_TOKEN"],
+        json!("ghp-not-a-real-secret"),
+        "the entry still moves verbatim: apply re-reads it from the file it moves it inside"
+    );
+    assert_eq!(
+        moved["timeout"],
+        json!(60),
+        "including the keys the fingerprint does not cover: {moved}"
     );
 }
 

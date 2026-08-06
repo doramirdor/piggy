@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use piggy_core::claudemd::{self, FileText, FindingKind};
+use piggy_core::claudemd::{self, DeadRef, FileText, FindingKind};
 use piggy_core::{ModelTokens, Pricing, SessionParse, Store};
 
 fn fixture(name: &str) -> PathBuf {
@@ -127,21 +127,65 @@ fn documented_routes_are_not_dead_references() {
     }
     assert!(got.contains("src/gone.rs"), "the real one still flags");
 
-    // These two clear the extension test, so only the neighbourhood tells them
-    // apart from a file. They are still reported (a file reference into a
-    // directory that is itself gone looks the same), and the deletion gate is
-    // what has to refuse them.
+    // These two clear the extension test, so nothing about the token itself
+    // tells them apart from a file. They are still reported (a file reference
+    // into a directory that is itself gone looks the same), and the deletion
+    // gate is what has to refuse them.
     let located = claudemd::dead_refs_located(&f);
     let by_ref = |r: &str| located.iter().find(|d| d.reference == r);
     for route in ["/openapi.json", "/static/app.js"] {
         let dead = by_ref(route).unwrap_or_else(|| panic!("{route} was dropped from the findings"));
         assert!(
-            !claudemd::deletable_ref(dead),
+            !claudemd::deletable_ref(dead, &f),
             "{route} would have had its line deleted"
         );
     }
     // A relative reference to a file is exactly what the deletion is for.
-    assert!(claudemd::deletable_ref(by_ref("src/gone.rs").unwrap()));
+    assert!(claudemd::deletable_ref(by_ref("src/gone.rs").unwrap(), &f));
+}
+
+/// The two shapes a line is never deleted over, whatever is on disk around
+/// them. Both are still *reported*: the question here is only whether Piggy is
+/// sure enough to remove the line.
+#[test]
+fn deletable_ref_spares_a_root_anchored_token_and_a_global_files_relative_one() {
+    let project = fixture_text("routes.md");
+    // The same bytes read as a *global* rule file: no project root, so a
+    // relative reference in it resolves against the home directory instead of
+    // anywhere its author meant.
+    let global = claudemd::read_file_text(&fixture("routes.md"), None).unwrap();
+
+    let dead = |reference: &str, resolved: &str| DeadRef {
+        line: 0,
+        reference: reference.to_string(),
+        resolved: PathBuf::from(resolved),
+    };
+
+    // Root-anchored with a real parent directory: a "does the neighbourhood
+    // exist" test clears this, and it is still a URL route as often as a path.
+    assert!(
+        Path::new("/etc").is_dir(),
+        "the case only bites where the parent is real"
+    );
+    let absolute = dead(
+        "/etc/piggy-no-such-file.json",
+        "/etc/piggy-no-such-file.json",
+    );
+    assert!(!claudemd::deletable_ref(&absolute, &project));
+    assert!(!claudemd::deletable_ref(&absolute, &global));
+
+    // Relative: the project file's base is that project, the global file's is a
+    // fallback, so in a global file every relative reference is dead by
+    // construction and none of them may cost a line.
+    let relative = dead("bench/src/report.js", "/nowhere/bench/src/report.js");
+    assert!(claudemd::deletable_ref(&relative, &project));
+    assert!(!claudemd::deletable_ref(&relative, &global));
+
+    // `~/` means the same thing wherever the file is read from, so it is the one
+    // anchor a global file can be held to.
+    let tilde = dead("~/notes/gone.md", "/home/nobody/notes/gone.md");
+    assert!(claudemd::deletable_ref(&tilde, &project));
+    assert!(claudemd::deletable_ref(&tilde, &global));
 }
 
 #[test]

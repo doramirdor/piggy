@@ -67,7 +67,8 @@ fn a_snapshot_restores_the_file_byte_for_byte() {
     assert_eq!(std::fs::read(&path).unwrap(), TRIMMED);
 
     // Undo.
-    let outcome = snapshots::restore(&state.file_snapshots);
+    let records = state.file_snapshots.clone();
+    let outcome = snapshots::restore(&records, &mut state);
     assert_eq!(outcome.restored, 1);
     assert!(outcome.failures.is_empty());
     assert_eq!(
@@ -109,7 +110,8 @@ fn restoring_the_whole_list_undoes_every_edit_back_to_the_original() {
     snapshots::snapshot(&path, Some("trim"), &mut state).unwrap();
     snapshots::write_atomic(&path, TRIMMED).unwrap();
 
-    let outcome = snapshots::restore(&state.file_snapshots);
+    let records = state.file_snapshots.clone();
+    let outcome = snapshots::restore(&records, &mut state);
     assert_eq!(outcome.restored, 2);
     assert!(outcome.failures.is_empty());
     assert_eq!(
@@ -135,7 +137,8 @@ fn a_failed_restore_names_the_file_and_the_others_still_land() {
     // reported, not counted as a restore that happened.
     std::fs::remove_file(&lost.backup).unwrap();
 
-    let outcome = snapshots::restore(&state.file_snapshots);
+    let records = state.file_snapshots.clone();
+    let outcome = snapshots::restore(&records, &mut state);
     assert_eq!(outcome.restored, 1, "the healthy item still came back");
     assert_eq!(outcome.failures.len(), 1);
     let f = &outcome.failures[0];

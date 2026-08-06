@@ -110,7 +110,9 @@ impl FileText {
     }
 
     /// The directory a relative reference in this file resolves against: the
-    /// project root, or the home directory for a global file.
+    /// project root, or the home directory for a global file. The second is a
+    /// fallback rather than a meaning, which is why [`deletable_ref`] will not
+    /// delete a line over a relative reference in a global file.
     fn base(&self) -> PathBuf {
         match &self.project {
             Some(p) => PathBuf::from(p),
@@ -634,29 +636,37 @@ fn path_token(raw: &str) -> Option<String> {
 /// [`crate::advice`] delete the whole line carrying it.
 ///
 /// Reporting is allowed to be wrong about a token; deleting is not, so this bar
-/// sits above [`names_a_path`]'s. Two tests:
+/// sits above [`names_a_path`]'s, and it asks about the file the reference was
+/// written in as much as about the reference. Three tests:
 ///
 /// * it carries a known file extension. `/login` and `/healthz/live` never get
 ///   this far.
-/// * and, when it is anchored at `/`, the directory it resolves into is a real
-///   directory somewhere other than the filesystem root. A route can carry an
-///   extension too (`/openapi.json`, `/static/app.js`), and what gives those
-///   away is that nothing around them is on disk. The root is not evidence of
-///   anything: it exists on every machine, so a one-segment absolute path would
-///   clear a bare "does its parent exist" test.
+/// * it is not anchored at `/`. A root-anchored token is an HTTP route at least
+///   as often as it is a path, and an extension does not tell the two apart:
+///   `/openapi.json`, `/static/app.js`, `/sw.js`, `/manifest.json` and
+///   `/robots.txt` are all routes that resolve against the filesystem root,
+///   where they were never going to exist. Neither does the neighbourhood, so
+///   the whole shape is report-only. The only thing given up is auto-deleting a
+///   genuinely absolute dead path, which is still reported.
+/// * and, in a global file, it is anchored at `~/`. A global file has no project
+///   root, so a relative reference in it resolves against the home directory,
+///   which is not where its author meant. A rule that says "reproduce with
+///   `bench/src/report.js`" is about whatever repo the reader is in, and
+///   `~/bench/src/report.js` being absent is not evidence that the line is
+///   stale. Every unanchored reference in a global file would otherwise be dead
+///   by construction and lose its line.
 ///
-/// A relative or `~/`-anchored reference is not an HTTP route to begin with, and
-/// it is exactly the case this transform exists for ("the `scripts/` directory
-/// is gone, so every line pointing into it is stale"), so it is not asked for
-/// the same proof.
-pub fn deletable_ref(dead: &DeadRef) -> bool {
+/// In a project file the base *is* that project, which is exactly the case this
+/// transform exists for ("the `scripts/` directory is gone, so every line
+/// pointing into it is stale"), so a relative reference there is deletable.
+pub fn deletable_ref(dead: &DeadRef, file: &FileText) -> bool {
     if !has_path_ext(&dead.reference) {
         return false;
     }
-    if !dead.reference.starts_with('/') {
-        return true;
+    if dead.reference.starts_with('/') {
+        return false;
     }
-    parent_is_a_real_dir(&dead.resolved)
+    file.project.is_some() || dead.reference.starts_with("~/")
 }
 
 fn has_path_ext(token: &str) -> bool {

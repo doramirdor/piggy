@@ -849,7 +849,12 @@ impl Store {
         Ok(row)
     }
 
-    /// Every advice row with `status`, biggest estimated saving first.
+    /// Every advice row with `status`, biggest `est_tokens_month` first.
+    ///
+    /// Deliberately not described as "biggest saving first": a `claudemd-trim`
+    /// row's figure is what the file costs today, not what trimming it would
+    /// give back (`advice::ActionKind::est_is_burden`), so a caller that wants a
+    /// savings ranking has to filter first.
     ///
     /// Ties break on `id` so the same facts always produce the same list in the
     /// same order: the UI takes the top few, and that slice must not shuffle

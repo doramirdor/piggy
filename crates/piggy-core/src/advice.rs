@@ -63,6 +63,10 @@ const ID_HEX_LEN: usize = 16;
 /// Most projects a [`ActionKind::ServerScope`] candidate will pin a server to.
 /// Past two, "it belongs to these projects" stops being true and the honest
 /// answer is that the server is general and belongs at user scope.
+///
+/// Counted over checkouts rather than working directories: sessions started in
+/// three subdirectories of one repo are one project for this question, even
+/// though the move writes an entry for each of them.
 pub const MAX_SCOPE_PROJECTS: usize = 2;
 
 /// Randomized sessions required **per side** before Piggy will suggest turning a
@@ -78,6 +82,18 @@ pub const MIN_RANDOMIZED_PER_SIDE: usize = 30;
 /// suggestion comes back. "Roughly doubles", from the spec: anything smaller and
 /// "Not for me" would not stick.
 pub const REOPEN_MULTIPLIER: i64 = 2;
+
+/// Saver layers ([`Entry::layer`]) whose whole effect is on price rather than on
+/// token count: a router or a proxy can send the very same tokens to a cheaper
+/// model and still cut the bill.
+///
+/// For these, four flat per-stream deltas are the *documented expected outcome*
+/// rather than a null result (docs/measurement.md, "Routing savers move price,
+/// not token count": "the per-stream badge must not be read as 'it did
+/// nothing'"). Piggy has no cost-side A/B yet, so it has nothing to say about
+/// whether one of these is earning its keep, and "turn it off, it did nothing"
+/// is the one thing it must not say.
+const PRICE_MOVING_LAYERS: &[&str] = &["routing", "proxy"];
 
 /// Bootstrap seed for the attribution [`saver_mix`] reads.
 ///
@@ -157,6 +173,18 @@ impl ActionKind {
     /// toggle). The content kinds are the ones gated on a source hash.
     pub fn edits_content(&self) -> bool {
         matches!(self, ActionKind::ClaudemdFix | ActionKind::ClaudemdTrim)
+    }
+
+    /// Whether this kind's [`Candidate::est_tokens_month`] is a **burden** - what
+    /// the target costs today - rather than a saving applying it would realize.
+    ///
+    /// [`ActionKind::ClaudemdTrim`] is the one: how much a rewrite gives back is
+    /// not known until it is drafted, so the figure is the ceiling on it. It is
+    /// also the largest number Piggy computes, so summing it with the savings
+    /// puts a cost at the top of a savings total and ranks an item that v1
+    /// cannot even apply ([`Prerequisite::NeedsAdvisor`]) first.
+    pub fn est_is_burden(&self) -> bool {
+        matches!(self, ActionKind::ClaudemdTrim)
     }
 }
 
@@ -254,8 +282,9 @@ pub const RISK_CONTENT_EDIT: u8 = 3;
 ///
 /// Externally tagged (serde's default) rather than internally tagged: with
 /// `serde_json`'s `arbitrary_precision`, an internally tagged enum cannot
-/// round-trip a [`Value`] carrying numbers, and [`Params::ServerScope`] carries
-/// the server's config verbatim.
+/// round-trip a [`Value`] carrying numbers. No variant carries one any more (see
+/// [`Params::ServerScope`]), but the representation is what stored payloads are
+/// written in and [`undo`] reads them back long afterwards, so it stays.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Params {
@@ -271,12 +300,20 @@ pub enum Params {
         /// re-scans with the same one.
         n_sessions: usize,
     },
+    /// A user-scope MCP server and the projects it moves into.
+    ///
+    /// The entry being moved is deliberately **not** here. An MCP server's
+    /// config carries its `env`, which is where people keep API tokens, and this
+    /// struct is serialized into `advice.payload_json` for every candidate
+    /// [`generate`] produces - with no apply, no consent, and no expiry. That
+    /// would copy tokens out of a 0600 `~/.claude.json` into a 0644
+    /// `~/.piggy/piggy.db`. Apply re-reads the entry from the file and checks it
+    /// against [`Candidate::fingerprint`] before moving it, so nothing here has
+    /// to remember it.
     ServerScope {
         server: String,
         /// The projects the server moves into, in path order.
         projects: Vec<String>,
-        /// The exact config object being moved.
-        config: Value,
     },
     /// Both CLAUDE.md kinds: the file is the whole address.
     Claudemd { path: String },
@@ -538,14 +575,20 @@ pub struct Inputs {
 /// * an `open` row that no longer regenerates goes `stale`: its evidence moved,
 ///   so its plan describes a world that is gone, and applying it would be
 ///   applying a stale plan;
+/// * a `stale` row that regenerates comes back `open`: the plan describes the
+///   world again, and nothing else in the system would ever move a row out of
+///   `stale`;
 /// * a `dismissed` target whose cost has since doubled comes back, and the
 ///   dismissal that suppressed it is retired so it cannot suppress twice.
 pub fn generate(store: &mut Store, opts: &GenerateOptions) -> Result<Vec<Candidate>> {
     let inputs = load_inputs(store, opts)?;
     let mut candidates = generate_from(&inputs);
 
-    // Biggest saving first, ties on id: the same facts must produce the same
-    // list in the same order, because the UI shows the top few.
+    // Biggest number first, ties on id: the same facts must produce the same
+    // list in the same order, because the UI shows the top few. Not "biggest
+    // saving first" - a `ClaudemdTrim` row's figure is a burden, so any surface
+    // that calls this ranking a savings ranking is claiming something it did not
+    // compute (see `ActionKind::est_is_burden`).
     candidates.sort_by(|a, b| {
         b.est_tokens_month
             .cmp(&a.est_tokens_month)
@@ -589,10 +632,22 @@ pub fn generate(store: &mut Store, opts: &GenerateOptions) -> Result<Vec<Candida
             }
         }
         store.insert_advice(&candidate.row(&now)?)?;
-        candidate.status = store
+        let mut status = store
             .advice(&candidate.id)?
             .map(|r| r.status)
             .unwrap_or_else(|| advice_status::OPEN.to_string());
+        // Regenerating is proof the plan is live. Evidence oscillates - the
+        // look-back window is a CLI flag, and a rolling 30-day count comes back
+        // down as well as up - so the id retired an hour ago can be exactly the
+        // plan the world supports now, and `insert_advice` leaves the retired
+        // row alone. Only `stale` is revived: `applied` keeps its restore_ref,
+        // which is its only route back, and `dismissed` is the suppression
+        // block above.
+        if status == advice_status::STALE {
+            store.set_advice_status(&candidate.id, advice_status::OPEN, None, None, None)?;
+            status = advice_status::OPEN.to_string();
+        }
+        candidate.status = status;
         out.push(candidate);
     }
     Ok(out)
@@ -607,6 +662,30 @@ pub fn generate_from(inputs: &Inputs) -> Vec<Candidate> {
     out.extend(claudemd_trim(inputs));
     out.extend(saver_mix(inputs));
     out
+}
+
+/// What a list of candidates is worth a month: the savings, and nothing else.
+///
+/// A burden is not a saving, and the two summed into one figure is a ~10x
+/// overstatement in the shape a user is most likely to believe (an oversized
+/// global file loaded 200 times a month dwarfs every real saving on the list).
+/// See [`ActionKind::est_is_burden`].
+pub fn total_savings(candidates: &[Candidate]) -> i64 {
+    candidates
+        .iter()
+        .filter(|c| !c.kind.est_is_burden())
+        .map(|c| c.est_tokens_month)
+        .sum()
+}
+
+/// The other half of [`total_savings`]: what the targets whose figure is a
+/// burden cost today. Reported as its own clause, never added to the savings.
+pub fn total_burden(candidates: &[Candidate]) -> i64 {
+    candidates
+        .iter()
+        .filter(|c| c.kind.est_is_burden())
+        .map(|c| c.est_tokens_month)
+        .sum()
 }
 
 /// Read everything the generators need. The one impure half of [`generate`].
@@ -819,8 +898,7 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
         let Some(raw) = inputs.server_usage.get(&sweep::normalize(&server.key)) else {
             continue; // never called: that is `ServerDisable`'s question, not this one
         };
-        let by_project = sweep::fold_subpaths(raw);
-        let total: u64 = by_project.values().sum();
+        let total: u64 = raw.values().sum();
         if total == 0 {
             continue;
         }
@@ -828,7 +906,7 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
         // They count toward `total` so that a server used mostly from unknown
         // directories fails the concentration test rather than being pinned on
         // the strength of the few calls we can place.
-        let named: BTreeMap<&str, u64> = by_project
+        let named: BTreeMap<&str, u64> = raw
             .iter()
             .filter(|(project, _)| !project.is_empty())
             .map(|(project, n)| (project.as_str(), *n))
@@ -840,6 +918,8 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
         // A project that checked this server into its own `.mcp.json` already
         // has its own copy: its calls came from that one, and pinning a second
         // entry there would duplicate config Piggy is not allowed to write.
+        // Asked per working directory rather than per repo, so a subdirectory
+        // that vendored the server is skipped without taking its parent with it.
         let projects: Vec<String> = named
             .keys()
             .filter(|project| {
@@ -851,7 +931,22 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
             })
             .map(|p| p.to_string())
             .collect();
-        if projects.is_empty() || projects.len() > MAX_SCOPE_PROJECTS {
+        if projects.is_empty() {
+            continue;
+        }
+        // Folding is for the *decision* only: `…/repo` and `…/repo/app` are one
+        // checkout, so a server called from both is not a server two projects
+        // share. The write stays unfolded, because `~/.claude.json` keys
+        // `projects` by the exact working directory a session started in - one
+        // entry under `…/repo` does nothing for a session started in
+        // `…/repo/app`, which is where half the calls came from - and so does
+        // the arithmetic below, for the same reason.
+        let n_roots = projects
+            .iter()
+            .map(|p| sweep::fold_root_of(raw, p))
+            .collect::<BTreeSet<&str>>()
+            .len();
+        if n_roots > MAX_SCOPE_PROJECTS {
             continue;
         }
 
@@ -930,7 +1025,6 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
             Params::ServerScope {
                 server: server.key.clone(),
                 projects,
-                config: server.config.clone(),
             },
             None,
         ));
@@ -1065,13 +1159,15 @@ fn claudemd_edit(
     let mut drop_lines: BTreeSet<usize> = BTreeSet::new();
 
     // Dead references, every occurrence rather than the capped display list -
-    // but only the ones Piggy can prove name a file. A CLAUDE.md that lists its
-    // project's HTTP routes is full of tokens that resolve like paths and are
-    // not paths, and this transform deletes whole lines. Reporting one of those
-    // as a finding costs a shrug; deleting the line costs the user a rule.
+    // but only the ones Piggy can prove name a file in *this* file's world
+    // ([`claudemd::deletable_ref`]). A CLAUDE.md that lists its project's HTTP
+    // routes is full of tokens that resolve like paths and are not paths, and a
+    // global rule file has no project root for a relative one to be measured
+    // against. This transform deletes whole lines: reporting a token wrongly
+    // costs a shrug, deleting its line costs the user a rule.
     let mut dead_refs: Vec<String> = Vec::new();
     for dead in claudemd::dead_refs_located(text) {
-        if !claudemd::deletable_ref(&dead) {
+        if !claudemd::deletable_ref(&dead, text) {
             continue;
         }
         if !dead_refs.contains(&dead.reference) {
@@ -1266,7 +1362,9 @@ pub fn claudemd_trim(inputs: &Inputs) -> Vec<Candidate> {
 ///
 /// * a saver that **changes how Claude answers** and has been compared over
 ///   [`MIN_RANDOMIZED_PER_SIDE`] randomized sessions a side without moving
-///   anything: the behaviour change is being paid for nothing;
+///   anything: the behaviour change is being paid for nothing. Savers on a
+///   [`PRICE_MOVING_LAYERS`] layer are exempt, because for them flat streams are
+///   the expected reading rather than a null result;
 /// * a saver that is installed, off, and has a measured favourable delta on some
 ///   stream: it is being left on the table. Skipped when it conflicts with a
 ///   saver that is currently on, because that is a trade, not a free win.
@@ -1285,6 +1383,11 @@ pub fn saver_mix(inputs: &Inputs) -> Vec<Candidate> {
         let name = &saver.entry.name;
 
         if saver.enabled && saver.entry.behavior_changing {
+            // A price-moving saver's flat streams are what it was predicted to
+            // do, not evidence that it did nothing. See [`PRICE_MOVING_LAYERS`].
+            if PRICE_MOVING_LAYERS.contains(&saver.entry.layer.as_str()) {
+                continue;
+            }
             let enough = rand_on >= MIN_RANDOMIZED_PER_SIDE && rand_off >= MIN_RANDOMIZED_PER_SIDE;
             // Every arm has to have been compared and found flat or unreadable,
             // and at least one has to have actually settled - "all inconclusive"
@@ -1495,16 +1598,11 @@ pub fn apply(
             source,
             n_sessions,
         } => apply_server_disable(store, state, item_kind, id, source.as_deref(), *n_sessions)?,
-        Params::ServerScope {
-            server,
-            projects,
-            config,
-        } => apply_server_scope(
+        Params::ServerScope { server, projects } => apply_server_scope(
             state,
             &candidate.id,
             server,
             projects,
-            config,
             &candidate.fingerprint,
         )?,
         Params::Claudemd { path } => apply_claudemd(state, candidate, path)?,
@@ -1583,7 +1681,6 @@ fn apply_server_scope(
     advice_id: &str,
     server: &str,
     projects: &[String],
-    config: &Value,
     fingerprint: &str,
 ) -> Result<(String, String)> {
     let path = config::claude_json_path();
@@ -1655,7 +1752,12 @@ fn apply_server_scope(
                     path.display()
                 )
             })?;
-            let prior = servers.insert(server.to_string(), config.clone());
+            // What moves is the entry as it sits on disk right now, checked
+            // against the fingerprint above. A copy taken at generation time
+            // would both put the server's env in the database and silently drop
+            // any key the config hash does not cover (`timeout`, say), which
+            // passed the check and would then not survive the move.
+            let prior = servers.insert(server.to_string(), user.clone());
             before_projects.insert(project.clone(), prior.unwrap_or(Value::Null));
         }
 
@@ -1703,8 +1805,11 @@ fn apply_claudemd(
     // Boxed as an error so a caller can `downcast_ref::<Conflict>()` and tell
     // "someone edited it" from "it is gone".
     snapshots::check_unchanged(file, &candidate.fingerprint).map_err(anyhow::Error::new)?;
-    let record = snapshots::snapshot(file, Some(&candidate.id), state)?;
-    snapshots::write_atomic(file, content.as_bytes())?;
+    // Backup and write in one call, so the record carries the hash of what was
+    // written and a later Undo can tell this content from something the user
+    // has since put there.
+    let record =
+        snapshots::snapshot_and_write(file, content.as_bytes(), Some(&candidate.id), state)?;
     state.save()?;
     Ok((
         format!("{REF_FILE_SNAPSHOT}{}", record.backup),
@@ -1823,7 +1928,7 @@ pub fn undo(
             format!("moved {server} back to user scope")
         }
         Params::Claudemd { path } => {
-            let outcome = undo_file_snapshots(state, id)?;
+            let outcome = undo_file_snapshots(store, state, id)?;
             restored += outcome.restored;
             failures.extend(outcome.failures.into_iter().map(|f| UndoFailure {
                 item: f.path,
@@ -1940,6 +2045,7 @@ pub(crate) fn restore_scope_move(state: &mut PiggyState, advice_id: &str) -> Res
 /// Restore every file snapshot belonging to one advice row, dropping the records
 /// that came back and keeping the ones that did not.
 fn undo_file_snapshots(
+    store: &Store,
     state: &mut PiggyState,
     advice_id: &str,
 ) -> Result<snapshots::RestoreOutcome> {
@@ -1952,10 +2058,62 @@ fn undo_file_snapshots(
     if mine.is_empty() {
         bail!("Piggy has no backup recorded for that edit");
     }
-    let outcome = snapshots::restore(&mine);
+    refuse_out_of_order(store, state, advice_id)?;
+    let outcome = snapshots::restore(&mine, state);
     prune_restored(&mut state.file_snapshots, &mine, &outcome);
     state.save()?;
     Ok(outcome)
+}
+
+/// Refuse an undo that would step over a later Piggy edit to the same file.
+///
+/// Snapshots stack in the order they were taken, so restoring the *older* of two
+/// edits to one file writes the content from before the first one over the
+/// second one's result, and leaves the second record behind pointing at bytes
+/// that are now nobody's: a later Restore Defaults would then put Piggy's own
+/// intermediate content over whatever the user has written since. Two edits to
+/// one file come off the stack newest first, and which one was meant is not
+/// something to guess at - the same refuse-rather-than-overwrite discipline the
+/// rest of this module keeps.
+fn refuse_out_of_order(store: &Store, state: &PiggyState, advice_id: &str) -> Result<()> {
+    let all = &state.file_snapshots;
+    for (i, rec) in all
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.advice_id.as_deref() == Some(advice_id))
+    {
+        // Further up the stack, same file, some *other* advice row. Another of
+        // our own records is fine (one suggestion may touch a file twice), and a
+        // record with no advice row behind it is a plain backup rather than an
+        // edit waiting to be reversed.
+        let later = all[i + 1..].iter().find_map(|r| {
+            let other = r.advice_id.as_deref()?;
+            (r.path == rec.path && other != advice_id).then_some(other)
+        });
+        let Some(later) = later else {
+            continue;
+        };
+        bail!(
+            "{} was edited again afterwards, by '{}'. Undo that one first: putting this file \
+             back now would write over it.",
+            rec.path,
+            advice_title(store, later)
+        );
+    }
+    Ok(())
+}
+
+/// How an advice row reads in a sentence: its title, or its id when the row or
+/// its payload is not there to ask.
+fn advice_title(store: &Store, id: &str) -> String {
+    store
+        .advice(id)
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(|row| Candidate::from_row(row).ok())
+        .map(|c| c.title)
+        .unwrap_or_else(|| id.to_string())
 }
 
 /// Drop the records in `attempted` that came back, keeping every one that did
@@ -1984,10 +2142,21 @@ pub(crate) fn prune_restored(
 /// The baseline is what makes the suppression honest: the same target comes back
 /// only once it costs [`REOPEN_MULTIPLIER`] times what the user waved away, so a
 /// no stays a no while the evidence stands still.
+///
+/// An applied row is refused rather than moved on. `dismissed` carries a
+/// `dismiss_note` and no `applied_at` or `restore_ref`, and
+/// [`Store::set_advice_status`] writes all three stamps as given, so dismissing
+/// an applied row would drop the only handle Undo has - permanently, and for
+/// [`ActionKind::SaverMix`] the prior toggle state lives *only* in that string.
+/// "Not for me" is a thing to say about a suggestion, not about a change that is
+/// already on disk.
 pub fn dismiss(store: &mut Store, id: &str, note: Option<&str>) -> Result<bool> {
     let Some(row) = store.advice(id)? else {
         return Ok(false);
     };
+    if row.status == advice_status::APPLIED {
+        bail!("'{}' is applied - undo it first", advice_title(store, id));
+    }
     let recorded = serde_json::to_string(&DismissNote {
         note: note.map(str::to_string),
         est_tokens_month: Some(row.est_tokens_month),

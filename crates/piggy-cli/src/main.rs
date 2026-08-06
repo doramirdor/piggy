@@ -1580,7 +1580,11 @@ fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
         let items: Vec<serde_json::Value> = candidates.iter().map(candidate_json).collect();
         let out = serde_json::json!({
             "candidates": items,
-            "estTokensMonth": candidates.iter().map(|c| c.est_tokens_month).sum::<i64>(),
+            // Savings only. The oversized-file kind's figure is what the file
+            // costs today, not what trimming it would give back, so it is its
+            // own field and the two are never added up.
+            "estTokensMonth": advice::total_savings(&candidates),
+            "estTokensMonthBurden": advice::total_burden(&candidates),
             "sessionsConsidered": opts.n_sessions,
             // Model ranking and CLAUDE.md drafts are app-only in v1.
             "ranking": "estimated-tokens-month",
@@ -1599,12 +1603,31 @@ fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let total: i64 = candidates.iter().map(|c| c.est_tokens_month).sum();
-    println!(
-        "Piggy advice - {} suggestion(s), ~{} tokens/month between them",
-        candidates.len(),
-        commafy(total.max(0) as u64)
-    );
+    // The headline is savings only. A `claudemd-trim` candidate's figure is the
+    // file's monthly *burden* - the ceiling on what a rewrite could save, since
+    // nobody knows how much it removes until it is drafted - and it is by far
+    // the biggest number here, so adding it in would overstate what applying
+    // this list is worth several times over, on the strength of the one kind v1
+    // cannot even apply yet.
+    let savings = advice::total_savings(&candidates);
+    let burden = advice::total_burden(&candidates);
+    let burdened = candidates.iter().filter(|c| c.kind.est_is_burden()).count();
+    if savings > 0 {
+        println!(
+            "Piggy advice - {} suggestion(s), ~{} tokens/month between them",
+            candidates.len(),
+            commafy(savings.max(0) as u64)
+        );
+    } else {
+        println!("Piggy advice - {} suggestion(s)", candidates.len());
+    }
+    if burden > 0 {
+        println!(
+            "Plus {burdened} oversized file(s) costing ~{} tokens/month as they stand. That is \
+             what they cost, not what trimming them would save, so it is not in the total above.",
+            commafy(burden.max(0) as u64)
+        );
+    }
 
     // Grouped by family, and each family in the order its members were ranked.
     // The groups themselves come out in the order they first appear in that
@@ -1622,10 +1645,17 @@ fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
             println!();
             println!("  {} [{}]", candidate.title, candidate.status);
             println!(
-                "    id {} · {} · risk {} · ~{} tokens/month",
+                "    id {} · {} · risk {} · {} ~{} tokens/month",
                 candidate.id,
                 candidate.kind.as_str(),
                 candidate.risk_tier,
+                // Which verb it is, is the whole point: the same column holds a
+                // saving for four kinds and a cost for the fifth.
+                if candidate.kind.est_is_burden() {
+                    "costs"
+                } else {
+                    "saves"
+                },
                 commafy(candidate.est_tokens_month.max(0) as u64)
             );
             for row in &candidate.evidence {

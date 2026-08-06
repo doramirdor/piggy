@@ -16,7 +16,8 @@
 //! * [`check_unchanged`] is the apply-time gate: a file that moved since a draft
 //!   was made against it is refused with a typed [`Conflict`], never overwritten;
 //! * [`restore`] puts a batch back and reports **per item**, so one unwritable
-//!   file can never make the others disappear quietly.
+//!   file can never make the others disappear quietly, and snapshots anything
+//!   the user wrote over Piggy's edit before it goes.
 //!
 //! `settings.json` keeps its own machinery for now; this module is additive.
 
@@ -41,6 +42,16 @@ pub struct FileSnapshot {
     /// records. `None` for a snapshot taken outside the advice engine.
     #[serde(default)]
     pub advice_id: Option<String>,
+    /// sha256 of the bytes the apply *wrote*, for a snapshot taken by
+    /// [`snapshot_and_write`]. It is how [`restore`] tells "the file is still
+    /// exactly as Piggy left it" from "the user has edited it since", and the
+    /// second case gets backed up before the original goes back.
+    ///
+    /// `None` for a snapshot taken on its own and for every record written
+    /// before this field existed. Those are treated as edited, which costs one
+    /// extra copy of a file and never costs the user their work.
+    #[serde(default)]
+    pub after_hash: Option<String>,
     pub applied_at: String,
 }
 
@@ -112,6 +123,32 @@ pub fn snapshot(
     advice_id: Option<&str>,
     state: &mut PiggyState,
 ) -> Result<FileSnapshot> {
+    record_snapshot(path, advice_id, None, state)
+}
+
+/// Back up `path`, then replace its content with `bytes`.
+///
+/// The pair is one call because the record has to carry the hash of what was
+/// written ([`FileSnapshot::after_hash`]), and a caller that took the snapshot
+/// and then wrote separately could forget the second half - at which point Undo
+/// silently loses whatever the user did to the file in between.
+pub fn snapshot_and_write(
+    path: &Path,
+    bytes: &[u8],
+    advice_id: Option<&str>,
+    state: &mut PiggyState,
+) -> Result<FileSnapshot> {
+    let record = record_snapshot(path, advice_id, Some(hash_bytes(bytes)), state)?;
+    write_atomic(path, bytes)?;
+    Ok(record)
+}
+
+fn record_snapshot(
+    path: &Path,
+    advice_id: Option<&str>,
+    after_hash: Option<String>,
+    state: &mut PiggyState,
+) -> Result<FileSnapshot> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let dir = files_backup_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -123,6 +160,7 @@ pub fn snapshot(
         path: path.to_string_lossy().into_owned(),
         backup: backup.to_string_lossy().into_owned(),
         advice_id: advice_id.map(str::to_string),
+        after_hash,
         applied_at: chrono::Utc::now().to_rfc3339(),
     };
     state.file_snapshots.push(record.clone());
@@ -238,10 +276,14 @@ fn resolve_symlink_target(path: &Path) -> Option<PathBuf> {
 /// Every item is attempted; a failure is reported by path and reason rather than
 /// aborting the batch, so one file with permissions revoked cannot hide the
 /// others' outcome.
-pub fn restore(records: &[FileSnapshot]) -> RestoreOutcome {
+///
+/// `state` is taken mutably because a restore that would overwrite the user's
+/// own work snapshots that work first (see [`restore_one`]); pass a clone of the
+/// records rather than a borrow of the same field.
+pub fn restore(records: &[FileSnapshot], state: &mut PiggyState) -> RestoreOutcome {
     let mut outcome = RestoreOutcome::default();
     for rec in records.iter().rev() {
-        match restore_one(rec) {
+        match restore_one(rec, state) {
             Ok(()) => outcome.restored += 1,
             Err(e) => {
                 eprintln!("warning: {e:#}");
@@ -255,11 +297,42 @@ pub fn restore(records: &[FileSnapshot]) -> RestoreOutcome {
     outcome
 }
 
-fn restore_one(rec: &FileSnapshot) -> Result<()> {
+/// Put one file back, backing up whatever is on disk now if that is not what the
+/// apply left behind.
+///
+/// Undo must not be a weaker gate than apply. Apply refuses to touch a file
+/// whose hash moved ([`check_unchanged`]); a restore cannot refuse - somebody
+/// who fixed a typo the week after applying still has to be able to undo - so it
+/// keeps their bytes instead of guarding against them. The current content goes
+/// into `backups/files` with a record of its own first, which is the same move
+/// `settings::backup_only` makes before Restore Defaults overwrites
+/// `settings.json`.
+fn restore_one(rec: &FileSnapshot, state: &mut PiggyState) -> Result<()> {
     let backup = Path::new(&rec.backup);
     // The backup is the only copy of the original content. Missing means the
-    // restore is impossible, not that it succeeded with nothing to do.
+    // restore is impossible, not that it succeeded with nothing to do. Read
+    // before anything else so an impossible restore does not leave a stray copy
+    // behind.
     let bytes = std::fs::read(backup)
         .with_context(|| format!("reading backup {} for {}", rec.backup, rec.path))?;
-    write_atomic(Path::new(&rec.path), &bytes).with_context(|| format!("restoring {}", rec.path))
+    let path = Path::new(&rec.path);
+    if edited_since_apply(path, rec) {
+        // No `advice_id`: this is a plain backup of the user's own content, not
+        // an edit of Piggy's that anything should try to reverse later.
+        snapshot(path, None, state)
+            .with_context(|| format!("backing up the current {} before restoring it", rec.path))?;
+    }
+    write_atomic(path, &bytes).with_context(|| format!("restoring {}", rec.path))
+}
+
+/// Whether what is on disk is something other than the bytes the apply wrote,
+/// i.e. whether putting the original back would throw work away. A file with no
+/// recorded [`FileSnapshot::after_hash`], or one that has since been deleted, is
+/// answered on the safe side.
+fn edited_since_apply(path: &Path, rec: &FileSnapshot) -> bool {
+    match std::fs::read(path) {
+        Ok(bytes) => rec.after_hash.as_deref() != Some(hash_bytes(&bytes).as_str()),
+        // Nothing on disk to lose: the restore is what puts the file back.
+        Err(_) => false,
+    }
 }
