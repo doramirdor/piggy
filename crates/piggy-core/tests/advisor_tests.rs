@@ -16,7 +16,7 @@ use piggy_core::insights::{Insight, Severity};
 use piggy_core::ledger::{Ledger, LedgerRow, ProjectRow};
 use piggy_core::parser::{CTX_CONVERSATION, CTX_FLOOR};
 use piggy_core::registry::Entry;
-use piggy_core::sweep::{SweepItem, SweepReport};
+use piggy_core::sweep::{self, SweepItem, SweepReport};
 
 const GB: u64 = 1024 * 1024 * 1024;
 
@@ -203,6 +203,7 @@ fn facts_precompute_sums_so_the_model_never_adds() {
                 used: 0,
                 used_windowed: false,
                 est_tokens: 1_200,
+                cost_basis: sweep::COST_BASIS_ESTIMATE.into(),
                 scope_to: None,
                 recommend_disable: true,
                 reason: "never invoked".into(),
@@ -215,6 +216,7 @@ fn facts_precompute_sums_so_the_model_never_adds() {
                 used: 0,
                 used_windowed: true,
                 est_tokens: 800,
+                cost_basis: sweep::COST_BASIS_ESTIMATE.into(),
                 scope_to: None,
                 recommend_disable: true,
                 reason: "never invoked".into(),
@@ -243,6 +245,7 @@ fn sweep() -> SweepReport {
             used: 0,
             used_windowed: false,
             est_tokens: 1_200,
+            cost_basis: sweep::COST_BASIS_ESTIMATE.into(),
             scope_to: None,
             recommend_disable: true,
             reason: "never invoked".into(),

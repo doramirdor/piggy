@@ -13,8 +13,10 @@
 //! and per-skill usage, which is *not* recoverable from tool names, is read from
 //! `~/.claude.json`'s own `pluginUsage` / `skillUsage` counters.
 //!
-//! Every token cost is an **estimate** (config-size / file-size heuristic) and is
-//! always labelled as such — Piggy never presents a guessed number as measured.
+//! Every token cost is an **estimate** (config-size / file-size heuristic)
+//! except an MCP server the manifest probe has measured, and every number
+//! carries the label that says which it is ([`SweepItem::cost_basis`]) - Piggy
+//! never presents a guessed number as measured, or the reverse.
 //!
 //! Disable is reversible: MCP servers are removed but their exact JSON is
 //! snapshotted into `state.json`; plugins are set `enabledPlugins=false`; skills
@@ -28,12 +30,22 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
 
 use crate::config;
+use crate::probe;
 use crate::settings;
 use crate::state::{PiggyState, SweepDisabled};
-use crate::store::Store;
+use crate::store::{McpManifest, Store};
 
 /// Default look-back window for usage cross-reference.
 pub const DEFAULT_N_SESSIONS: usize = 50;
+
+/// [`SweepItem::cost_basis`] when `est_tokens` is the config-size heuristic:
+/// a guess, and labelled as one everywhere it is shown.
+pub const COST_BASIS_ESTIMATE: &str = "rough estimate";
+
+/// [`SweepItem::cost_basis`] when `est_tokens` came from [`crate::probe`]
+/// measuring this server's *current* config: a real byte count of the tool
+/// schemas, not a guess.
+pub const COST_BASIS_MEASURED: &str = "measured manifest";
 
 /// Tool-call counts over the window, keyed by tool name then by the project the
 /// calls came from (see [`Store::recent_tool_usage`]).
@@ -62,8 +74,14 @@ pub struct SweepItem {
     /// Lets callers avoid presenting a lifetime number under a "last N sessions"
     /// window label.
     pub used_windowed: bool,
-    /// Estimated per-session context cost, in tokens. **Always an estimate.**
+    /// Per-session context cost, in tokens. An estimate unless
+    /// [`Self::cost_basis`] says otherwise.
     pub est_tokens: u64,
+    /// Where [`Self::est_tokens`] came from: [`COST_BASIS_ESTIMATE`] (the
+    /// config-size heuristic) or [`COST_BASIS_MEASURED`] (a probe measurement of
+    /// this server's current config). The label travels with the number so no
+    /// surface can show a measured figure as a guess, or the reverse.
+    pub cost_basis: String,
     /// Whether Piggy recommends turning it off (unused in the window).
     pub recommend_disable: bool,
     /// For a user-scope MCP server whose calls all come from one project: that
@@ -108,10 +126,13 @@ pub fn scan(store: &Store, n_sessions: usize) -> Result<SweepReport> {
     let usage = store.recent_tool_usage(n_sessions)?;
     let sessions_considered = store.recent_session_count(n_sessions)?;
     let usage_maps = UsageMaps::load();
+    // Anything the probe has measured, so a real schema cost can replace the
+    // heuristic for the servers that have one.
+    let manifests = store.mcp_manifests()?;
 
     let mut items: Vec<SweepItem> = Vec::new();
 
-    scan_mcp_servers(&usage, &mut items)?;
+    scan_mcp_servers(&usage, &manifests, &mut items)?;
     scan_plugins(&usage_maps, &mut items)?;
     scan_skills(&usage_maps, &mut items)?;
     scan_hooks(&mut items)?;
@@ -137,7 +158,11 @@ pub fn scan(store: &Store, n_sessions: usize) -> Result<SweepReport> {
 // Scanning each source
 // ---------------------------------------------------------------------------
 
-fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()> {
+fn scan_mcp_servers(
+    usage: &ProjectUsage,
+    manifests: &[McpManifest],
+    out: &mut Vec<SweepItem>,
+) -> Result<()> {
     let path = config::claude_json_path();
     if !path.exists() {
         return Ok(());
@@ -158,30 +183,13 @@ fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()
     }
 
     // Dedup servers by name (a server can be configured in several places; we
-    // report the first). User scope goes first because that is the copy every
-    // session pays for, so it is the one whose placement is worth judging.
+    // report the first). The enumeration itself lives in `probe`, which lists
+    // user scope first - the copy every session pays for, so the one whose
+    // placement is worth judging - and then each project's.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (server, cfg) in root
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-    {
-        if seen.insert(server.clone()) {
-            out.push(mcp_item(server, cfg, None, &server_used));
-        }
-    }
-    let Some(projects) = root.get("projects").and_then(Value::as_object) else {
-        return Ok(());
-    };
-    for (proj_path, proj) in projects {
-        let Some(servers) = proj.get("mcpServers").and_then(Value::as_object) else {
-            continue;
-        };
-        for (server, cfg) in servers {
-            if seen.insert(server.clone()) {
-                out.push(mcp_item(server, cfg, Some(proj_path.clone()), &server_used));
-            }
+    for server in probe::servers_from_root(&root) {
+        if seen.insert(server.key.clone()) {
+            out.push(mcp_item(&server, &server_used, manifests));
         }
     }
     Ok(())
@@ -192,20 +200,19 @@ fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()
 /// one stray call from another cwd should not keep a server loaded everywhere.
 const SCOPE_CONCENTRATION: f64 = 0.9;
 
-/// One configured MCP server as a sweep item. `source` is the project path it is
-/// configured under, or `None` for user scope.
+/// One configured MCP server as a sweep item.
 ///
 /// The scope call only applies to user scope: a project-scoped server already
 /// costs nothing outside its own project, so telling its owner where it is used
 /// would be noise. A user-scope server is loaded by every session, which is only
 /// worth it if more than one project actually calls it.
 fn mcp_item(
-    server: &str,
-    cfg: &Value,
-    source: Option<String>,
+    server: &probe::ConfiguredServer,
     server_used: &ProjectUsage,
+    manifests: &[McpManifest],
 ) -> SweepItem {
-    let by_project = server_used.get(&normalize(server)).map(fold_subpaths);
+    let source = server.project.clone();
+    let by_project = server_used.get(&normalize(&server.key)).map(fold_subpaths);
     let used: u64 = by_project.as_ref().map(|m| m.values().sum()).unwrap_or(0);
     // Sessions with no recorded project cannot vote on where a server belongs,
     // so they count toward `used` but never toward the concentration.
@@ -237,14 +244,23 @@ fn mcp_item(
         format!("{used} tool call(s) in the window")
     };
 
+    // A probe measurement of *this* config beats the heuristic. Anything else -
+    // never probed, config changed since, or a failed probe - keeps the estimate
+    // and its label.
+    let (est_tokens, cost_basis) = match probe::measured_tokens(manifests, server) {
+        Some(tokens) => (tokens.max(0) as u64, COST_BASIS_MEASURED),
+        None => (est_mcp_tokens(&server.config), COST_BASIS_ESTIMATE),
+    };
+
     SweepItem {
         idx: 0,
         kind: "mcp".into(),
-        id: server.to_string(),
+        id: server.key.clone(),
         source,
         used,
         used_windowed: true,
-        est_tokens: est_mcp_tokens(cfg),
+        est_tokens,
+        cost_basis: cost_basis.into(),
         recommend_disable: used == 0,
         scope_to,
         reason,
@@ -279,6 +295,7 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             // pluginUsage is a lifetime counter in ~/.claude.json, not windowed.
             used_windowed: false,
             est_tokens: 800, // estimate: a plugin's skills/commands manifest
+            cost_basis: COST_BASIS_ESTIMATE.into(),
             recommend_disable: recommend,
             scope_to: None, // plugins have no per-project scope to move to
             reason: if recommend {
@@ -324,6 +341,7 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             // skillUsage is a lifetime counter in ~/.claude.json, not windowed.
             used_windowed: false,
             est_tokens: est,
+            cost_basis: COST_BASIS_ESTIMATE.into(),
             recommend_disable: recommend,
             scope_to: None, // skills are user-wide; Claude Code has no project scope for them
             reason: if recommend {
@@ -403,6 +421,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
                 used: 0,
                 used_windowed: false,
                 est_tokens: 0, // hooks fire on events; they cost no context tokens
+                cost_basis: COST_BASIS_ESTIMATE.into(),
                 recommend_disable: false,
                 scope_to: None,
                 reason: "hook — fires on events, not usage-measurable and costs no context tokens (informational)".into(),
@@ -749,8 +768,9 @@ fn normalize(s: &str) -> String {
 }
 
 /// Estimate an MCP server's per-session context cost from its config size. This
-/// is a deliberately rough, clearly-labelled heuristic — the true cost is the
-/// server's tool-schema manifest, which Piggy cannot see without connecting.
+/// is a deliberately rough, clearly-labelled heuristic - the true cost is the
+/// server's tool-schema manifest, which [`crate::probe`] can only see by
+/// connecting, and which the user has to ask for one server at a time.
 fn est_mcp_tokens(cfg: &Value) -> u64 {
     let len = cfg.to_string().len() as u64;
     (300 + len / 3).min(4000)
