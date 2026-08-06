@@ -1357,7 +1357,7 @@ fn the_suggest_prompt_shows_the_example_the_guard_matches() {
 
 #[test]
 fn the_draft_prompt_shows_the_sentinels_the_parser_looks_for() {
-    let prompt = prompts::draft_preamble("Stacked's CLAUDE.md");
+    let prompt = prompts::draft_preamble("Stacked's CLAUDE.md", 120, prompts::draft_target_lines(120));
     assert!(prompt.contains(DRAFT_OPEN));
     assert!(prompt.contains(DRAFT_CLOSE));
 }
@@ -1368,7 +1368,7 @@ fn no_prompt_contains_an_em_dash() {
         prompts::SUGGEST_SYSTEM.to_string(),
         prompts::DRAFT_SYSTEM.to_string(),
         prompts::suggest_preamble(),
-        prompts::draft_preamble("x"),
+        prompts::draft_preamble("x", 40, prompts::draft_target_lines(40)),
     ];
     for p in built {
         assert!(!p.contains('\u{2014}'), "em-dash in a prompt: {p}");

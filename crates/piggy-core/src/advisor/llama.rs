@@ -441,7 +441,9 @@ impl Advisor {
     /// One drafting call, returning the raw text between (and including) the
     /// markers.
     fn draft_once(&self, label: &str, source: &str) -> Result<String> {
-        let prompt = self.prompt(source, prompts::DRAFT_SYSTEM, &prompts::draft_preamble(label))?;
+        let lines = source.lines().count();
+        let preamble = prompts::draft_preamble(label, lines, prompts::draft_target_lines(lines));
+        let prompt = self.prompt(source, prompts::DRAFT_SYSTEM, &preamble)?;
         // The ceiling is the source's own length: a draft that has to come out
         // smaller has no business being longer, and a fixed ceiling would either
         // cut off a large file or reserve a window a small one never uses.

@@ -51,6 +51,10 @@ new one. Every total you might need has already been computed for you.
 \"appears to\" or \"may be\", you are guessing: leave that candidate out instead.
 - A stream carrying neither `reduced_by_pct` nor `increased_by_pct` was NOT \
 measurable. Never call it unchanged, unaffected, safe or free.
+- Never promise that an action costs nothing. \"without risk\", \"no impact\", \
+\"without affecting anything\" and \"no downside\" are claims about what did \
+NOT happen, and nothing in the data measures that. Say what the action saves \
+and stop there.
 - Name what each pick is about. A rationale that names none of the candidate's \
 `about` entries explains nothing.
 - Fewer, sharper picks beat more. An empty `picks` array is a correct answer.";
@@ -142,14 +146,33 @@ markers and with nothing before or after them.";
 ///
 /// Names the file so the model knows what it is editing. The label is never
 /// trusted back: nothing the model returns is read as a path.
-pub fn draft_preamble(label: &str) -> String {
+///
+/// `lines` is the source's line count and `target` is the ceiling the draft has
+/// to come in under. Both are stated because "shorter by at least a tenth" is a
+/// ratio, and a 4B asked for a ratio returns the file it was given: on a live
+/// run against a 10,137-byte CLAUDE.md the first version of this prompt got back
+/// 10,138 bytes. With the line budget the same model and the same file produced
+/// 9,762, which is a real cut and still under the shrink rule's bar, so that
+/// candidate demotes. Saying the same thing again in [`DRAFT_SYSTEM`] was tried
+/// and changed the output by not one byte, which is why it is not there: how
+/// much a 4B will actually cut is a model-quality question, and the guard is
+/// what makes being wrong about it safe.
+pub fn draft_preamble(label: &str, lines: usize, target: usize) -> String {
     format!(
         "\
-That was {label}, in full.
+That was {label}, in full: {lines} lines.
 
-Write the shortened version. It has to be shorter by at least a tenth, and \
-preferably more. Everything the user still relies on stays; everything that \
-repeats goes.
+Write the shortened version. It must be at most {target} lines. Copying the \
+file back is a failure, and so is trimming a word here and there: {lines} lines \
+have to become {target} or fewer.
+
+What to cut, in order:
+  1. any instruction stated twice, in any wording: keep the clearer one
+  2. explanation of why a rule exists, where the rule survives without it
+  3. examples of a rule that is already unambiguous
+  4. anything that no longer describes this project
+
+What to keep: every instruction the user still relies on, in their words.
 
 Put the whole file between these two markers, exactly:
 
@@ -159,6 +182,15 @@ Put the whole file between these two markers, exactly:
 
 Nothing before the first marker and nothing after the second."
     )
+}
+
+/// The line ceiling a draft of a `lines`-line source has to come in under.
+///
+/// Aimed well past the >= 10% the guard enforces: a model told to cut a tenth
+/// cuts nothing, and a rewrite that only just clears the bar is not worth a diff
+/// review. The guard is still the only thing that decides acceptance.
+pub fn draft_target_lines(lines: usize) -> usize {
+    (lines * 3 / 4).max(1)
 }
 
 /// The markers a draft comes back between.
@@ -257,7 +289,7 @@ mod tests {
     /// The parser looks for the markers the prompt asked for.
     #[test]
     fn the_draft_prompt_shows_the_sentinels_the_parser_looks_for() {
-        let prompt = draft_preamble("your global CLAUDE.md");
+        let prompt = draft_preamble("your global CLAUDE.md", 120, draft_target_lines(120));
         assert!(prompt.contains(DRAFT_OPEN), "{prompt}");
         assert!(prompt.contains(DRAFT_CLOSE), "{prompt}");
         assert!(prompt.contains("your global CLAUDE.md"), "{prompt}");
