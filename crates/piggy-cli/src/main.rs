@@ -1266,7 +1266,7 @@ fn time_seed() -> u64 {
 // insights
 // ---------------------------------------------------------------------------
 
-/// Print ledger findings. Arithmetic on observed tokens only — no predictions,
+/// Print ledger findings. Arithmetic on observed tokens only - no predictions,
 /// and an empty list is a real answer, not a failure.
 fn cmd_insights(since: Option<&str>, json: bool) -> Result<()> {
     let home = config::piggy_home();
@@ -1590,7 +1590,7 @@ fn cmd_ledger(since: Option<&str>, top_projects: usize, json: bool) -> Result<()
 /// Print the task table: per-project spend joined to the outcome signal.
 ///
 /// The ledger says what the tokens bought. This says which project bought it,
-/// how many prompts it took, and how often the tools failed — the one column
+/// how many prompts it took, and how often the tools failed - the one column
 /// that is an outcome rather than a cost.
 fn cmd_tasks(period: Period, top_projects: usize, json: bool) -> Result<()> {
     let home = config::piggy_home();

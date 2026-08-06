@@ -271,7 +271,7 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
     let settings_path = config::claude_settings_path();
     let loaded = match settings::load(&settings_path) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // unreadable settings — nothing to scan
+        Err(_) => return Ok(()), // unreadable settings - nothing to scan
     };
     let Some(enabled) = loaded
         .value
@@ -356,7 +356,7 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
 
 /// Names of skill directories under `~/.claude/skills` that a Piggy saver
 /// installed, taken from the files each installed saver recorded in
-/// `state.json`. Empty when state is unreadable — a scan never fails on it.
+/// `state.json`. Empty when state is unreadable - a scan never fails on it.
 fn piggy_owned_skill_dirs() -> std::collections::BTreeSet<String> {
     let skills_dir = config::claude_skills_dir();
     let Ok(state) = PiggyState::load() else {
@@ -379,7 +379,7 @@ fn piggy_owned_skill_dirs() -> std::collections::BTreeSet<String> {
 
 /// Surface the user's own hooks from `settings.json` (a spec'd data source).
 ///
-/// Hooks are the one source Piggy cannot usage-measure — they fire on events
+/// Hooks are the one source Piggy cannot usage-measure - they fire on events
 /// rather than appearing as tool calls, and unlike MCP servers / plugins / skills
 /// they cost **no** per-request context tokens. So they are listed as
 /// informational only and never auto-recommended for removal. Piggy-owned hooks
@@ -388,7 +388,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
     let settings_path = config::claude_settings_path();
     let loaded = match settings::load(&settings_path) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // unreadable settings — nothing to scan
+        Err(_) => return Ok(()), // unreadable settings - nothing to scan
     };
     let Some(hooks) = loaded.value.get("hooks").and_then(Value::as_object) else {
         return Ok(());
@@ -424,7 +424,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
                 cost_basis: COST_BASIS_ESTIMATE.into(),
                 recommend_disable: false,
                 scope_to: None,
-                reason: "hook — fires on events, not usage-measurable and costs no context tokens (informational)".into(),
+                reason: "hook - fires on events, not usage-measurable and costs no context tokens (informational)".into(),
             });
         }
     }
@@ -472,7 +472,7 @@ pub fn apply(
         "plugin" => disable_plugin(state, &item)?,
         "skill" => disable_skill(state, &item)?,
         "hook" => bail!(
-            "hooks are listed for information only and are not removable via sweep — edit them in Claude's settings yourself"
+            "hooks are listed for information only and are not removable via sweep - edit them in Claude's settings yourself"
         ),
         other => bail!("cannot disable unknown sweep kind '{other}'"),
     }
