@@ -101,21 +101,45 @@ Turns Sweep's schema-size heuristic into a measured number.
 
 ## LLM pass (advisor/mod.rs)
 
-- New `suggest()` beside `annotate()`. Input: facts v2 + the candidate list. Output:
-  GBNF-grammar-constrained JSON: ordered candidate ids, optional per-project bundles, a
-  rationale string per pick, and for `ClaudemdTrim` targets a drafted replacement.
-- Guard v2 (guard.rs), all deterministic:
+- New `suggest()` beside `annotate()`. Input: facts v2 + the candidate list. Output: JSON
+  with ordered candidate ids, optional per-project bundles, a rationale string per pick,
+  and for `ClaudemdTrim` targets a drafted replacement.
+  - **No GBNF grammar (M5.4 clarification of the line this replaces).** The grammar API
+    exists in the pinned llama-cpp-2, but `llama_sampler_sample` accepts the sampled token
+    inside C++ (`llama.cpp/src/llama-sampler.cpp:870`) before Rust regains control, and
+    that internal accept is not the try/catch-wrapped one the sys crate exposes. So the
+    end-of-generation check that would make a grammar safe cannot be placed anywhere
+    useful, and `llama-grammar.cpp:1428-1435` remains an uncatchable `GGML_ABORT` that
+    takes the menu bar process down. What ships instead: constrained prompting, a strict
+    parser, and one bounded retry. The grammar text and the manual sampling protocol that
+    would be required are kept in `advisor/prompts.rs` behind `const GRAMMAR: bool = false`.
+  - The drafting call returns the file between two sentinels rather than inside JSON: a
+    markdown file in a JSON string makes escaping the failure mode rather than the writing.
+- Guard v2 (guard.rs + advisor/draft.rs), all deterministic:
   - any candidate id not in the input list is dropped;
-  - the existing numbers allow-list applies to rationales; rationale > 280 chars is truncated;
+  - the existing numbers allow-list applies to rationales; rationale > 280 chars is
+    truncated at a whitespace boundary (before the allow-list runs, so a cut cannot invent
+    a number). **A rationale carrying a number that is not in facts drops the whole pick**
+    rather than stripping the number: a sentence with a numeral surgically removed no
+    longer says what it said, and the house copy beside it is a complete answer;
   - drafts must shrink the file >= 10%, introduce no path or URL absent from the source,
-    and keep headings a subset of the original (merges allowed). A failed check demotes the
-    candidate to deterministic presentation ("turn on the advisor for a drafted cleanup" /
-    findings list only). Nothing invalid ever reaches the UI.
-- Budget: runs on the existing low-priority advisor thread after indexing goes idle;
-  n_ctx 16384; max 1,024 generated tokens per call; drafting is one call per file, input
-  capped at 12k tokens, larger files drafted section-by-section by `##` heading.
+    keep headings a subset of the original (merges allowed), and **introduce no number
+    absent from the source** (so a rewrite cannot edit "cut this to 2,000 tokens" into
+    "3,000" inside the user's own guidance). A failed check demotes the candidate to
+    deterministic presentation ("turn on the advisor for a drafted cleanup" / findings list
+    only). Nothing invalid ever reaches the UI.
+- Budget: runs after indexing goes idle, on a detached worker at the macOS `utility` QoS
+  class with half the cores; n_ctx 16384; max 1,024 generated tokens for the rank call.
+  Drafting is one call per file, larger files drafted section-by-section by `##` heading.
+  - **The drafting input cap is 6k tokens, not 12k (M5.4 correction).** A rewrite is the
+    same file again, so a 12,000-token input needs nearly 12,000 tokens of output and
+    24,000 does not fit a 16,384-token window at all. The drafting call's token ceiling is
+    likewise the source's own length rather than 1,024, which could not emit a whole file.
 - Caching: results keyed by facts hash; recompute on facts change or manual "Refresh
-  advice". Same facts, same advice.
+  advice". Same facts, same advice. **In memory only, one entry deep**: a draft is derived
+  from a CLAUDE.md's contents, and contents never enter the DB (see Facts v2), so an app
+  restart legitimately re-runs the pass. What persists is provenance: `advice.facts_hash`
+  records which fact sheet the advisor was shown.
 
 ## Advice surface (app)
 
@@ -209,8 +233,8 @@ Turns Sweep's schema-size heuristic into a measured number.
   (exceeds timeout), `garbage-server.mjs` (non-JSON output) - probe must classify all
   three correctly and never hang.
 - Guard: draft containing a path/URL absent from source is rejected; candidate id outside
-  the allow-list is dropped; rationale number not in facts is stripped; draft growing the
-  file is rejected.
+  the allow-list is dropped; rationale number not in facts drops the pick (see LLM pass);
+  draft growing the file is rejected.
 - Engine: ClaudemdTrim apply then restore leaves the file byte-identical; ServerScope
   apply then restore leaves `~/.claude.json` structurally identical with user edits
   preserved.

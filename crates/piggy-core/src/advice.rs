@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::advisor::guard;
 use crate::attribution::{self, Badge, Reading, SaverAttribution, Stream, StreamStat};
 use crate::claudemd::{self, ClaudemdReport, FindingKind, ProjectMcpServers};
 use crate::config;
@@ -582,8 +583,17 @@ pub struct Inputs {
 ///   dismissal that suppressed it is retired so it cannot suppress twice.
 pub fn generate(store: &mut Store, opts: &GenerateOptions) -> Result<Vec<Candidate>> {
     let inputs = load_inputs(store, opts)?;
-    let mut candidates = generate_from(&inputs);
+    reconcile(store, generate_from(&inputs))
+}
 
+/// The table half of [`generate`], for a caller that has already loaded the
+/// inputs.
+///
+/// The advice pass builds its fact sheet from the same [`Inputs`] the
+/// generators ran over, and [`load_inputs`] is the app's heaviest read (a sweep
+/// scan, a CLAUDE.md scan, and a bootstrap per saver). Loading it twice to get
+/// the same answer twice is the one thing this split exists to prevent.
+pub fn reconcile(store: &mut Store, mut candidates: Vec<Candidate>) -> Result<Vec<Candidate>> {
     // Biggest number first, ties on id: the same facts must produce the same
     // list in the same order, because the UI shows the top few. Not "biggest
     // saving first" - a `ClaudemdTrim` row's figure is a burden, so any surface
@@ -662,6 +672,56 @@ pub fn generate_from(inputs: &Inputs) -> Vec<Candidate> {
     out.extend(claudemd_trim(inputs));
     out.extend(saver_mix(inputs));
     out
+}
+
+/// Reorder `candidates` by the accepted picks, keeping everything the model did
+/// not rank in the deterministic order it already had.
+///
+/// The LLM proposes and the engine disposes: this moves rows and never adds,
+/// removes or edits one. A candidate the model ignored is still a candidate, and
+/// it keeps its place relative to the other unranked ones, so an advisor that
+/// returns nothing produces exactly the fallback order.
+pub fn apply_llm_order(candidates: &mut [Candidate], picks: &[guard::Pick]) {
+    let rank: BTreeMap<&str, usize> = picks
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id.as_str(), i))
+        .collect();
+    // Stable, so the unranked tail comes through untouched.
+    candidates.sort_by_key(|c| {
+        rank.get(c.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+}
+
+/// Attach a validated draft to a [`ActionKind::ClaudemdTrim`] candidate.
+///
+/// Refuses any other kind, so nothing else can acquire content it will not be
+/// diffed for. Setting [`Candidate::new_content`] is what clears
+/// [`Candidate::blocked`] and lets [`apply`] write the file, which is why this
+/// is the one door and why the draft has to have been through
+/// [`crate::advisor::draft::accept_draft`] before it gets here.
+///
+/// `had_bom` comes from the [`claudemd::FileText`] the draft was made from,
+/// passed in rather than re-read: [`apply`] re-checks the content hash anyway,
+/// so a file that moved underneath the draft is refused rather than overwritten.
+pub fn attach_draft(candidate: &mut Candidate, draft: &str, had_bom: bool) -> Result<()> {
+    if candidate.kind != ActionKind::ClaudemdTrim {
+        bail!(
+            "a drafted rewrite belongs only to a {} candidate, not to {}",
+            ActionKind::ClaudemdTrim.as_str(),
+            candidate.kind.as_str()
+        );
+    }
+    if draft.trim().is_empty() {
+        bail!("the drafted rewrite of {} is empty", candidate.target);
+    }
+    candidate.new_content = Some(match had_bom {
+        true => format!("{BOM}{draft}"),
+        false => draft.to_string(),
+    });
+    Ok(())
 }
 
 /// What a list of candidates is worth a month: the savings, and nothing else.
@@ -2314,7 +2374,7 @@ fn list_briefly(items: &[String]) -> String {
 /// `str::lines()` with `\n` would quietly rewrite every line ending in the file.
 /// Index `i` here is the same line `i` that `str::lines()` yields, which is what
 /// the detectors report positions in.
-fn lines_with_endings(text: &str) -> Vec<&str> {
+pub(crate) fn lines_with_endings(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for (i, _) in text.match_indices('\n') {

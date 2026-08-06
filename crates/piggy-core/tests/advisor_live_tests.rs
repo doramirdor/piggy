@@ -201,3 +201,209 @@ fn explains_savers_from_real_attribution() {
         assert!(allow.offenders(&a.why).is_empty(), "{}", a.why);
     }
 }
+
+// ---------------------------------------------------------------------------
+// M5.4: the advice pass
+// ---------------------------------------------------------------------------
+
+/// The rank pass, against the real database and the real model.
+///
+/// The one thing the default-build suite cannot show: whether a 4B, given the
+/// whole structured picture, ranks a real candidate list in an order a person
+/// would recognise. The guard can prove no number was invented; only a reader
+/// can tell whether the sentences are worth printing.
+///
+/// ```text
+/// cargo test -p piggy-core --features local-llm,metal --test advisor_live_tests \
+///   -- --ignored --nocapture suggest_survives_the_guard
+/// ```
+#[test]
+#[ignore = "runs a real model against the developer's own database"]
+fn suggest_survives_the_guard() {
+    use piggy_core::advice;
+    use piggy_core::advisor::facts::{AdviceInput, Facts as F};
+
+    let id = std::env::var("PIGGY_ADVISOR_TEST_MODEL")
+        .unwrap_or_else(|_| "qwen3-4b-instruct-2507".to_string());
+    let spec = model(&id).unwrap_or_else(|| panic!("no catalog model named {id}"));
+    download::verify(spec).expect("weights present and verified");
+
+    let home = config::piggy_home();
+    let mut store = Store::open(&home).expect("open the real store");
+    let pricing = Pricing::load(&home);
+    let catalog = piggy_core::Catalog::embedded();
+    let state = piggy_core::PiggyState::load().expect("state");
+    let opts = advice::GenerateOptions::new(&catalog, &pricing, &state);
+
+    let inputs = advice::load_inputs(&mut store, &opts).expect("load the generators' inputs");
+    let candidates = advice::generate_from(&inputs);
+    let ledger = store
+        .ledger(piggy_core::Period::Month.cutoff().as_deref(), &pricing)
+        .expect("ledger");
+    let found = piggy_core::insights(&ledger);
+    let facts = F::advice(&AdviceInput {
+        ledger: &ledger,
+        trend: None,
+        insights: &found,
+        sweep: Some(&inputs.sweep),
+        manifests: &inputs.manifests,
+        server_usage: &inputs.server_usage,
+        claudemd: &inputs.claudemd,
+        project_mcp: &inputs.project_mcp,
+        savers: &[],
+        headline: None,
+        candidates: &candidates,
+    });
+
+    let allow = Allowlist::from_facts(&facts);
+    println!(
+        "advice sheet: {} candidates, {} chars (~{} tokens), {} allowed numbers, hash {}",
+        facts.candidate_ids.len(),
+        facts.prompt_json().len(),
+        facts.prompt_json().len() / 3,
+        allow.len(),
+        facts.hash()
+    );
+    assert!(
+        !facts.candidate_ids.is_empty(),
+        "no candidate to rank on this machine"
+    );
+
+    let t = Instant::now();
+    let advisor = Advisor::load(spec).expect("load the model");
+    println!("loaded in {:?}", t.elapsed());
+
+    let t = Instant::now();
+    let raw = advisor.suggest_raw(&facts).expect("generate");
+    println!("generated in {:?}\n--- raw ---\n{raw}\n-----------", t.elapsed());
+
+    let accepted = advisor.suggest(&facts).expect("guard");
+    println!(
+        "\n{} pick(s) survived, {} bundle(s):",
+        accepted.picks.len(),
+        accepted.bundles.len()
+    );
+    for p in &accepted.picks {
+        println!("  [{}]\n    {}", p.id, p.rationale);
+    }
+    for b in &accepted.bundles {
+        println!("  bundle {}: {:?}", b.project, b.ids);
+    }
+
+    for p in &accepted.picks {
+        assert!(
+            facts.candidate_ids.contains(&p.id),
+            "a pick named a candidate that is not on the sheet: {}",
+            p.id
+        );
+        assert!(allow.offenders(&p.rationale).is_empty(), "{}", p.rationale);
+    }
+}
+
+/// A real rewrite of the developer's own largest CLAUDE.md.
+///
+/// Prints the shrink percentage and any rejection, because both are the answer:
+/// a draft that the guard refuses is a designed state, and knowing *which* rule
+/// refused it is the difference between a prompt problem and a rule problem.
+///
+/// ```text
+/// cargo test -p piggy-core --features local-llm,metal --test advisor_live_tests \
+///   -- --ignored --nocapture a_real_draft_survives_the_guard
+/// ```
+#[test]
+#[ignore = "runs a real model against the developer's own CLAUDE.md files"]
+fn a_real_draft_survives_the_guard() {
+    use piggy_core::advisor::draft;
+    use piggy_core::claudemd;
+
+    let id = std::env::var("PIGGY_ADVISOR_TEST_MODEL")
+        .unwrap_or_else(|_| "qwen3-4b-instruct-2507".to_string());
+    let spec = model(&id).unwrap_or_else(|| panic!("no catalog model named {id}"));
+    download::verify(spec).expect("weights present and verified");
+
+    let home = config::piggy_home();
+    let mut store = Store::open(&home).expect("open the real store");
+    let report = claudemd::scan(&mut store).expect("scan the real CLAUDE.md files");
+    let biggest = report
+        .files
+        .iter()
+        .max_by_key(|f| f.file.est_tokens)
+        .expect("at least one CLAUDE.md on this machine");
+    let text = claudemd::read_file_text(
+        std::path::Path::new(&biggest.file.path),
+        biggest.file.project.clone(),
+    )
+    .expect("read it back");
+    println!(
+        "drafting {} ({} bytes, ~{} estimated tokens)",
+        biggest.file.path, text.bytes, biggest.file.est_tokens
+    );
+
+    let t = Instant::now();
+    let advisor = Advisor::load(spec).expect("load the model");
+    println!("loaded in {:?}", t.elapsed());
+
+    let t = Instant::now();
+    let raw = advisor.draft_raw("this file", &text.text).expect("generate");
+    println!("generated in {:?}, {} raw chars", t.elapsed(), raw.len());
+
+    match draft::accept_draft(&text.text, &raw) {
+        Ok(drafted) => {
+            let shrink = 100.0 - (drafted.len() as f64 / text.text.len() as f64) * 100.0;
+            println!("accepted: {} -> {} bytes ({shrink:.1}% smaller)", text.text.len(), drafted.len());
+            println!("--- draft ---\n{drafted}\n-------------");
+            assert!(drafted.len() * 10 <= text.text.len() * 9);
+        }
+        Err(e) => {
+            println!("refused: {}", e.reason());
+            println!("--- raw ---\n{raw}\n-----------");
+        }
+    }
+}
+
+/// The advisor's own tokenizer, loaded without the advisor.
+///
+/// Two properties, and the second is the one that decides whether `piggy probe`
+/// can use it at all: the label has to be the model id (anything else flips the
+/// UI's estimate badge), and a `vocab_only` load has to be fast enough to sit in
+/// front of a probe run rather than being a second and a half of model load.
+///
+/// ```text
+/// cargo test -p piggy-core --features local-llm,metal --test advisor_live_tests \
+///   -- --ignored --nocapture the_model_tokenizer_counts_a_real_schema
+/// ```
+#[test]
+#[ignore = "loads real weights"]
+fn the_model_tokenizer_counts_a_real_schema() {
+    use piggy_core::advisor::tokenizer::ModelTokenizer;
+    use piggy_core::probe::{BytesEstimate, SchemaTokenizer};
+
+    let id = std::env::var("PIGGY_ADVISOR_TEST_MODEL")
+        .unwrap_or_else(|_| "qwen3-4b-instruct-2507".to_string());
+    let spec = model(&id).unwrap_or_else(|| panic!("no catalog model named {id}"));
+    download::verify(spec).expect("weights present and verified");
+
+    let t = Instant::now();
+    let tokenizer = ModelTokenizer::load(spec).expect("load the vocabulary");
+    let load = t.elapsed();
+    println!("vocab-only load in {load:?}");
+
+    let schema = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp/ok-server.mjs"),
+    )
+    .expect("a fixture to count");
+    let real = tokenizer.count(&schema);
+    let estimated = BytesEstimate.count(&schema);
+    println!("{} bytes: {real} tokens measured, {estimated} estimated", schema.len());
+
+    assert_eq!(tokenizer.label(), spec.id, "the label is the model id");
+    assert!(real > 0);
+    // Within 2x of the shipped estimate in both directions. Further apart than
+    // that and either the estimate or the load is wrong, and both are worth
+    // knowing about.
+    assert!(real * 2 > estimated && estimated * 2 > real, "{real} against {estimated}");
+    assert!(
+        load < std::time::Duration::from_secs(2),
+        "a vocab-only load has to be cheap enough to sit in front of a probe: {load:?}"
+    );
+}

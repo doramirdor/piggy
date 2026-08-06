@@ -24,12 +24,17 @@
 //! KV cache, which for a 4B model at 8k context is larger than most people
 //! expect, and [`fits`] refuses anything the host cannot hold.
 
+pub mod cache;
 pub mod download;
+pub mod draft;
 pub mod facts;
 pub mod guard;
+pub mod prompts;
 
 #[cfg(feature = "local-llm")]
 pub mod llama;
+#[cfg(feature = "local-llm")]
+pub mod tokenizer;
 
 use std::path::PathBuf;
 
@@ -63,11 +68,23 @@ pub struct AdvisorModel {
     /// `None` means every layer is global.
     pub sliding: Option<(u32, u32)>,
 
-    /// Context we actually run at. This is a **budget decision, not a model
-    /// limit**: the facts payload is bounded (see [`facts`]), so paying for
-    /// 262k of KV cache we will never fill would be pure waste.
+    /// Context the **popover** passes run at. This is a **budget decision, not
+    /// a model limit**: the M4 facts payload is bounded (see [`facts`]), so
+    /// paying for 262k of KV cache we will never fill would be pure waste.
     pub ctx: u32,
+
+    /// Context the M5 advice pass runs at.
+    ///
+    /// A second field rather than a bigger [`Self::ctx`], so the two popover
+    /// passes keep their cheap window: they answer while someone watches, and a
+    /// 16k KV cache to hold a 2,000-token sheet is latency for nothing. The
+    /// advice sheet carries the whole structured picture plus the candidate
+    /// list, and drafting sends a file, so 4k is a window neither of them fits.
+    pub advice_ctx: u32,
 }
+
+/// The window the advice and drafting calls run at (docs/m5-spec.md).
+pub const ADVICE_CTX: u32 = 16_384;
 
 /// Bytes per cached element with a `q8_0` KV cache: 32 values in a 32-byte
 /// block plus a 2-byte scale. We always quantize the KV cache, because at f16 a
@@ -81,27 +98,39 @@ const COMPUTE_FLOOR: u64 = 256 * 1024 * 1024;
 const COMPUTE_SHARE: f64 = 0.05;
 
 impl AdvisorModel {
-    /// Bytes of KV cache at [`Self::ctx`], accounting for sliding-window
-    /// attention.
+    /// Bytes of KV cache at this model's **largest** window, accounting for
+    /// sliding-window attention.
     ///
     /// This is the term people forget. Qwen3-4B is 36 fully-global layers at 8
     /// KV heads by 128 dims, which is 144 KiB of cache *per token*: 1.2 GB at 8k
     /// context, on top of 2.5 GB of weights. Gemma 3 4B is the same weight class
     /// but caps 29 of its 34 layers at a 1024-token window, so the same context
     /// costs about a quarter as much.
+    ///
+    /// The larger of the two windows, because the RAM gate decides whether a
+    /// model is offered for download at all and the machine has to hold the pass
+    /// that costs the most. Sizing the gate on the popover window and then
+    /// running the advice pass at four times the context would make the gate
+    /// lie.
     pub fn kv_bytes(&self) -> u64 {
+        self.kv_bytes_at(self.ctx.max(self.advice_ctx))
+    }
+
+    /// KV bytes at an explicit window. Public so the geometry can be asserted at
+    /// one window without the gate's `max` hiding the growth curve.
+    pub fn kv_bytes_at(&self, ctx: u32) -> u64 {
         // Both K and V, per layer, per token.
         let per_layer_token =
             2.0 * self.kv_heads as f64 * self.head_dim as f64 * KV_BYTES_PER_ELEM;
 
         let layer_tokens = match self.sliding {
-            None => self.layers as u64 * self.ctx as u64,
+            None => self.layers as u64 * ctx as u64,
             Some((window, pattern)) => {
                 // Layer `i` is global when `(i + 1) % pattern == 0`, so a
                 // 34-layer model with pattern 6 has 5 global layers.
                 let global = (self.layers / pattern.max(1)) as u64;
                 let local = self.layers as u64 - global;
-                global * self.ctx as u64 + local * self.ctx.min(window) as u64
+                global * ctx as u64 + local * ctx.min(window) as u64
             }
         };
         (layer_tokens as f64 * per_layer_token) as u64
@@ -171,6 +200,7 @@ pub const CATALOG: &[AdvisorModel] = &[
         // model would spend seconds of local generation before its first
         // visible token, which is wrong for a menu bar popover.
         ctx: 4096,
+        advice_ctx: ADVICE_CTX,
     },
     AdvisorModel {
         id: "gemma-3-4b-it",
@@ -187,6 +217,7 @@ pub const CATALOG: &[AdvisorModel] = &[
         // Sliding-window attention makes context nearly free here, so this is
         // the model to grow if follow-up questions over the whole ledger land.
         ctx: 8192,
+        advice_ctx: ADVICE_CTX,
     },
 ];
 

@@ -834,6 +834,22 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Stamp which fact sheet the advisor was shown when it ranked this
+    /// candidate, returning whether a row was updated.
+    ///
+    /// The one field the generator could not fill: it does not know what the
+    /// advisor saw. [`Self::insert_advice`] is `INSERT OR IGNORE` and never
+    /// overwrites, so the column stays NULL for every row written before a
+    /// ranking pass ran over it, which is the honest value for "no model has
+    /// looked at this".
+    pub fn set_advice_facts_hash(&mut self, id: &str, facts_hash: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE advice SET facts_hash = ?2 WHERE id = ?1",
+            params![id, facts_hash],
+        )?;
+        Ok(n > 0)
+    }
+
     /// One advice row by id.
     pub fn advice(&self, id: &str) -> Result<Option<AdviceRow>> {
         let row = self

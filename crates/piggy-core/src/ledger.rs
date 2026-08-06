@@ -235,16 +235,39 @@ impl Store {
     /// `since` filters on `sessions.started_at` (an RFC3339 prefix compares
     /// correctly as a string); `None` covers all history.
     pub fn ledger(&self, since: Option<&str>, pricing: &Pricing) -> Result<Ledger> {
+        self.ledger_between(since, None, pricing)
+    }
+
+    /// The ledger over a half-open window `[since, until)`.
+    ///
+    /// The upper bound exists for the advice sheet's floor trend, which needs
+    /// two **adjacent** windows: a 7-day window nested inside a 30-day one damps
+    /// exactly the recent change a trend is there to show, because the recent
+    /// sessions are in both sides of the comparison.
+    ///
+    /// `until` is exclusive so two windows that share a boundary count every
+    /// session exactly once.
+    pub fn ledger_between(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+        pricing: &Pricing,
+    ) -> Result<Ledger> {
         let cutoff = since.unwrap_or("");
+        // Above every RFC3339 timestamp under SQLite's default byte collation:
+        // a timestamp starts with a digit, and `~` is 0x7E. An open upper bound
+        // is then the same query with a bound that nothing fails.
+        let end = until.unwrap_or("~");
         let mut stmt = self.conn.prepare(
             "SELECT c.kind, SUM(c.tokens), SUM(c.n)
              FROM session_context c
              JOIN sessions s ON s.session_id = c.session_id
              WHERE COALESCE(s.started_at, '') >= ?1
+               AND COALESCE(s.started_at, '') < ?2
              GROUP BY c.kind",
         )?;
         let mut rows: Vec<LedgerRow> = stmt
-            .query_map([cutoff], |r| {
+            .query_map([cutoff, end], |r| {
                 Ok(LedgerRow {
                     kind: r.get(0)?,
                     tokens: r.get::<_, i64>(1)? as u64,
@@ -268,11 +291,12 @@ impl Store {
                    FROM session_context GROUP BY session_id) f
                ON f.session_id = s.session_id
              WHERE COALESCE(s.started_at, '') >= ?1
+               AND COALESCE(s.started_at, '') < ?4
              GROUP BY COALESCE(s.project, '(unknown)')",
         )?;
         let mut projects: Vec<ProjectRow> = stmt
             .query_map(
-                rusqlite::params![cutoff, CTX_FLOOR, format!("{CTX_FLOOR_PREFIX}%")],
+                rusqlite::params![cutoff, CTX_FLOOR, format!("{CTX_FLOOR_PREFIX}%"), end],
                 |r| {
                     Ok(ProjectRow {
                         project: r.get(0)?,
@@ -300,11 +324,12 @@ impl Store {
              FROM session_models sm
              JOIN sessions s ON s.session_id = sm.session_id
              WHERE COALESCE(s.started_at, '') >= ?1
+               AND COALESCE(s.started_at, '') < ?2
              GROUP BY sm.model",
         )?;
         let mut cost_units = 0.0f64;
         let mut all = crate::ModelTokens::default();
-        let per_model = stmt.query_map([cutoff], |r| {
+        let per_model = stmt.query_map([cutoff, end], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 crate::ModelTokens {

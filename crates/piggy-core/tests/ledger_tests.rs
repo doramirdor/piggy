@@ -16,6 +16,20 @@ fn insert(
     msgs: u64,
     ctx: &[(&str, u64)],
 ) {
+    insert_at(store, pricing, id, project, msgs, ctx, "2026-07-10T00:00:00.000Z");
+}
+
+/// The same, with an explicit start timestamp, for the windowed reads.
+#[allow(clippy::too_many_arguments)]
+fn insert_at(
+    store: &mut Store,
+    pricing: &Pricing,
+    id: &str,
+    project: &str,
+    msgs: u64,
+    ctx: &[(&str, u64)],
+    started_at: &str,
+) {
     let mut models = BTreeMap::new();
     models.insert(
         "claude-sonnet-4-5".to_string(),
@@ -38,8 +52,8 @@ fn insert(
         client: None,
         project_path: Some(project.to_string()),
         git_branch: None,
-        first_ts: Some("2026-07-10T00:00:00.000Z".into()),
-        last_ts: Some("2026-07-10T01:00:00.000Z".into()),
+        first_ts: Some(started_at.to_string()),
+        last_ts: Some(started_at.to_string()),
         models,
         n_assistant_msgs: msgs,
         n_user_msgs: msgs,
@@ -184,4 +198,53 @@ fn headroom_is_available_not_achieved_and_stays_quiet_when_trivial() {
     insert(&mut store3, &pricing, "c", "/work", 10, &[(CTX_FLOOR, 500), (CTX_CONVERSATION, 500)]);
     assert_eq!(store3.ledger(None, &pricing).unwrap().headroom(), None);
     assert_eq!(store3.ledger(Some("2099-01-01"), &pricing).unwrap().headroom(), None);
+}
+
+/// Two adjacent windows have to partition the sessions between them.
+///
+/// The floor trend is the reason `ledger_between` exists: a 7-day window nested
+/// inside a 30-day one puts the recent sessions on both sides of the comparison
+/// and damps exactly the change the trend is there to show. `until` is exclusive
+/// so a session on the boundary is counted once, in the later window.
+#[test]
+fn adjacent_ledger_windows_count_every_session_once() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+
+    insert_at(&mut store, &pricing, "old", "/work", 4, &[(CTX_FLOOR, 1_000)],
+              "2026-07-01T00:00:00.000Z");
+    // Exactly on the boundary: the later window's lower bound is inclusive.
+    insert_at(&mut store, &pricing, "edge", "/work", 4, &[(CTX_FLOOR, 2_000)],
+              "2026-07-10T00:00:00.000Z");
+    insert_at(&mut store, &pricing, "new", "/work", 4, &[(CTX_FLOOR, 4_000)],
+              "2026-07-20T00:00:00.000Z");
+
+    let split = "2026-07-10T00:00:00.000Z";
+    let prior = store.ledger_between(Some("2026-07-01T00:00:00.000Z"), Some(split), &pricing).unwrap();
+    let recent = store.ledger_between(Some(split), None, &pricing).unwrap();
+
+    assert_eq!(prior.total_tokens(), 1_000, "only the session before the split");
+    assert_eq!(recent.total_tokens(), 6_000, "the boundary session and the one after it");
+    assert_eq!(prior.projects[0].sessions, 1);
+    assert_eq!(recent.projects[0].sessions, 2);
+
+    // And the two halves are exactly the whole.
+    let all = store.ledger_between(Some("2026-07-01T00:00:00.000Z"), None, &pricing).unwrap();
+    assert_eq!(all.total_tokens(), prior.total_tokens() + recent.total_tokens());
+}
+
+/// An open upper bound reads the same as no upper bound at all, undated
+/// sessions included.
+#[test]
+fn an_open_upper_bound_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let pricing = Pricing::embedded();
+    let mut store = Store::open(home.path()).unwrap();
+    insert(&mut store, &pricing, "a", "/work", 4, &[(CTX_FLOOR, 1_000)]);
+
+    let plain = store.ledger(None, &pricing).unwrap();
+    let bounded = store.ledger_between(None, None, &pricing).unwrap();
+    assert_eq!(plain.total_tokens(), bounded.total_tokens());
+    assert_eq!(plain.projects.len(), bounded.projects.len());
 }

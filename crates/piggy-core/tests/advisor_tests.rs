@@ -32,7 +32,11 @@ fn kv_cache_matches_the_hand_calculation() {
     // 2 (K+V) * 8 kv heads * 128 dims = 2048 elements per layer per token,
     // at 34/32 bytes for a q8_0 cache = 2176 bytes, * 36 layers * 4096 ctx.
     let expected = 2176u64 * 36 * 4096;
-    assert_eq!(m.kv_bytes(), expected);
+    assert_eq!(m.kv_bytes_at(4096), expected);
+    // And the gate reads the LARGER of the model's two windows, because the
+    // machine has to hold the pass that costs the most: M5's advice pass runs at
+    // 16,384, not at the popover's 4,096.
+    assert_eq!(m.kv_bytes(), 2176u64 * 36 * 16_384);
     // Sanity against the number that motivated quantizing the cache at all:
     // the same geometry at f16 is 144 KiB per token.
     assert_eq!(2 * 8 * 128 * 2 * 36, 147_456);
@@ -58,12 +62,10 @@ fn sliding_layers_stop_growing_with_context() {
     // A model whose local layers are already saturated pays only for its global
     // layers as context grows. This is the property that makes Gemma the one to
     // grow if follow-up questions ever land.
-    let base = AdvisorModel {
-        ctx: 8192,
-        ..*model("gemma-3-4b-it").unwrap()
-    };
-    let doubled = AdvisorModel { ctx: 16384, ..base };
-    let growth = doubled.kv_bytes() as f64 / base.kv_bytes() as f64;
+    // Measured at an explicit window: `kv_bytes` reports the larger of a
+    // model's two, which would hide the growth curve this test is about.
+    let gemma = model("gemma-3-4b-it").unwrap();
+    let growth = gemma.kv_bytes_at(16384) as f64 / gemma.kv_bytes_at(8192) as f64;
     assert!(
         growth < 1.8,
         "doubling context should cost far less than 2x, got {growth:.2}x"
@@ -74,9 +76,13 @@ fn sliding_layers_stop_growing_with_context() {
 fn peak_includes_weights_kv_and_compute() {
     let m = qwen4b();
     assert!(m.peak_bytes() > m.bytes + m.kv_bytes());
-    // The claim that motivated the 4k context choice: this fits in ~3.1 GB.
+    // The gate is what the model costs at its LARGEST window, not its smallest.
+    // M5's advice pass runs at 16,384, which puts the 4B at ~4.05 GB: 2.50 of
+    // weights, 1.28 of KV, 0.27 of compute buffers. Sizing this on the popover's
+    // 4k window and then running the advice pass at four times the context is
+    // what would make the RAM gate lie.
     assert!(
-        m.peak_bytes() < 3_300_000_000,
+        m.peak_bytes() < 4_200_000_000,
         "4B peak was {} bytes",
         m.peak_bytes()
     );
