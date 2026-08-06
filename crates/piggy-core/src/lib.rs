@@ -10,6 +10,7 @@
 
 pub mod advisor;
 pub mod attribution;
+pub mod claudemd;
 pub mod cli_link;
 pub mod codex;
 pub mod config;
@@ -42,6 +43,7 @@ pub use advisor::{
 pub use attribution::{
     attribute, headline, Badge, Headline, HeadlineBaseline, SaverAttribution, Stream, StreamStat,
 };
+pub use claudemd::{ClaudemdReport, Finding, FindingKind, ProjectMcpServers, ScannedFile};
 pub use cli_link::LinkReport;
 pub use codex::parse_codex_file;
 pub use discovery::{DiscoveredRepo, DiscoveryCache};

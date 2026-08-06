@@ -12,6 +12,7 @@
 //!   * `report` - measured savings: per-saver attribution table + honest headline.
 //!   * `ledger` - where context tokens come from; exact, needs no A/B.
 //!   * `insights` - ledger findings, each with the lever that acts on it.
+//!   * `claudemd` - the CLAUDE.md inventory every session loads, and its findings.
 //!   * `holdout` - view or change the share of sessions that run with savers off.
 //!   * `discover` - token-savers found on GitHub (cached; `--refresh` pulls).
 //!   * `watch`  - index and tag new sessions live, in the foreground.
@@ -25,7 +26,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
     attribution::{self, Badge, HeadlineBaseline},
-    config, discovery, engine, parse_file,
+    claudemd, config, discovery, engine, parse_file,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -110,6 +111,12 @@ enum Cmd {
         /// Only consider sessions started on/after this date (e.g. `2026-07-01`).
         #[arg(long, value_name = "DATE")]
         since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The CLAUDE.md files every session loads: what they cost, and what is
+    /// wrong with them.
+    Claudemd {
         #[arg(long)]
         json: bool,
     },
@@ -216,6 +223,7 @@ fn main() -> Result<()> {
         Cmd::Backups => cmd_backups(),
         Cmd::Report { json } => cmd_report(json),
         Cmd::Insights { since, json } => cmd_insights(since.as_deref(), json),
+        Cmd::Claudemd { json } => cmd_claudemd(json),
         Cmd::Ledger {
             since,
             projects,
@@ -1066,6 +1074,162 @@ fn cmd_insights(since: Option<&str>, json: bool) -> Result<()> {
     println!("floor-component figures are bounded by content size; floor and");
     println!("conversation totals are exact.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// claudemd
+// ---------------------------------------------------------------------------
+
+/// Inventory the CLAUDE.md files Claude Code loads into every session, then
+/// print what each costs and what the detectors found in it.
+///
+/// The scan writes the inventory (sizes and hashes) to the database; file
+/// contents are read here and dropped. Every token figure is an estimate
+/// (bytes / 3.5 x observed sessions) and is labelled as one.
+fn cmd_claudemd(json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let report = claudemd::scan(&mut store)?;
+
+    if json {
+        let files: Vec<serde_json::Value> = report
+            .files
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.file.path,
+                    "scope": f.scope(),
+                    "project": f.file.project,
+                    "bytes": f.file.bytes,
+                    "estTokens": f.file.est_tokens,
+                    "sessions30d": f.sessions_30d,
+                    "estTokensMonth": f.est_tokens_month,
+                    "hash": f.file.hash,
+                    "mtimeNs": f.file.mtime_ns,
+                    "lastScanned": f.file.last_scanned,
+                    "findings": f.findings.iter().map(finding_json).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "files": files,
+            "estTokens": report.est_tokens(),
+            "estTokensMonth": report.est_tokens_month(),
+            "estimated": true,
+            "removed": report.removed,
+            "warnings": report.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if report.files.is_empty() {
+        println!("Piggy CLAUDE.md - no CLAUDE.md files found.");
+        println!();
+        println!("Piggy looks in ~/.claude (CLAUDE.md, rules/*.md) and in every project it");
+        println!("has indexed a session for. Run `piggy index` if this looks wrong.");
+        return Ok(());
+    }
+
+    println!(
+        "Piggy CLAUDE.md - {} file(s), ~{} tokens loaded, ~{} tokens/month (estimated)",
+        report.files.len(),
+        commafy(report.est_tokens().max(0) as u64),
+        commafy(report.est_tokens_month().max(0) as u64)
+    );
+    println!();
+    let headers = ["File", "Scope", "Bytes", "Est. tokens", "Sessions/30d", "Est. tokens/month"];
+    let rows: Vec<Vec<String>> = report
+        .files
+        .iter()
+        .map(|f| {
+            vec![
+                truncate_path(&f.file.path, 52),
+                f.scope().to_string(),
+                commafy(f.file.bytes.max(0) as u64),
+                format!("~{}", commafy(f.file.est_tokens.max(0) as u64)),
+                f.sessions_30d.to_string(),
+                format!("~{}", commafy(f.est_tokens_month.max(0) as u64)),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+
+    let n_findings = report.findings().count();
+    if n_findings == 0 {
+        println!();
+        println!("No dead references, duplicate blocks, or oversized files. Nothing to fix.");
+    } else {
+        println!();
+        println!("Findings - {n_findings} across {} file(s)", report.files.iter().filter(|f| !f.findings.is_empty()).count());
+        for f in report.files.iter().filter(|f| !f.findings.is_empty()) {
+            println!();
+            println!("{}", f.file.path);
+            for finding in &f.findings {
+                println!("  [{}] {}", finding.kind.as_str(), finding.claim);
+                println!("    {}", finding.detail);
+                println!("    → {}", finding.action);
+            }
+        }
+    }
+
+    for w in &report.warnings {
+        println!();
+        println!("skipped: {w}");
+    }
+    if !report.removed.is_empty() {
+        println!();
+        println!(
+            "{} inventory row(s) dropped for files that are gone.",
+            report.removed.len()
+        );
+    }
+    println!();
+    println!("Token counts are estimates (bytes / 3.5); the monthly figure multiplies them");
+    println!("by sessions actually observed in the last 30 days. File contents stay on disk:");
+    println!("Piggy stores sizes and hashes only.");
+    Ok(())
+}
+
+/// One finding as JSON, with its kind-specific evidence flattened alongside the
+/// shared fields.
+fn finding_json(f: &piggy_core::Finding) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": f.id,
+        "kind": f.kind.as_str(),
+        "path": f.path,
+        "claim": f.claim,
+        "detail": f.detail,
+        "estTokens": f.est_tokens,
+        "estTokensMonth": f.est_tokens_month,
+        "estimated": true,
+        "action": f.action,
+    });
+    let obj = v.as_object_mut().expect("finding json is an object");
+    match &f.kind {
+        piggy_core::FindingKind::DeadRef {
+            reference,
+            resolved,
+            more,
+        } => {
+            obj.insert("reference".into(), reference.clone().into());
+            obj.insert("resolved".into(), resolved.clone().into());
+            obj.insert("more".into(), (*more).into());
+        }
+        piggy_core::FindingKind::DuplicateBlock {
+            others,
+            label,
+            bytes,
+        } => {
+            obj.insert("others".into(), others.clone().into());
+            obj.insert("label".into(), label.clone().into());
+            obj.insert("blockBytes".into(), (*bytes).into());
+        }
+        piggy_core::FindingKind::Oversize { threshold } => {
+            obj.insert("threshold".into(), (*threshold).into());
+        }
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------

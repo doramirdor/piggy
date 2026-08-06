@@ -221,7 +221,7 @@ fn per_turn_injections(l: &Ledger, total: u64, out: &mut Vec<Insight>) {
 }
 
 /// Thousands separators without pulling in a formatting crate.
-fn commas(n: u64) -> String {
+pub(crate) fn commas(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {

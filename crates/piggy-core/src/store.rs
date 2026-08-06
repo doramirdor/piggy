@@ -789,6 +789,21 @@ impl Store {
         Ok(out)
     }
 
+    /// Drop one CLAUDE.md inventory row, returning whether it was there.
+    ///
+    /// The other half of the scan: a file deleted from disk has to leave the
+    /// table, or the inventory keeps charging for guidance nobody loads any
+    /// more. Returns false for a path the table never held, so a caller can
+    /// report a miss instead of assuming the delete landed
+    /// ([`Self::set_advice_status`]'s convention).
+    pub fn delete_claudemd_file(&mut self, path: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM claudemd_files WHERE path = ?1",
+            params![path],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Insert a freshly generated candidate, returning whether it was new.
     ///
     /// An id already in the table is left **exactly** as it is: the id is a hash
