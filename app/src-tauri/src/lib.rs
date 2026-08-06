@@ -1,4 +1,4 @@
-//! Piggy — the Tauri v2 desktop application.
+//! Piggy - the Tauri v2 desktop application.
 //!
 //! A regular windowed macOS app (940×660, resizable, overlay title bar) with a
 //! Dock icon and a companion menu-bar tray icon that re-opens the window.
@@ -35,7 +35,7 @@ const WATCH_RETRY: Duration = Duration::from_secs(5);
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
-    // Autostart (launch-at-login) and the updater — desktop only.
+    // Autostart (launch-at-login) and the updater - desktop only.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         builder = builder
@@ -97,7 +97,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             // Desktop-window behaviour: closing the window keeps Piggy running
-            // (background measurement + tray) rather than quitting — the tray
+            // (background measurement + tray) rather than quitting - the tray
             // icon reopens it. Standard macOS menu-utility pattern.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
@@ -137,7 +137,7 @@ pub fn run() {
 /// Runs an initial index + baseline anchor, then drives a [`SessionWatcher`]:
 /// each tick snapshot-tags any brand-new session and incrementally re-indexes
 /// touched files. When a session's writes stop (the watcher goes quiet after a
-/// burst), we step the rotation scheduler once — `rotation::tick_now` self-gates
+/// burst), we step the rotation scheduler once - `rotation::tick_now` self-gates
 /// on the 10-minute idle window, so the next session picks up the next planned
 /// saver set without ever perturbing a live one. A stats-updated event fires on
 /// any change so the panel and menu-bar refresh.
@@ -153,7 +153,7 @@ fn background_loop(handle: tauri::AppHandle) {
     let _ = handle.emit(STATS_UPDATED, ());
 
     // Watch every session-log root that exists: Claude Code's projects dir plus
-    // Codex's sessions dirs. Nothing is created if a tool isn't installed —
+    // Codex's sessions dirs. Nothing is created if a tool isn't installed -
     // without a history dir there is nothing to watch, so idle out rather than
     // materialise one.
     let roots = piggy_core::default_roots();
@@ -169,7 +169,7 @@ fn background_loop(handle: tauri::AppHandle) {
         };
 
     // Edge-triggered rotation: a session wrote (`pending_rotation`), so once the
-    // dir falls idle we apply exactly one rotation step — never re-ticking during
+    // dir falls idle we apply exactly one rotation step - never re-ticking during
     // the idle gap, which would churn the saver set and settings.json.
     let mut pending_rotation = false;
     loop {
@@ -178,7 +178,7 @@ fn background_loop(handle: tauri::AppHandle) {
                 if !events.is_empty() {
                     // The tick incrementally re-indexed the touched files, so the
                     // cached attribution bundle is now stale. Invalidate it before
-                    // telling the UI to refresh — otherwise the dashboard keeps
+                    // telling the UI to refresh - otherwise the dashboard keeps
                     // reading the frozen startup bundle (headline multiplier and
                     // saver badges never move until a rotation tick or restart).
                     backend::bump_attr_version();

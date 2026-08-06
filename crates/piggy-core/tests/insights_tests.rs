@@ -74,8 +74,8 @@ fn floor_components_are_reported_per_session_and_only_when_they_matter() {
     let l = ledger(vec![
             row("__floor", 500_000),
             row("__conversation", 400_000),
-            row("floor:skill_listing", 400_000), // 4,000/session — worth saying
-            row("floor:date_change", 1_000),     // 10/session — noise
+            row("floor:skill_listing", 400_000), // 4,000/session - worth saying
+            row("floor:date_change", 1_000),     // 10/session - noise
         ], vec![project("/work", 100, 4_000, 900_000, 400_000)]);
     let found = insights(&l);
     let skill = found

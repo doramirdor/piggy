@@ -5,8 +5,8 @@
 //!
 //! ## M3 wiring
 //!
-//! The measurement milestone (M3) — holdout deltas, the headline multiplier, the
-//! discovered feed, rotation, the session watcher — is live in `piggy-core`.
+//! The measurement milestone (M3) - holdout deltas, the headline multiplier, the
+//! discovered feed, rotation, the session watcher - is live in `piggy-core`.
 //! Every seam that used to degrade to an honest fallback now consumes the real
 //! API:
 //!
@@ -56,7 +56,7 @@ fn time_seed() -> u64 {
 // the UI refreshes on every session write. Recomputing it per saver + headline
 // on each refresh pegs every core once the session table is large. Instead we
 // compute the whole bundle (headline + one attribution per curated saver) once
-// per *index version* — bumped whenever indexing or rotation changes the data —
+// per *index version* - bumped whenever indexing or rotation changes the data -
 // and hand out a shared snapshot. Repeat refreshes for unchanged data are O(1),
 // and a single recompute builds the per-session rate map once and reuses it
 // across every saver and the headline (instead of one full scan per call).
@@ -78,7 +78,7 @@ pub(crate) struct AttrBundle {
 
 /// Invalidate the attribution cache so the next dashboard read recomputes.
 /// Called after anything that changes the session data (indexing, rotation
-/// tagging, baseline anchoring) — including the background watcher's incremental
+/// tagging, baseline anchoring) - including the background watcher's incremental
 /// re-index, which is the steady-state path once the app is running.
 pub fn bump_attr_version() {
     ATTR_INDEX_VERSION.fetch_add(1, Ordering::Relaxed);
@@ -391,7 +391,7 @@ pub struct Streams {
 pub struct HeadlineStream {
     /// `"input" | "output" | "cache write" | "cache read"`.
     pub stream: String,
-    /// `"measured" | "estimated" | "measuring"` — this stream's own badge, which
+    /// `"measured" | "estimated" | "measuring"` - this stream's own badge, which
     /// is not always the headline's: a stream can settle before the `×` does.
     pub kind: String,
     pub n_on: u64,
@@ -401,7 +401,7 @@ pub struct HeadlineStream {
     /// zero measurement.
     pub median_on: f64,
     pub median_off: f64,
-    /// The change as a fraction, **negative = a saving** — the same sign
+    /// The change as a fraction, **negative = a saving** - the same sign
     /// convention as `Badge.delta` (see `saver_badge`), because both cross this
     /// boundary in one payload and a UI that flipped one and not the other would
     /// render a saving as a regression.
@@ -454,7 +454,7 @@ pub struct Headline {
     /// `n_holdout` is the same count *only* when the baseline is the holdout,
     /// and 0 otherwise, so it cannot stand in for this.
     pub n_baseline: u64,
-    /// `"holdout" | "pre_install" | "none"` — what the ON arm is being compared
+    /// `"holdout" | "pre_install" | "none"` - what the ON arm is being compared
     /// against, which decides whether a measured claim is reachable at all.
     pub baseline_kind: String,
     /// Whether the ON arm is randomized (every saver on because the scheduler
@@ -476,7 +476,7 @@ pub struct Headline {
     /// Whether the holdout was a clean all-off one. False when a pinned saver
     /// rode through it, so the no-savers counterfactual was never observed.
     pub baseline_clean: bool,
-    /// `"shown" | "no_data" | "withheld_cost_more"` — why `value` is null, when
+    /// `"shown" | "no_data" | "withheld_cost_more"` - why `value` is null, when
     /// it is. `note` names one blocker in one sentence and the randomization gap
     /// outranks this one, so without the field the screen could never say that
     /// the estimate was withheld for costing MORE rather than for still
@@ -494,7 +494,7 @@ pub struct Headline {
     /// so the UI shows it as a regression however good the streams look.
     pub turns: Option<HeadlineStream>,
     /// What the experiment is still waiting for, when it is waiting on sample
-    /// size. `None` once both arms are full — at which point "still gathering"
+    /// size. `None` once both arms are full - at which point "still gathering"
     /// would be the wrong story and the UI must fall back to `note`.
     pub waiting: Option<Waiting>,
     /// Sessions the ON arm gained from an earlier saver set that differed only
@@ -511,13 +511,13 @@ pub struct Headline {
 ///
 /// `since` on the ON arm is the one users cannot deduce for themselves. The ON
 /// arm is scoped to the saver set they run *now*, so installing or removing a
-/// single saver silently restarts it at zero — which reads as "Piggy is broken,
+/// single saver silently restarts it at zero - which reads as "Piggy is broken,
 /// it has said measuring for weeks" unless the screen says the count restarted
 /// and when.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Waiting {
-    /// `"on" | "baseline"` — which side is short.
+    /// `"on" | "baseline"` - which side is short.
     pub arm: String,
     pub have: u64,
     pub need: u64,
@@ -599,17 +599,17 @@ pub fn stats_overview(period_s: String) -> Result<StatsOverview, ApiError> {
 /// Map the core [`CoreHeadline`] onto the UI payload, following the honesty rules
 /// in `docs/measurement.md`:
 ///
-/// * **measured** — a live holdout baseline that meets the sample bar
+/// * **measured** - a live holdout baseline that meets the sample bar
 ///   ([`MIN_GROUP`] per side) with a computable multiplier. The Dashboard/Home
 ///   sub-line reads "measured against N holdout sessions".
-/// * **estimated** — no live holdout, but an observational pre-install baseline
+/// * **estimated** - no live holdout, but an observational pre-install baseline
 ///   with a multiplier, meeting the same [`MIN_GROUP`] sample bar as `measured`.
 ///   Sub-line: "estimated vs your history · holdout measurement in progress".
 ///   The bar matters as much here as it does for a holdout: "estimated" labels
 ///   where the *baseline* came from, not how much data backs it, so without it a
 ///   single pre-install session against a single full-on one would render a
 ///   confident-looking multiplier the data cannot support.
-/// * **not_enough_data** — a partial baseline (1..MIN_GROUP) of either kind, no
+/// * **not_enough_data** - a partial baseline (1..MIN_GROUP) of either kind, no
 ///   baseline, or no computable multiplier: never a faked number. `n_holdout`
 ///   still carries the holdout sessions gathered so far so the UI can show
 ///   "N of 10".
@@ -1001,12 +1001,12 @@ pub fn usage_series(period_s: String) -> Result<UsageSeries, ApiError> {
 pub struct Badge {
     /// `"measured" | "estimated" | "measuring" | "claimed"`.
     ///
-    /// * `measured`  — a randomized holdout/single-off A/B delta that cleared the
+    /// * `measured`  - a randomized holdout/single-off A/B delta that cleared the
     ///   confidence bar (the only green claim).
-    /// * `estimated` — the same delta math against the observational pre-install
+    /// * `estimated` - the same delta math against the observational pre-install
     ///   baseline; shown with a number but never conflated with measured.
-    /// * `measuring` — below the bar: honest session progress, no point estimate.
-    /// * `claimed`   — the author's own number (install card only, never here).
+    /// * `measuring` - below the bar: honest session progress, no point estimate.
+    /// * `claimed`   - the author's own number (install card only, never here).
     pub kind: String,
     /// Delta fraction (negative = saving), or `null` while still measuring.
     pub delta: Option<f64>,
@@ -1670,7 +1670,7 @@ pub struct SweepItemDto {
     pub id: String,
     pub source: Option<String>,
     pub used: u64,
-    /// `"window" | "lifetime" | "n/a"` — how to read `used`.
+    /// `"window" | "lifetime" | "n/a"` - how to read `used`.
     pub used_scope: String,
     pub est_tokens: u64,
     /// Whether `est_tokens` is an estimated count. True for every row Piggy can
@@ -2460,18 +2460,18 @@ pub struct DiscoverFeedItem {
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverDto {
     /// Live GitHub-discovery results (from `discovery::discover`, cached ≤1/day).
-    /// Empty when offline/rate-limited with no cache yet — never an error.
+    /// Empty when offline/rate-limited with no cache yet - never an error.
     pub feed: Vec<DiscoverFeedItem>,
     pub listed_only: Vec<DiscoverEntry>,
 }
 
 fn plain_status(e: &Entry) -> String {
     if e.status.contains("v1_1") {
-        "Coming in a later Piggy update — it needs a per-project or license step we haven't built yet.".to_string()
+        "Coming in a later Piggy update - it needs a per-project or license step we haven't built yet.".to_string()
     } else if e.status.contains("deferred") || e.status.contains("v2") {
         "Planned for a future version of Piggy.".to_string()
     } else if e.status == "listed_only" {
-        "Listed for transparency — not installable.".to_string()
+        "Listed for transparency - not installable.".to_string()
     } else {
         "Not available to turn on yet.".to_string()
     }
@@ -2567,7 +2567,7 @@ pub struct ShareCardData {
     /// `"measured" | "estimated" | "not_enough_data"`.
     pub headline_label: String,
     pub n_holdout: u64,
-    /// True only when the numbers are measured — the Share button is gated on it.
+    /// True only when the numbers are measured - the Share button is gated on it.
     pub shareable: bool,
 }
 
@@ -2582,7 +2582,7 @@ pub fn share_card_data(period_s: String) -> Result<ShareCardData, ApiError> {
     // excluded from spend weighting, per measurement.md). If your plan lasts M×
     // longer you ran at 1/M the rate, so the counterfactual is M× your actual and
     // the banked amount is actual × (M − 1). This is an estimate even when the
-    // headline is "measured" (holdout-backed) — the card's proof line says so.
+    // headline is "measured" (holdout-backed) - the card's proof line says so.
     let tokens_saved = match ov.headline.value {
         Some(m) if shareable && m > 1.0 => {
             let plan_metered = ov.streams.input + ov.streams.output + ov.streams.cache_write;
@@ -2674,7 +2674,7 @@ pub fn save_share_card(png_base64: String) -> Result<PathBuf, ApiError> {
 /// The settings slice the GUI edits. These now live in the `piggy-core`
 /// [`PiggyState`] `settings` ledger (the same knobs rotation and attribution
 /// read), not a separate file. `rotation_enabled` maps to the core
-/// `holdout_enabled` — the master switch for Piggy's A/B rotation: off means no
+/// `holdout_enabled` - the master switch for Piggy's A/B rotation: off means no
 /// holdout sessions are scheduled (badges fall back to `estimated`), and the
 /// background loop skips its rotation step entirely. Launch-at-login is owned by
 /// the autostart plugin and merged in at the command layer.
@@ -2910,7 +2910,7 @@ pub fn doctor() -> DoctorDto {
         checks.push(DoctorCheck {
             label: "Claude's settings".to_string(),
             ok: true,
-            detail: "No settings file yet — nothing to back up.".to_string(),
+            detail: "No settings file yet - nothing to back up.".to_string(),
         });
     }
 
@@ -3004,7 +3004,7 @@ pub fn reindex() -> Result<ReindexDto, ApiError> {
 
 /// Anchor the measurement baseline once at startup: stamp Piggy's install time (so
 /// every session already on disk becomes the observational pre-install baseline)
-/// and backfill the `pre_install` tags. Best-effort — a failure here just means
+/// and backfill the `pre_install` tags. Best-effort - a failure here just means
 /// attribution has less to compare against, never a crash.
 pub fn anchor_baseline() {
     let _guard = state_write();
@@ -3025,7 +3025,7 @@ pub fn anchor_baseline() {
 /// Run one rotation scheduler step, gated on the rotation/holdout master switch.
 ///
 /// Returns `true` only when an assignment was actually **applied** (the projects
-/// dir was idle) — the watcher loop uses that to emit a stats refresh and to
+/// dir was idle) - the watcher loop uses that to emit a stats refresh and to
 /// avoid re-ticking until the next session runs. When rotation is disabled, or a
 /// session is live, or nothing is installed, this is a no-op returning `false`.
 /// `rotation::tick_now` self-gates on the 10-minute idle window, so calling it is
@@ -3592,7 +3592,7 @@ pub struct LedgerSourceDto {
     /// Whether this is an injection the user can configure away, as opposed to
     /// the session floor or the work itself. Drives the "removable" styling.
     pub removable: bool,
-    /// Whether this row is part of the session floor — the residual OR a named
+    /// Whether this row is part of the session floor - the residual OR a named
     /// component of it. The hero bar sums these; reading only the residual
     /// understated the floor by every component it had been decomposed into.
     pub is_floor: bool,
@@ -3625,11 +3625,11 @@ pub struct LedgerOverview {
     /// Share of cache writes that bought session startup rather than work.
     pub overhead: f64,
     /// How much further the same plan goes with the configurable context
-    /// removed. **Available headroom, not achieved savings** — the dashboard
+    /// removed. **Available headroom, not achieved savings** - the dashboard
     /// must word it as "could", never as a saving already banked.
     pub headroom: Option<f64>,
     /// The removable share behind `headroom`, as a fraction of TOTAL COST
-    /// (0.0-1.0). Not the share of cache writes — that number is bigger and
+    /// (0.0-1.0). Not the share of cache writes - that number is bigger and
     /// quoting it next to a cost-weighted multiplier makes the two disagree.
     pub removable_share: f64,
     pub sessions: u64,
@@ -3746,7 +3746,7 @@ pub struct TaskTable {
     pub period: String,
     pub period_label: String,
     pub rows: Vec<TaskRowDto>,
-    /// True when the window recorded no task boundaries at all — the logs
+    /// True when the window recorded no task boundaries at all - the logs
     /// predate `promptId`. The UI explains that rather than showing empty
     /// outcome columns.
     pub tasks_unrecorded: bool,

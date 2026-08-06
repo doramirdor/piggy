@@ -3,14 +3,14 @@
 //! An option's `apply` object says how a chosen value lands on disk. v1 knows
 //! two kinds:
 //!
-//! * `json_field` — set one string field in a JSON file the saver itself
+//! * `json_field` - set one string field in a JSON file the saver itself
 //!   reads (e.g. Caveman's documented user config
 //!   `~/.config/caveman/config.json`, field `defaultMode`). The file is
 //!   created if missing; every other field in it is preserved; writes are
 //!   atomic (temp + rename). Piggy also remembers the choice in its own
 //!   state ledger, but the saver's file is the source of truth reported back
-//!   to the UI — if the user edits it by hand, Piggy shows the real value.
-//! * `text_file` — the whole file *is* the value, one bare line (Honey's
+//!   to the UI - if the user edits it by hand, Piggy shows the real value.
+//! * `text_file` - the whole file *is* the value, one bare line (Honey's
 //!   `~/.claude/.honey-active`, which holds `lite` / `full` / `ultra`). Same
 //!   atomic write and same "saver's file is truth" rule; the only difference
 //!   is there is no surrounding document to preserve.
@@ -72,7 +72,7 @@ fn json_field_target(opt: &ConfigOption) -> Result<(PathBuf, String)> {
 }
 
 /// Read the value a `json_field` target currently holds, if the file exists
-/// and parses. Never errors — an unreadable saver config just means "no
+/// and parses. Never errors - an unreadable saver config just means "no
 /// current value on disk".
 fn read_json_field(opt: &ConfigOption) -> Option<String> {
     let (path, field) = json_field_target(opt).ok()?;
@@ -89,7 +89,7 @@ fn write_json_field(opt: &ConfigOption, value: &str) -> Result<()> {
     let mut doc: Value = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
             format!(
-                "{} exists but isn't valid JSON — fix or remove it first",
+                "{} exists but isn't valid JSON - fix or remove it first",
                 path.display()
             )
         })?,
@@ -98,7 +98,7 @@ fn write_json_field(opt: &ConfigOption, value: &str) -> Result<()> {
     };
     let Value::Object(map) = &mut doc else {
         bail!(
-            "{} isn't a JSON object — fix or remove it first",
+            "{} isn't a JSON object - fix or remove it first",
             path.display()
         );
     };
@@ -125,7 +125,7 @@ fn text_file_target(opt: &ConfigOption) -> Result<PathBuf> {
     Ok(expand_path(path))
 }
 
-/// Read a `text_file` target's single line. Never errors — a missing or
+/// Read a `text_file` target's single line. Never errors - a missing or
 /// unreadable file just means "no current value on disk". An empty file means
 /// the saver is off, which is not one of the option's choices, so report
 /// nothing rather than an unselectable value.
@@ -216,5 +216,5 @@ pub fn set_config(
     get_config(catalog, &state, id)
 }
 
-// Tests live in `tests/saver_config_tests.rs` — they mutate process env
+// Tests live in `tests/saver_config_tests.rs` - they mutate process env
 // (PIGGY_XDG_CONFIG / PIGGY_HOME) and follow the repo's sandbox+lock pattern.

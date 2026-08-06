@@ -3,13 +3,13 @@
 //! One file == one session (the filename stem is the session id). Files are
 //! append-only JSONL where each line is an independent JSON object. Only
 //! `type == "assistant"` lines carry token usage, and the *same* assistant
-//! message is rewritten across multiple lines during streaming — so usage is
+//! message is rewritten across multiple lines during streaming - so usage is
 //! deduplicated by `requestId` (fallback `message.id`, fallback line `uuid`),
 //! last-wins. `model == "<synthetic>"` lines are skipped.
 //!
 //! Parsing is deliberately lenient: unknown line types are ignored, and a
 //! malformed line (including a truncated final line from an in-progress write)
-//! is counted in `parse_errors` and skipped — it never aborts the file.
+//! is counted in `parse_errors` and skipped - it never aborts the file.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -24,7 +24,7 @@ const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// prompt, tool definitions, memory files. Charged to the first assistant
 /// message, which is where it is actually written to cache.
 pub const CTX_FLOOR: &str = "__floor";
-/// Ledger bucket for context that grew from the work itself — prompts, tool
+/// Ledger bucket for context that grew from the work itself - prompts, tool
 /// results, file reads. The residual: what no injection accounts for.
 pub const CTX_CONVERSATION: &str = "__conversation";
 
@@ -36,7 +36,7 @@ pub const CTX_CONVERSATION: &str = "__conversation";
 /// the difference between a number and something a user can act on. 99.9% of
 /// real sessions log at least one.
 ///
-/// `CTX_FLOOR` keeps whatever is left (system prompt, tool schemas, memory —
+/// `CTX_FLOOR` keeps whatever is left (system prompt, tool schemas, memory -
 /// none of which are logged), so floor total = `CTX_FLOOR` + every `floor:*`.
 pub const CTX_FLOOR_PREFIX: &str = "floor:";
 
@@ -49,7 +49,7 @@ pub const CTX_FLOOR_PREFIX: &str = "floor:";
 /// sessions (7,152x its own size) and inflated the headline "removable by
 /// configuration" figure with conversation growth.
 ///
-/// 3 is a deliberate over-estimate — JSON-ish text runs nearer 4 bytes/token —
+/// 3 is a deliberate over-estimate - JSON-ish text runs nearer 4 bytes/token -
 /// so the bound errs toward charging an injection slightly too much rather than
 /// too little. A "you could remove this" number should not be flattered by its
 /// own rounding.
@@ -82,13 +82,13 @@ struct RawLine {
     #[serde(default)]
     git_branch: Option<String>,
     /// Which surface wrote the line (`cli`, `claude-desktop`, `claude-vscode`,
-    /// `sdk-cli`, …) — the GUI/TUI discriminator.
+    /// `sdk-cli`, …) - the GUI/TUI discriminator.
     #[serde(default)]
     entrypoint: Option<String>,
     #[serde(default)]
     message: Option<RawMessage>,
     /// Present on `type == "attachment"` lines. Its `type` field names what was
-    /// injected (`hook_success`, `skill_listing`, `mcp_instructions_delta`, …) —
+    /// injected (`hook_success`, `skill_listing`, `mcp_instructions_delta`, …) -
     /// the ledger's whole "from where".
     #[serde(default)]
     attachment: Option<serde_json::Value>,
@@ -448,7 +448,7 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
                 // the same pair of assistant messages their shared cache write
                 // splits by byte share. It is the one approximation in the
                 // ledger, and it only ever redistributes *within* a single
-                // message's write — the session total stays exact.
+                // message's write - the session total stays exact.
                 let kind = raw
                     .attachment
                     .as_ref()
@@ -537,13 +537,13 @@ pub fn parse_file(path: &Path) -> io::Result<SessionParse> {
 ///
 /// Three buckets, in the order the rules fire:
 ///
-/// 1. The **first** assistant message is [`CTX_FLOOR`] — system prompt, tool
+/// 1. The **first** assistant message is [`CTX_FLOOR`] - system prompt, tool
 ///    definitions, memory. It is charged whole even when attachments preceded
 ///    it, because those attachments *are* part of what the session opens with.
 /// 2. Each injection pending since the previous message is charged **at most
 ///    what it contains** ([`BYTES_PER_TOKEN`]), never the whole write.
 /// 3. [`CTX_CONVERSATION`] takes the residual: the prompt, the tool results,
-///    the file reads — everything in the same write that was not an injection.
+///    the file reads - everything in the same write that was not an injection.
 ///
 /// Rule 2 is the load-bearing one. A cache write following an injection is not
 /// caused by the injection alone; it carries the user's turn as well. Charging

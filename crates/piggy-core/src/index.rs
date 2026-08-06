@@ -43,7 +43,7 @@ fn is_agent_workflow_journal(path: &Path) -> bool {
             == Some("workflows")
 }
 
-/// One directory tree of session logs plus the tool that writes it — the unit
+/// One directory tree of session logs plus the tool that writes it - the unit
 /// [`run_index_roots`] and the watcher operate over.
 #[derive(Debug, Clone)]
 pub struct SourceRoot {

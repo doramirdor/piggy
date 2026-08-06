@@ -1,7 +1,7 @@
 //! Pure merge-engine tests: hook merge/remove semantics, formatting fidelity,
 //! BOM handling, unknown-key preservation, and the `merge ∘ remove == identity`
-//! property over every settings fixture. None of these touch process env — they
-//! operate on `Value`s and explicit temp files — so they parallelize freely.
+//! property over every settings fixture. None of these touch process env - they
+//! operate on `Value`s and explicit temp files - so they parallelize freely.
 
 use std::path::PathBuf;
 

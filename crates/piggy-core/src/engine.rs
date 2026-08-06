@@ -1,10 +1,10 @@
 //! The install engine: interpret a catalog entry's declarative steps to install,
-//! uninstall, toggle, and health-check a saver — with automatic rollback.
+//! uninstall, toggle, and health-check a saver - with automatic rollback.
 //!
 //! Safety invariants:
 //! * All writes to `settings.json` go through [`crate::settings`] (backup +
 //!   atomic + structural ownership). The engine never edits it directly.
-//! * Unknown step kinds refuse the action ("catalog newer than app") — the
+//! * Unknown step kinds refuse the action ("catalog newer than app") - the
 //!   engine never guesses.
 //! * A failed post-install health check triggers an automatic rollback to the
 //!   pre-install state (settings restored, downloaded binary removed, plugin
@@ -93,14 +93,14 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
     let settings_path = config::claude_settings_path();
 
     // Capture pre-install settings BEFORE auto-disabling any conflict, so a
-    // rollback restores them — re-adding the conflicting saver's hooks / plugin
-    // enable — as well as undoing this install.
+    // rollback restores them - re-adding the conflicting saver's hooks / plugin
+    // enable - as well as undoing this install.
     let pre = settings::load(&settings_path)?;
     let pre_bytes = pre.raw.clone();
     let pre_existed = pre.existed;
 
     // Mutual exclusion: rather than refuse, turn OFF any enabled saver that
-    // conflicts with this one (symmetric — either side may declare it), so
+    // conflicts with this one (symmetric - either side may declare it), so
     // turning one on cleanly wins. e.g. rtk ↔ headroom, headroom ↔ nadirclaw.
     let mut auto_disabled: Vec<String> = Vec::new();
     let mut auto_disable_warnings: Vec<String> = Vec::new();
@@ -195,7 +195,7 @@ pub fn install(catalog: &Catalog, id: &str) -> Result<ActionReport> {
             saver: id.to_string(),
             action: "install".into(),
             messages: vec![format!(
-                "'{id}' failed its health check and was rolled back — your setup is unchanged"
+                "'{id}' failed its health check and was rolled back - your setup is unchanged"
             )],
             warnings,
             health: Some(health),
@@ -283,7 +283,7 @@ pub fn uninstall(catalog: &Catalog, id: &str) -> Result<ActionReport> {
 }
 
 /// Toggle a saver on or off without uninstalling it (the fast A/B path),
-/// recording the toggle as `manual` — i.e. an explicit user choice, which pauses
+/// recording the toggle as `manual` - i.e. an explicit user choice, which pauses
 /// rotation for this saver. Rotation uses [`set_enabled_src`] with a non-manual
 /// source instead.
 ///
@@ -314,7 +314,7 @@ pub fn set_enabled_src(
     let mut messages = Vec::new();
 
     if saver.enabled == on {
-        // Already in the requested state — but still record who asked, so a
+        // Already in the requested state - but still record who asked, so a
         // manual "confirm on/off" pins the saver against rotation.
         if let Some(s) = state.savers.get_mut(id) {
             let mut dirty = s.last_toggle_source.as_deref() != Some(source);
@@ -344,7 +344,7 @@ pub fn set_enabled_src(
     }
 
     // Turning a saver ON auto-disables any enabled saver it conflicts with, the
-    // same mutual-exclusion rule a fresh install applies — otherwise
+    // same mutual-exclusion rule a fresh install applies - otherwise
     // `off A → install B → on A` could leave two mutually-exclusive savers
     // enabled at once. The check is symmetric: either side may declare it.
     let mut auto_disabled: Vec<String> = Vec::new();
@@ -365,7 +365,7 @@ pub fn set_enabled_src(
 
     if entry.install_type == "claude_plugin" {
         // Enable/disable via claude CLI (keeps the plugin installed). Backup
-        // settings before AND after — the CLI writes enabledPlugins itself.
+        // settings before AND after - the CLI writes enabledPlugins itself.
         let plugin = plugin_ref(entry);
         let verb = if on { "enable" } else { "disable" };
         snapshot(&settings_path, &format!("pre-{verb}:{id}"), &mut state)?;
@@ -441,7 +441,7 @@ pub fn set_enabled_src(
     })
 }
 
-/// The ids of every installed, **enabled** saver that conflicts with `entry` —
+/// The ids of every installed, **enabled** saver that conflicts with `entry` -
 /// in either direction (`entry.conflictsWith` names it, or its own
 /// `conflictsWith` names `entry`). Shared by `install` and the `on` toggle so
 /// mutual exclusion is enforced identically on both paths. Sorted for a stable
@@ -472,7 +472,7 @@ fn conflicting_enabled_savers(catalog: &Catalog, entry: &Entry, state: &PiggySta
 /// Plugin savers disable via the `claude` CLI; hook savers have their owned
 /// hooks removed. The binary/plugin stays installed either way. This is the
 /// mutual-exclusion auto-disable used by `install` and the `on` toggle; it does
-/// not itself call `state.save()` — the caller persists.
+/// not itself call `state.save()` - the caller persists.
 fn disable_saver_in_place(
     catalog: &Catalog,
     id: &str,
@@ -545,11 +545,11 @@ fn set_skill_enabled(entry: &Entry, on: bool) -> Result<()> {
     };
     if !from.exists() {
         // Already where it needs to be (a hand-edited tree, or a retried
-        // toggle) — only a genuinely missing skill is an error.
+        // toggle) - only a genuinely missing skill is an error.
         if to.exists() {
             return Ok(());
         }
-        bail!("{} is missing — reinstall '{}'", from.display(), entry.id);
+        bail!("{} is missing - reinstall '{}'", from.display(), entry.id);
     }
     std::fs::rename(from, to)
         .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
@@ -584,8 +584,8 @@ pub struct RestoreReport {
 ///
 /// Restores every Sweep-disabled item and every file the advice engine edited,
 /// moves every re-scoped MCP server back, returns `settings.json` to its exact
-/// pre-Piggy bytes (the one-time `pre-piggy.json` backup) when available — which
-/// also clears any Piggy-added `enabledPlugins`/hook entries — otherwise strips
+/// pre-Piggy bytes (the one-time `pre-piggy.json` backup) when available - which
+/// also clears any Piggy-added `enabledPlugins`/hook entries - otherwise strips
 /// Piggy's owned hooks structurally, deletes Piggy-installed binaries, and
 /// clears the saver ledger. Always safe to run.
 ///
@@ -1118,8 +1118,8 @@ impl InstallCtx<'_> {
 
     /// Write an executable launcher shim into `${PIGGY_BIN}` that execs
     /// `<exec> <args...> "$@"`. This is the wrapper-launcher integration (e.g.
-    /// `piggy-claude` → `headroom wrap claude`): it changes nothing global — no
-    /// `ANTHROPIC_BASE_URL`, no daemon — so a session only routes through the
+    /// `piggy-claude` → `headroom wrap claude`): it changes nothing global - no
+    /// `ANTHROPIC_BASE_URL`, no daemon - so a session only routes through the
     /// wrapper when the user launches Claude via this command.
     fn step_write_launcher(&mut self, step: &Value) -> Result<()> {
         let name = step
@@ -1255,7 +1255,7 @@ fn run_uninstall_step(
                     .unwrap_or(false);
                 if !empty {
                     warnings.push(format!(
-                        "kept {} — it still holds files Piggy did not install",
+                        "kept {} - it still holds files Piggy did not install",
                         dir.display()
                     ));
                     return Ok(None);
@@ -1268,12 +1268,12 @@ fn run_uninstall_step(
         }
         "remove_dir_from_path" => {
             // Keep the ${PIGGY_BIN} PATH line if another installed saver still
-            // ships something there (rtk's binary, another launcher shim) — only
+            // ships something there (rtk's binary, another launcher shim) - only
             // the last such saver's uninstall removes it, or we'd break the
             // survivor. (The current saver is still in `state` at this point.)
             if any_saver_uses_bin_dir(state, Some(id)) {
                 warnings.push(
-                    "kept the ${PIGGY_BIN} PATH line — another saver still uses it".to_string(),
+                    "kept the ${PIGGY_BIN} PATH line - another saver still uses it".to_string(),
                 );
                 return Ok(None);
             }
@@ -1398,7 +1398,7 @@ fn run_health_checks(entry: &Entry, settings_path: &Path) -> Result<HealthReport
             "file_present" => {
                 // A file saver's whole install is the file: present means armed.
                 // A parked `.piggy-off` copy is deliberately NOT accepted, which
-                // makes a turned-off skill read as not-armed here — the same way
+                // makes a turned-off skill read as not-armed here - the same way
                 // `hook_present` reads for a turned-off hook saver.
                 let raw = check.get("path").and_then(Value::as_str).unwrap_or("");
                 let path = expand_path(raw);
@@ -1530,7 +1530,7 @@ fn force_write(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Returns the backup path (None if there was nothing to snapshot).
 ///
 /// This is a *pure* backup: it never rewrites the file. (A no-op `commit` would
-/// re-serialize — reformatting and stripping a BOM — even when Piggy is only
+/// re-serialize - reformatting and stripping a BOM - even when Piggy is only
 /// installing a plugin and adds no hooks, which the doc explicitly says it must
 /// not do.)
 fn snapshot(settings_path: &Path, reason: &str, state: &mut PiggyState) -> Result<Option<PathBuf>> {
@@ -1596,7 +1596,7 @@ fn fetch_asset(
 ///
 /// The sha256 gate in [`InstallCtx::step_download_file`] is what makes the
 /// *bytes* safe; this list is about which servers Piggy will talk to at all, so
-/// it lives in code rather than in the catalog — a catalog that could name its
+/// it lives in code rather than in the catalog - a catalog that could name its
 /// own host would make the check no check. Nadir publishes its `SKILL.md` only
 /// on its own site (the site repo is private, so there is no GitHub raw URL to
 /// pin), which is the one case in v1.
@@ -1636,7 +1636,7 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 /// As [`http_get_bytes`], but with the caller deciding which hosts a redirect
-/// may land on — a pinned-file fetch allows its own host, a release-asset fetch
+/// may land on - a pinned-file fetch allows its own host, a release-asset fetch
 /// stays GitHub-only.
 fn http_get_bytes_allowing(url: &str, allow: fn(&str) -> bool) -> Result<Vec<u8>> {
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
@@ -1671,7 +1671,7 @@ fn is_github_host(host: &str) -> bool {
 }
 
 /// Hosts a hash-pinned `download_file` may be fetched from: GitHub, plus the
-/// short [`EXTRA_PINNED_FILE_HOSTS`] allowlist. Exact host match only — no
+/// short [`EXTRA_PINNED_FILE_HOSTS`] allowlist. Exact host match only - no
 /// subdomain wildcard, so a `evil.getnadir.com.example.com` cannot slip in.
 fn is_pinned_file_host(host: &str) -> bool {
     is_github_host(host) || EXTRA_PINNED_FILE_HOSTS.contains(&host)
@@ -1760,7 +1760,7 @@ fn run_claude(args: &[String], ignore_failure: bool) -> Result<()> {
                 Ok(())
             } else {
                 bail!(
-                    "`{bin} {}` did not finish within {}s and was stopped — it may be downloading; check your network and try again",
+                    "`{bin} {}` did not finish within {}s and was stopped - it may be downloading; check your network and try again",
                     args.join(" "),
                     SUBPROCESS_TIMEOUT.as_secs()
                 )
@@ -1949,7 +1949,7 @@ fn run_cmd(prog: &str, args: &[String]) -> Result<()> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!("`{prog}` was not found"),
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => bail!(
-            "`{prog} {}` did not finish within {}s and was stopped — check your network and try again",
+            "`{prog} {}` did not finish within {}s and was stopped - check your network and try again",
             args.join(" "),
             SUBPROCESS_TIMEOUT.as_secs()
         ),
@@ -2099,7 +2099,7 @@ fn expand_str(s: &str) -> String {
         .replace("${PIGGY_BIN}", &piggy_bin)
         .replace("${PIGGY_HOME}", &piggy_home)
         // Skill savers write inside Claude's own config tree, not Piggy's, so
-        // they need the (env-overridable) skills dir — never a literal ~/.claude,
+        // they need the (env-overridable) skills dir - never a literal ~/.claude,
         // which would escape a sandboxed test.
         .replace("${CLAUDE_SKILLS}", &claude_skills)
         // Same reasoning one level up: savers that drop state files directly in

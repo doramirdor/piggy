@@ -3,7 +3,7 @@ name = "piggy-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Piggy — the token piggy bank for Claude Code (menu bar app)."
+description = "Piggy: the token piggy bank for Claude Code (menu bar app)."
 
 [lib]
 # The desktop/mobile entry point lives in the lib so `main.rs` is a thin shim.

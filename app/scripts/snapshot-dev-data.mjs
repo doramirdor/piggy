@@ -241,7 +241,7 @@ const snapshot = {
     sessions: stats.sessions,
     costUsdEst: stats.cost_usd_est,
     costEstimated: stats.cost_estimated,
-    // False whenever any model is missing from the pricing table — today
+    // False whenever any model is missing from the pricing table - today
     // `claude-opus-5` is, and it is most of the volume.
     fullyPriced: (stats.unpriced_tokens ?? 0) === 0,
     unpricedTokens: stats.unpriced_tokens ?? 0,

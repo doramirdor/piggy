@@ -107,8 +107,8 @@ fn today_series_is_a_single_day() {
     assert_eq!(series[0].totals.total_tokens(), 15);
 }
 
-/// A session late on the boundary day — 23:59 on the day just before the
-/// Week/Month calendar window opens — sits inside a rolling `now - 7d/30d`
+/// A session late on the boundary day - 23:59 on the day just before the
+/// Week/Month calendar window opens - sits inside a rolling `now - 7d/30d`
 /// cutoff but on no bar drawn under the headline. The headline and every
 /// breakdown must window the same way the series does, so all of them agree.
 #[test]

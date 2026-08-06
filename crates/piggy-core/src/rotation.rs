@@ -8,7 +8,7 @@
 //!
 //! The plan is a repeating block over installed, rotation-controlled savers:
 //!
-//! * one **holdout** slot (all savers off) — ~`holdout_fraction` of sessions,
+//! * one **holdout** slot (all savers off) - ~`holdout_fraction` of sessions,
 //! * one **single-off** slot per saver (everything on except that saver),
 //! * the **remainder** full-on.
 //!
@@ -162,7 +162,7 @@ fn now_secs() -> u64 {
 }
 
 /// Whether any `.jsonl` under `projects_dir` was modified within `window_secs`
-/// of `now_secs` — i.e. a session is (probably) live and must not be perturbed.
+/// of `now_secs` - i.e. a session is (probably) live and must not be perturbed.
 pub fn is_session_active(projects_dir: &Path, now_secs: u64, window_secs: u64) -> bool {
     for entry in WalkDir::new(projects_dir)
         .into_iter()
@@ -190,9 +190,9 @@ pub fn is_session_active(projects_dir: &Path, now_secs: u64, window_secs: u64) -
 /// The result of a scheduler tick.
 #[derive(Debug, Clone)]
 pub enum RotationOutcome {
-    /// A session is live — nothing was changed.
+    /// A session is live - nothing was changed.
     SkippedActive,
-    /// No rotation-controlled savers — nothing to do.
+    /// No rotation-controlled savers - nothing to do.
     NothingToRotate,
     /// Applied `assignment` (at the recorded block position). `changed` lists the
     /// savers whose state was actually flipped.

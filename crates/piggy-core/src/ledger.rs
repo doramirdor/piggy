@@ -10,11 +10,11 @@
 //!
 //! Three kinds of row, from [`crate::parser`]:
 //!
-//! * [`CTX_FLOOR`] — system prompt, tool definitions, memory. Paid once per
+//! * [`CTX_FLOOR`] - system prompt, tool definitions, memory. Paid once per
 //!   session before the user types. The number that makes short sessions
 //!   expensive.
-//! * [`CTX_CONVERSATION`] — the work itself: prompts, tool results, file reads.
-//! * Everything else — an attachment type (`hook_success`, `skill_listing`,
+//! * [`CTX_CONVERSATION`] - the work itself: prompts, tool results, file reads.
+//! * Everything else - an attachment type (`hook_success`, `skill_listing`,
 //!   `deferred_tools_delta`, …). These are **removable by configuration**, which
 //!   is what makes them the actionable rows.
 
@@ -60,8 +60,8 @@ impl LedgerRow {
     /// already their own best name.
     ///
     /// Floor components are suffixed `(startup)`. The same attachment type can
-    /// appear twice — `hook_success` is loaded at startup AND re-injected during
-    /// a session — and two rows with one name read as a duplicate rather than
+    /// appear twice - `hook_success` is loaded at startup AND re-injected during
+    /// a session - and two rows with one name read as a duplicate rather than
     /// as the two different costs they are.
     pub fn label(&self) -> String {
         match self.kind.as_str() {
@@ -126,7 +126,7 @@ pub struct Ledger {
     /// Per-project split, heaviest total first.
     pub projects: Vec<ProjectRow>,
     /// Total spend for the window in **input-token equivalents**, across every
-    /// stream — including the output tokens and cache reads the ledger itself
+    /// stream - including the output tokens and cache reads the ledger itself
     /// does not bucket.
     ///
     /// [`Self::headroom`] needs this. Removing configurable context shrinks
@@ -175,7 +175,7 @@ impl Ledger {
     ///
     /// This is **available headroom, not achieved savings**, and the two must
     /// never be conflated in the UI. It is exact token arithmetic over cache
-    /// writes — no pricing table, no holdout, no confidence interval — which is
+    /// writes - no pricing table, no holdout, no confidence interval - which is
     /// why it can be shown on day one while [`crate::attribution`] is still
     /// gathering. What it does NOT claim is that a saver already delivered it.
     ///
