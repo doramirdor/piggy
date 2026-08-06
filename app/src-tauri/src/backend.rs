@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -72,8 +72,33 @@ static ATTR_CACHE: Mutex<Option<(u64, Arc<AttrBundle>)>> = Mutex::new(None);
 static ATTR_COMPUTE: Mutex<()> = Mutex::new(());
 
 pub(crate) struct AttrBundle {
-    headline: CoreHeadline,
+    pub(crate) headline: CoreHeadline,
     pub(crate) per_saver: std::collections::HashMap<String, SaverAttribution>,
+}
+
+// ---------------------------------------------------------------------------
+// Index idle
+// ---------------------------------------------------------------------------
+
+/// Whether the watcher has gone a whole tick without a filesystem event.
+///
+/// The spec asks the advice pass to run "after indexing goes idle". There is no
+/// separate indexing thread to ask, but the watcher loop already knows: an empty
+/// tick is the edge it uses to step rotation, and it is the same edge here. A
+/// background inference pass that starts while Claude Code is writing a session
+/// is a pass competing with the indexer for the machine.
+static INDEX_IDLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the watcher is currently quiet.
+///
+/// Starts false and stays false until the first quiet tick, which is what you
+/// want on a cold start: the initial full re-index runs before the loop.
+pub fn index_is_idle() -> bool {
+    INDEX_IDLE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_index_idle(idle: bool) {
+    INDEX_IDLE.store(idle, Ordering::Relaxed);
 }
 
 /// Invalidate the attribution cache so the next dashboard read recomputes.

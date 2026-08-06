@@ -10,8 +10,11 @@
 //! session goes idle, and emits `piggy://stats-updated` so the panel and
 //! menu-bar stay live.
 
-mod advisor;
-mod backend;
+// `advisor` and `backend` are the crate's own API surface: `commands` is the
+// Tauri door, and these two are what it opens onto. Public so a seam built one
+// milestone ahead of its caller is not dead code.
+pub mod advisor;
+pub mod backend;
 mod commands;
 mod tray;
 
@@ -181,12 +184,19 @@ fn background_loop(handle: tauri::AppHandle) {
                     // telling the UI to refresh - otherwise the dashboard keeps
                     // reading the frozen startup bundle (headline multiplier and
                     // saver badges never move until a rotation tick or restart).
+                    backend::set_index_idle(false);
                     backend::bump_attr_version();
                     pending_rotation = true;
                     let _ = handle.emit(STATS_UPDATED, ());
-                } else if pending_rotation && backend::rotation_tick_if_enabled() {
-                    pending_rotation = false;
-                    let _ = handle.emit(STATS_UPDATED, ());
+                } else {
+                    // A whole tick with no write. That is the window the advice
+                    // pass is allowed to run in, and it is the same edge
+                    // rotation already steps on.
+                    backend::set_index_idle(true);
+                    if pending_rotation && backend::rotation_tick_if_enabled() {
+                        pending_rotation = false;
+                        let _ = handle.emit(STATS_UPDATED, ());
+                    }
                 }
             }
             Err(_) => std::thread::sleep(WATCH_RETRY),

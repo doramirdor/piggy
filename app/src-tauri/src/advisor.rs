@@ -11,15 +11,17 @@
 //! seconds, and paying it per annotation would be absurd).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(any(feature = "local-llm", test))]
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{MutexGuard, TryLockError};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use piggy_core::advisor::{self, download, facts::Facts};
-use piggy_core::{config, sweep, Pricing, Store};
+use piggy_core::advice::{self, Candidate};
+use piggy_core::advisor::{self, cache, download, facts, facts::Facts, guard};
+use piggy_core::attribution::SaverAttribution;
+use piggy_core::{config, probe, sweep, Pricing, Store};
 
 use crate::backend::ApiError;
 
@@ -458,6 +460,516 @@ fn run_model(
     _facts: &Facts,
 ) -> Result<Vec<AnnotationDto>, ApiError> {
     Ok(Vec::new())
+}
+
+// ---------------------------------------------------------------------------
+// The advice pass
+// ---------------------------------------------------------------------------
+
+/// One ranked candidate, as the sheet renders it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvicePickDto {
+    /// A candidate id from the list this overlay came back with.
+    pub id: String,
+    /// The model's sentence about it, already length-capped and already checked
+    /// against the numbers allow-list.
+    pub why: String,
+}
+
+/// Picks the model grouped, so the sheet can offer them as one apply.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceBundleDto {
+    pub project: String,
+    pub ids: Vec<String>,
+}
+
+/// What the model added on top of the deterministic advice list.
+///
+/// Every field degrades to "nothing": no advisor, no model, a busy slot or a
+/// refused answer all produce an overlay whose `picks` are empty, and the sheet
+/// renders the deterministic order with house copy. That is the fallback the
+/// spec requires, not an error state.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceOverlayDto {
+    /// The fact sheet this describes. Not rendered; it is the handle a log line
+    /// or a test needs to tell one pass from another.
+    pub facts_hash: String,
+    /// A pass is running or has just been started. Render the deterministic
+    /// order and ask again on the next `piggy://stats-updated`.
+    pub pending: bool,
+    /// Which model wrote these sentences. The UI shows it: locally generated
+    /// prose must never look like it came from the same place as the receipt.
+    pub model: Option<String>,
+    /// Candidate ids in the model's order, best first. Ids the model did not
+    /// rank are not here; they keep their deterministic order behind these.
+    pub picks: Vec<AdvicePickDto>,
+    pub bundles: Vec<AdviceBundleDto>,
+    /// Candidate ids that have a drafted rewrite waiting in memory. Applying one
+    /// goes through [`attach_cached_drafts`].
+    pub drafted: Vec<String>,
+}
+
+/// The whole advice sheet: the deterministic candidates, in the model's order
+/// when there is one, plus the overlay that explains them.
+///
+/// **This is the call the app should make**, rather than
+/// [`piggy_core::advice::generate`] followed by a second pass for the overlay:
+/// the fact sheet is built from the same [`piggy_core::advice::Inputs`] the
+/// generators ran over, and that load is the app's heaviest read.
+///
+/// The model never reorders anything here by itself: `apply_llm_order` moves
+/// rows the guard already accepted, and a candidate the model ignored keeps its
+/// place among the other unranked ones.
+pub fn advice_sheet(app: AppHandle) -> Result<(Vec<Candidate>, AdviceOverlayDto), ApiError> {
+    let home = config::piggy_home();
+    let (mut store, mut candidates, facts) = (|| -> anyhow::Result<(Store, Vec<Candidate>, Facts)> {
+        let mut store = Store::open(&home)?;
+        let pricing = Pricing::load(&home);
+        let state = piggy_core::PiggyState::load()?;
+        let catalog = piggy_core::Catalog::embedded();
+        let opts = advice::GenerateOptions::new(&catalog, &pricing, &state);
+
+        let inputs = advice::load_inputs(&mut store, &opts)?;
+        let candidates = advice::reconcile(&mut store, advice::generate_from(&inputs))?;
+        let facts = build_facts(&store, &pricing, &inputs, &candidates)?;
+        Ok((store, candidates, facts))
+    })()
+    .map_err(|e| ApiError::new("Could not assemble the advice", e.to_string(), true))?;
+
+    let overlay = advice_overlay(app, &facts, &candidates);
+
+    // Provenance, and the one field the generator could not fill: it does not
+    // know what the advisor was shown. Stamped only once a model has actually
+    // read this sheet, because a hash written when no model ran would claim a
+    // provenance that never happened. A hash of the payload is not the payload,
+    // so nothing about "contents never enter the DB" is bent here.
+    if overlay.model.is_some() && !overlay.pending {
+        let hash = facts.hash();
+        for id in &facts.candidate_ids {
+            let _ = store.set_advice_facts_hash(id, &hash);
+        }
+    }
+
+    if let Some(picks) = overlay_picks(&overlay) {
+        advice::apply_llm_order(&mut candidates, &picks);
+    }
+    Ok((candidates, overlay))
+}
+
+/// Attach every cached draft to the candidates that have one, returning how many
+/// landed.
+///
+/// Apply has to run through this first: a draft lives in this process only (it
+/// is derived from a CLAUDE.md's contents, which never enter the database), and
+/// [`piggy_core::advice::Candidate::new_content`] is what clears
+/// [`piggy_core::advice::Candidate::blocked`]. A candidate with no cached draft
+/// stays blocked, which is the deterministic presentation.
+pub fn attach_cached_drafts(candidates: &mut [Candidate]) -> usize {
+    let Some(spec) = selected().as_deref().and_then(advisor::model) else {
+        return 0;
+    };
+    let Ok(cache) = advice_cache().lock() else {
+        return 0;
+    };
+    let Some(overlay) = cache.current() else {
+        return 0;
+    };
+    let mut n = 0;
+    for c in candidates.iter_mut() {
+        let Some(source) = c.source_hash() else {
+            continue;
+        };
+        let key = cache::draft_key(spec.id, &c.id, source);
+        let Some(draft) = overlay.drafts.get(&key) else {
+            continue;
+        };
+        if advice::attach_draft(c, &draft.text, draft.had_bom).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Forget the cached overlay, so the next read re-runs the pass.
+///
+/// The whole of "Refresh advice": the candidates are regenerated every read
+/// anyway, and `advice::generate` already handles the lifecycle transitions.
+pub fn refresh_advice() {
+    if let Ok(mut cache) = advice_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// The fact sheet for one advice pass.
+fn build_facts(
+    store: &Store,
+    pricing: &Pricing,
+    inputs: &advice::Inputs,
+    candidates: &[Candidate],
+) -> anyhow::Result<Facts> {
+    let month = piggy_core::Period::Month.cutoff();
+    let ledger = store.ledger(month.as_deref(), pricing)?;
+    let found = piggy_core::insights(&ledger);
+
+    // Two adjacent windows for the floor trend, so a recent change is not
+    // damped by being inside the window it is compared against.
+    let recent_from = days_ago(facts::TREND_RECENT_DAYS);
+    let prior_from = days_ago(facts::TREND_RECENT_DAYS + facts::TREND_PRIOR_DAYS);
+    let recent = store.ledger_between(Some(&recent_from), None, pricing)?;
+    let prior = store.ledger_between(Some(&prior_from), Some(&recent_from), pricing)?;
+
+    // Catalog order, so the sheet's cap takes the savers the user sees first.
+    // The bundle's map is a `HashMap`, and iterating one into a payload whose
+    // hash is a cache key would move the key on every run.
+    let catalog = piggy_core::Catalog::embedded();
+    let attrs = crate::backend::attribution_bundle().ok();
+    let savers: Vec<(&piggy_core::registry::Entry, bool, &SaverAttribution)> = catalog
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let saver = inputs.savers.iter().find(|s| s.entry.id == e.id)?;
+            Some((e, saver.enabled, &saver.attribution))
+        })
+        .collect();
+
+    Ok(Facts::advice(&facts::AdviceInput {
+        ledger: &ledger,
+        trend: Some(facts::FloorTrend {
+            recent: &recent,
+            prior: &prior,
+        }),
+        insights: &found,
+        sweep: Some(&inputs.sweep),
+        manifests: &inputs.manifests,
+        server_usage: &inputs.server_usage,
+        claudemd: &inputs.claudemd,
+        project_mcp: &inputs.project_mcp,
+        savers: &savers,
+        headline: attrs.as_ref().map(|b| &b.headline),
+        candidates,
+    }))
+}
+
+/// An RFC3339 instant `days` in the past, in the form the sessions table stores.
+fn days_ago(days: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339()
+}
+
+/// The overlay's picks in the shape [`advice::apply_llm_order`] wants.
+fn overlay_picks(overlay: &AdviceOverlayDto) -> Option<Vec<guard::Pick>> {
+    if overlay.picks.is_empty() {
+        return None;
+    }
+    Some(
+        overlay
+            .picks
+            .iter()
+            .map(|p| guard::Pick {
+                id: p.id.clone(),
+                rationale: p.why.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// The in-process overlay cache. Memory only, and deliberately so: a draft is
+/// derived from a CLAUDE.md's contents, which the spec says never enter the
+/// database.
+static ADVICE_CACHE: OnceLock<Mutex<cache::AdviceCache>> = OnceLock::new();
+/// Set while a pass is in flight, so a burst of UI reads starts one worker.
+/// Only the inference build ever has a pass to be in flight.
+#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
+static ADVICE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn advice_cache() -> &'static Mutex<cache::AdviceCache> {
+    ADVICE_CACHE.get_or_init(|| Mutex::new(cache::AdviceCache::default()))
+}
+
+/// Look the overlay up, and start a pass when there is none.
+///
+/// Pull, not push (docs/m5-spec.md: "no tray badge, no notifications, no
+/// auto-refresh nags"): the worker is started by a UI read and never by a timer,
+/// and a read that finds nothing renders the deterministic order rather than
+/// waiting.
+fn advice_overlay(app: AppHandle, facts: &Facts, candidates: &[Candidate]) -> AdviceOverlayDto {
+    let hash = facts.hash();
+    let Some(spec) = selected().as_deref().and_then(advisor::model) else {
+        return AdviceOverlayDto {
+            facts_hash: hash,
+            ..Default::default()
+        };
+    };
+    if !spec.present() {
+        return AdviceOverlayDto {
+            facts_hash: hash,
+            ..Default::default()
+        };
+    }
+
+    let key = cache::advice_key(spec.id, &hash);
+    if let Ok(cache) = advice_cache().lock() {
+        if let Some(overlay) = cache.get(&key) {
+            return dto_from_overlay(spec, overlay);
+        }
+    }
+
+    // Nothing cached. Start a pass only once the watcher has been quiet for a
+    // whole tick: a background inference pass that starts while Claude Code is
+    // writing a session is a pass competing with the indexer.
+    let idle = crate::backend::index_is_idle();
+    if idle {
+        start_advice_pass(app, spec, facts.clone(), draft_jobs(candidates));
+    }
+    AdviceOverlayDto {
+        facts_hash: hash,
+        // Pending either way: idle spawned a worker, and not-idle will spawn one
+        // on the next read. Both mean "ask again", and neither is an error.
+        pending: true,
+        ..Default::default()
+    }
+}
+
+fn dto_from_overlay(
+    spec: &'static piggy_core::AdvisorModel,
+    overlay: &cache::AdviceOverlay,
+) -> AdviceOverlayDto {
+    AdviceOverlayDto {
+        facts_hash: overlay.facts_hash.clone(),
+        pending: false,
+        model: Some(spec.name.to_string()),
+        picks: overlay
+            .suggestion
+            .picks
+            .iter()
+            .map(|p| AdvicePickDto {
+                id: p.id.clone(),
+                why: p.rationale.clone(),
+            })
+            .collect(),
+        bundles: overlay
+            .suggestion
+            .bundles
+            .iter()
+            .map(|b| AdviceBundleDto {
+                project: b.project.clone(),
+                ids: b.ids.clone(),
+            })
+            .collect(),
+        drafted: overlay.drafted_candidates(),
+    }
+}
+
+/// One file a drafting call would rewrite.
+///
+/// Assembled before the worker starts so the thread carries plain data. The
+/// contents are read inside the worker, at call time, and never stored.
+///
+/// Assembled in every build so the two differ by inference alone; only the
+/// inference build has a worker to read the fields.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
+struct DraftJob {
+    candidate_id: String,
+    /// The file's display name, for the prompt.
+    label: String,
+    path: String,
+    /// The file's hash as the candidate was computed against it.
+    source_hash: String,
+}
+
+/// Start one background pass, or do nothing when one is already running.
+///
+/// Detached and fire-and-forget: the result lands in the cache and the UI is
+/// told to re-ask. Never queued - a second pass over the same facts would
+/// produce the same answer, and a pass over newer facts is what the next read
+/// starts.
+#[cfg(feature = "local-llm")]
+fn start_advice_pass(
+    app: AppHandle,
+    spec: &'static piggy_core::AdvisorModel,
+    facts: Facts,
+    jobs: Vec<DraftJob>,
+) {
+    // `swap` rather than load-then-store: two reads in the same millisecond must
+    // not both win.
+    if ADVICE_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        lower_thread_priority();
+        let overlay = run_advice_pass(spec, &facts, &jobs);
+        if let (Some(overlay), Ok(mut cache)) = (overlay, advice_cache().lock()) {
+            cache.put(overlay);
+        }
+        ADVICE_RUNNING.store(false, Ordering::SeqCst);
+        // The sheet is open and showing the deterministic order; this is what
+        // tells it to ask again.
+        let _ = app.emit(crate::STATS_UPDATED, ());
+    });
+}
+
+#[cfg(not(feature = "local-llm"))]
+fn start_advice_pass(
+    _app: AppHandle,
+    _spec: &'static piggy_core::AdvisorModel,
+    _facts: Facts,
+    _jobs: Vec<DraftJob>,
+) {
+}
+
+/// Rank, then draft, in one model load.
+///
+/// One load for the whole pass: two loads would be two cold starts and, if they
+/// ever overlapped, two copies of three gigabytes on a machine
+/// [`advisor::fits`] sized for one. The slot is claimed **before** the load, so
+/// drop order frees the weights first and the slot only afterwards.
+#[cfg(feature = "local-llm")]
+fn run_advice_pass(
+    spec: &'static piggy_core::AdvisorModel,
+    facts: &Facts,
+    jobs: &[DraftJob],
+) -> Option<cache::AdviceOverlay> {
+    use piggy_core::advisor::llama::Advisor;
+
+    let Some(_slot) = claim_inference() else {
+        // Another pass holds the slot. Never queue: the next UI read tries
+        // again, and by then the facts may have moved anyway.
+        return None;
+    };
+    // Loaded per run and dropped at the end of it, for the reason spelled out in
+    // `run_model`: a model cached in a `static` outlives ggml's teardown and
+    // aborts the app on quit.
+    let advisor = match Advisor::load(spec) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("piggy: could not load the local model for the advice pass: {e}");
+            return None;
+        }
+    };
+
+    let suggestion = match advisor.suggest(facts) {
+        Ok(s) => s,
+        Err(e) => {
+            // A failed rank pass costs the user nothing: the deterministic order
+            // renders either way.
+            eprintln!("piggy: the advice pass produced nothing usable: {e}");
+            return None;
+        }
+    };
+
+    let mut drafts = std::collections::BTreeMap::new();
+    for job in jobs {
+        // Contents at call time, never stored. A file that has changed since the
+        // candidate was computed is skipped rather than drafted against bytes
+        // that are gone.
+        let text = match piggy_core::claudemd::read_file_text(std::path::Path::new(&job.path), None)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("piggy: could not read {} to draft it: {e:#}", job.path);
+                continue;
+            }
+        };
+        if text.hash != job.source_hash {
+            continue;
+        }
+        match advisor.draft(&job.label, &text.text) {
+            Ok(Some(drafted)) => {
+                drafts.insert(
+                    cache::draft_key(spec.id, &job.candidate_id, &job.source_hash),
+                    cache::Draft {
+                        candidate_id: job.candidate_id.clone(),
+                        text: drafted,
+                        had_bom: text.had_bom,
+                    },
+                );
+            }
+            // Refused by the guard: the candidate stays blocked, which is the
+            // deterministic presentation the spec asks for.
+            Ok(None) => {}
+            Err(e) => eprintln!("piggy: drafting {} failed: {e}", job.label),
+        }
+    }
+
+    Some(cache::AdviceOverlay {
+        facts_hash: facts.hash(),
+        model_id: spec.id.to_string(),
+        suggestion,
+        drafts,
+    })
+}
+
+/// Drop this thread to the utility quality-of-service class.
+///
+/// The idle gate decides *when* the pass runs; this decides what it costs while
+/// it does. They solve different halves: a pass that starts in a quiet moment
+/// still runs for a minute or two, and the user is very likely typing again
+/// before it finishes. `pthread_set_qos_class_self_np` is the OS-supported
+/// mechanism for that, and halving the core count is only a proxy for it.
+#[cfg(all(feature = "local-llm", target_os = "macos"))]
+fn lower_thread_priority() {
+    // SAFETY: an FFI call with no pointer arguments, on the calling thread,
+    // documented to be callable from any thread that is not a dispatch worker.
+    // A failure returns non-zero and changes nothing, which is why the result is
+    // ignored: a pass at default priority is worse than one at utility, and
+    // better than no pass.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    }
+}
+
+#[cfg(all(feature = "local-llm", not(target_os = "macos")))]
+fn lower_thread_priority() {}
+
+/// Run `f` with the best schema tokenizer this build and this machine can
+/// offer.
+///
+/// The seam [`piggy_core::probe::SchemaTokenizer`] exists for: with weights on
+/// disk a manifest is measured by the advisor's own vocabulary, and without them
+/// it falls back to the shipped bytes estimate, which labels itself as one. The
+/// caller does not know or care which it got - the label travels with the count
+/// into the `mcp_manifests` row.
+///
+/// A closure rather than a returned value because the tokenizer borrows a loaded
+/// vocabulary, and its lifetime is the probe run.
+pub fn with_schema_tokenizer<T>(f: impl FnOnce(&dyn probe::SchemaTokenizer) -> T) -> T {
+    #[cfg(feature = "local-llm")]
+    {
+        use piggy_core::advisor::tokenizer::ModelTokenizer;
+        if let Some(spec) = selected().as_deref().and_then(advisor::model) {
+            if spec.present() {
+                match ModelTokenizer::load(spec) {
+                    Ok(t) => return f(&t),
+                    Err(e) => eprintln!("piggy: could not load the advisor's tokenizer: {e:#}"),
+                }
+            }
+        }
+    }
+    f(&probe::BytesEstimate)
+}
+
+fn draft_jobs(candidates: &[Candidate]) -> Vec<DraftJob> {
+    candidates
+        .iter()
+        .filter(|c| c.kind == advice::ActionKind::ClaudemdTrim)
+        .filter_map(|c| {
+            Some(DraftJob {
+                candidate_id: c.id.clone(),
+                // The candidate's title without its verb, which is already the
+                // file's plain name: "Trim Stacked's CLAUDE.md" names the file
+                // "Stacked's CLAUDE.md".
+                label: c.title.strip_prefix("Trim ").unwrap_or(&c.title).to_string(),
+                path: match &c.params {
+                    advice::Params::Claudemd { path } => path.clone(),
+                    _ => return None,
+                },
+                source_hash: c.source_hash()?.to_string(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
