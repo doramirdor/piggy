@@ -32,7 +32,7 @@ files - and then does something nobody else does: **it measures whether they act
 </p>
 
 <p align="center">
-  <sub><strong>▶ <a href="docs/piggy-demo.mp4">Watch the full 33-second demo</a></strong> — the loop above is a silent highlight</sub>
+  <sub><strong>▶ <a href="docs/piggy-demo.mp4">Watch the full 33-second demo</a></strong> (the loop above is a silent highlight)</sub>
 </p>
 
 <p align="center">

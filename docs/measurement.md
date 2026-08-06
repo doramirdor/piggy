@@ -121,7 +121,7 @@ Per saver X:
   on a cheaper model (`nadir-route`, and `nadirclaw` when it lands) can send the *same* number
   of tokens and still cut the bill, so its four per-stream deltas legitimately settle near
   zero. That is a true measurement of the streams, not a null result for the saver, and the
-  per-stream badge must not be read as "it did nothing" — the win is in cost and shows up in
+  per-stream badge must not be read as "it did nothing": the win is in cost and shows up in
   the ledger's model mix. Nothing here is changed for them: the A/B is run and reported the
   same way, and a cost-side contrast is future work rather than something the badge implies
   today.
