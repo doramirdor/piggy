@@ -53,9 +53,9 @@ fn a_snapshot_restores_the_file_byte_for_byte() {
     let path = sb.file("proj/CLAUDE.md", ORIGINAL);
     let mut state = PiggyState::default();
 
-    let record = snapshots::snapshot(&path, Some("advice-1"), &mut state).unwrap();
+    let record = snapshots::snapshot(&path, "advice-1", &mut state).unwrap();
     assert_eq!(state.file_snapshots.len(), 1, "recorded in state.json");
-    assert_eq!(record.advice_id.as_deref(), Some("advice-1"));
+    assert_eq!(record.advice_id, "advice-1");
     assert!(
         Path::new(&record.backup).starts_with(snapshots::files_backup_dir()),
         "backups live under <piggy_home>/backups/files"
@@ -104,10 +104,10 @@ fn restoring_the_whole_list_undoes_every_edit_back_to_the_original() {
     let mut state = PiggyState::default();
 
     // Two applies against the same file: a dead-reference fix, then a trim.
-    snapshots::snapshot(&path, Some("fix"), &mut state).unwrap();
+    snapshots::snapshot(&path, "fix", &mut state).unwrap();
     let fixed = b"# Rules\n\n- Never use an emoji\n- Prefer plain prose\n";
     snapshots::write_atomic(&path, fixed).unwrap();
-    snapshots::snapshot(&path, Some("trim"), &mut state).unwrap();
+    snapshots::snapshot(&path, "trim", &mut state).unwrap();
     snapshots::write_atomic(&path, TRIMMED).unwrap();
 
     let records = state.file_snapshots.clone();
@@ -128,8 +128,8 @@ fn a_failed_restore_names_the_file_and_the_others_still_land() {
     let broken = sb.file("proj/.claude/rules/style.md", b"# Style\n");
     let mut state = PiggyState::default();
 
-    snapshots::snapshot(&good, Some("a1"), &mut state).unwrap();
-    let lost = snapshots::snapshot(&broken, Some("a1"), &mut state).unwrap();
+    snapshots::snapshot(&good, "a1", &mut state).unwrap();
+    let lost = snapshots::snapshot(&broken, "a1", &mut state).unwrap();
     snapshots::write_atomic(&good, TRIMMED).unwrap();
     snapshots::write_atomic(&broken, b"").unwrap();
 
@@ -150,6 +150,128 @@ fn a_failed_restore_names_the_file_and_the_others_still_land() {
     );
     assert_eq!(std::fs::read(&good).unwrap(), ORIGINAL);
     assert_eq!(std::fs::read(&broken).unwrap(), b"", "still not restored");
+}
+
+/// One copy per apply, and now one more per restore that finds the file edited,
+/// with nothing ever deleting either: the directory grew for ever. It is bounded
+/// the way `settings.json`'s history is, except that a copy some record still
+/// names is the only thing standing between an Undo and the original bytes, so
+/// it is never a candidate however old it gets.
+#[test]
+fn spent_copies_are_pruned_and_a_copy_a_record_still_names_is_not() {
+    let sb = Sandbox::new();
+    let path = sb.file("proj/CLAUDE.md", ORIGINAL);
+    let mut state = PiggyState::default();
+
+    // The oldest copy in the directory, and the one that must survive all of it.
+    let live = snapshots::snapshot(&path, "advice-1", &mut state).unwrap();
+
+    // Sixty applies whose records have since been restored and dropped from the
+    // ledger, each leaving a copy nobody points at any more.
+    let spent: Vec<String> = (0..60)
+        .map(|_| {
+            let rec = snapshots::snapshot(&path, "restored", &mut state).unwrap();
+            state.file_snapshots.pop();
+            rec.backup
+        })
+        .collect();
+
+    assert!(Path::new(&live.backup).exists(), "the live copy stays");
+    assert!(
+        !Path::new(&spent[0]).exists(),
+        "the oldest spent copy goes first"
+    );
+    assert!(
+        Path::new(&spent[59]).exists(),
+        "the recent ones are still a recovery trail"
+    );
+    let kept = std::fs::read_dir(snapshots::files_backup_dir())
+        .unwrap()
+        .count();
+    assert!(
+        (50..=52).contains(&kept),
+        "sixty-one applies must leave about fifty copies, not sixty-one: {kept}"
+    );
+}
+
+/// The copy a restore takes of the user's own bytes is the only copy of that
+/// work. Pruning bounds the directory by deleting copies no record points at, and
+/// a `file_backups` record is a record: it is swept for live names alongside
+/// `file_snapshots`, so splitting the ledgers could not quietly make somebody's
+/// writing prunable.
+#[test]
+fn pruning_never_deletes_the_copy_of_the_users_own_work() {
+    let sb = Sandbox::new();
+    let path = sb.file("proj/CLAUDE.md", ORIGINAL);
+    let mut state = PiggyState::default();
+
+    // Apply, the user writes over it, then undo: the undo copies their bytes
+    // aside before it puts the original back.
+    snapshots::snapshot_and_write(&path, TRIMMED, "advice-1", &mut state).unwrap();
+    let theirs = b"# Rules\n\n- Never use an emoji\n- And one of mine\n";
+    snapshots::write_atomic(&path, theirs).unwrap();
+    let records = state.file_snapshots.clone();
+    assert_eq!(snapshots::restore(&records, &mut state).restored, 1);
+    assert_eq!(
+        state.file_backups.len(),
+        1,
+        "their work went to the other ledger"
+    );
+    let theirs_copy = state.file_backups[0].backup.clone();
+    assert_eq!(std::fs::read(&theirs_copy).unwrap(), theirs);
+
+    // Sixty applies whose records have since been restored and dropped, which is
+    // what drives pruning past its ceiling.
+    for _ in 0..60 {
+        snapshots::snapshot(&path, "restored", &mut state).unwrap();
+        state.file_snapshots.pop();
+    }
+
+    assert!(
+        Path::new(&theirs_copy).exists(),
+        "their work is not a spent copy, however old it gets"
+    );
+}
+
+/// `file_snapshots` used to hold both kinds of record, told apart only by whether
+/// `advice_id` was set. A state file written then must come back with the id-less
+/// ones moved into `file_backups`, where no consumer has to remember the
+/// convention, rather than sitting in the list every restore walks.
+#[test]
+fn an_id_less_record_moves_to_the_backup_ledger_on_load() {
+    let sb = Sandbox::new();
+    let path = sb.file(
+        "state.json",
+        br#"{
+          "version": 1,
+          "file_snapshots": [
+            {"path":"/p/CLAUDE.md","backup":"/b/a.bak","advice_id":"advice-1",
+             "after_hash":"deadbeef","applied_at":"2026-01-02T03:04:05Z"},
+            {"path":"/p/CLAUDE.md","backup":"/b/theirs.bak","advice_id":null,
+             "applied_at":"2026-01-03T03:04:05Z"},
+            {"path":"/p/rules.md","backup":"/b/older.bak",
+             "applied_at":"2026-01-04T03:04:05Z"}
+          ]
+        }"#,
+    );
+
+    let state = PiggyState::load_from(&path).unwrap();
+    assert_eq!(state.file_snapshots.len(), 1, "only the real edit restores");
+    assert_eq!(state.file_snapshots[0].advice_id, "advice-1");
+
+    // Both an explicit null and an absent key are the old spelling of "not an
+    // edit of Piggy's", and both keep their path and their copy.
+    assert_eq!(state.file_backups.len(), 2);
+    assert_eq!(state.file_backups[0].backup, "/b/theirs.bak");
+    assert_eq!(state.file_backups[0].taken_at, "2026-01-03T03:04:05Z");
+    assert_eq!(state.file_backups[1].path, "/p/rules.md");
+
+    // And the move is durable: what was written back does not migrate again.
+    let round = sb.dir.path().join("round.json");
+    state.save_to(&round).unwrap();
+    let again = PiggyState::load_from(&round).unwrap();
+    assert_eq!(again.file_snapshots, state.file_snapshots);
+    assert_eq!(again.file_backups, state.file_backups);
 }
 
 #[test]

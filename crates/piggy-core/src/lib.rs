@@ -59,7 +59,7 @@ pub use pricing::{ModelPrice, Pricing};
 pub use probe::{ConfiguredServer, Measurement, MeasurementStatus, ProbeError, ProbeOptions};
 pub use registry::{Catalog, Entry};
 pub use rotation::{RotationOutcome, RotationPlan};
-pub use snapshots::FileSnapshot;
+pub use snapshots::{FileBackup, FileSnapshot};
 pub use sources::{Interface, SourceKind};
 pub use state::PiggyState;
 pub use stats::{GroupRow, Period, SourceRow, Totals};

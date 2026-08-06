@@ -69,7 +69,7 @@ fn fixture(name: &str) -> String {
 fn fixture_server(key: &str, node: &str, script: &str, env: Value) -> probe::ConfiguredServer {
     let root = json!({
         "mcpServers": {
-            key: { "command": node, "args": [fixture(script)], "env": env }
+            key: { "command": node, "args": [fixture(script), run_marker()], "env": env }
         }
     });
     probe::servers_from_root(&root)
@@ -190,14 +190,33 @@ fn a_flood_of_server_requests_is_refused_a_bounded_number_of_times() {
     );
 }
 
-/// Whether any process on this machine is still running `script`. `false` when
+/// A token unique to this test binary's run, passed to every fixture server as
+/// a trailing argument it ignores.
+///
+/// `pgrep -f` matches every process on the machine, so searching for the script
+/// name alone finds fixture servers started by a *different* concurrent run
+/// (another worktree, another agent, a second `cargo test`) and fails a leak
+/// assertion that has nothing to do with this run. Seen twice in practice.
+fn run_marker() -> String {
+    format!("--piggy-test-run={}", std::process::id())
+}
+
+/// Whether a fixture server started by *this* run is still going. `false` when
 /// `pgrep` is unavailable, so the assertion above never fails for want of a
 /// tool.
 fn fixture_process_is_running(script: &str) -> bool {
+    // Both patterns, so a concurrent run's copy of the same script does not
+    // count: `pgrep -f` ANDs repeated patterns only with `-a` on some platforms,
+    // so match the marker and confirm the script name in the matched line.
     std::process::Command::new("pgrep")
-        .args(["-f", script])
+        .args(["-fl", &run_marker()])
         .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.contains(script))
+        })
         .unwrap_or(false)
 }
 

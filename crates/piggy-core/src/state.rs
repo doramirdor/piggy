@@ -45,6 +45,12 @@ pub struct PiggyState {
     /// last. Each record is a one-click Undo target; see [`crate::snapshots`].
     #[serde(default)]
     pub file_snapshots: Vec<crate::snapshots::FileSnapshot>,
+    /// Copies of the **user's** own bytes, taken just before a restore wrote over
+    /// them, newest last. The opposite of `file_snapshots` and so a separate
+    /// field: nothing here is ever written back. See
+    /// [`crate::snapshots::FileBackup`].
+    #[serde(default)]
+    pub file_backups: Vec<crate::snapshots::FileBackup>,
     /// MCP servers the advice engine re-scoped inside `~/.claude.json`, each
     /// carrying the exact before-JSON of both ends; see [`crate::advice`].
     #[serde(default)]
@@ -83,6 +89,7 @@ impl Default for PiggyState {
             savers: BTreeMap::new(),
             sweep_disabled: Vec::new(),
             file_snapshots: Vec::new(),
+            file_backups: Vec::new(),
             scope_moves: Vec::new(),
             backups: Vec::new(),
             settings_hash: None,
@@ -90,6 +97,56 @@ impl Default for PiggyState {
             settings: Settings::default(),
             created_at: None,
         }
+    }
+}
+
+/// Move pre-split records from `file_snapshots` into `file_backups`, in the raw
+/// document, before it is deserialized.
+///
+/// `file_snapshots` used to hold two structurally identical but semantically
+/// opposite kinds of record: Piggy's own edits, which Undo and Restore Defaults
+/// write back, and the copies a restore takes of the user's bytes, which nothing
+/// may ever write back. The only thing telling them apart was whether `advice_id`
+/// was set, and every consumer had to remember that. Three defects came out of
+/// it, so the two are separate fields now and
+/// [`crate::snapshots::FileSnapshot::advice_id`] is no longer optional.
+///
+/// This runs before deserializing, because an id-less record on disk no longer
+/// *is* a `FileSnapshot` and would fail to parse. Additive and lossless: the
+/// record keeps its path and its copy, `applied_at` becomes `taken_at`, and the
+/// fields that only meant something for a restore target are dropped.
+fn split_out_file_backups(doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    let Some(snapshots) = obj.get_mut("file_snapshots").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let (edits, legacy): (Vec<Value>, Vec<Value>) = std::mem::take(snapshots)
+        .into_iter()
+        .partition(|r| r.get("advice_id").is_some_and(|id| !id.is_null()));
+    *snapshots = edits;
+    if legacy.is_empty() {
+        return;
+    }
+    let moved = legacy.into_iter().map(|mut rec| {
+        if let Some(fields) = rec.as_object_mut() {
+            if let Some(when) = fields.remove("applied_at") {
+                fields.insert("taken_at".to_string(), when);
+            }
+            fields.remove("advice_id");
+            fields.remove("after_hash");
+        }
+        rec
+    });
+    match obj
+        .entry("file_backups")
+        .or_insert_with(|| Value::Array(Vec::new()))
+    {
+        Value::Array(existing) => existing.extend(moved),
+        // Something wrote a non-array there. Replacing it loses nothing this
+        // schema has ever meant, and keeps the user's copies findable.
+        slot => *slot = Value::Array(moved.collect()),
     }
 }
 
@@ -231,7 +288,10 @@ impl PiggyState {
         }
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading state file {}", path.display()))?;
-        let state: PiggyState = serde_json::from_slice(&bytes)
+        let mut doc: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing state file {}", path.display()))?;
+        split_out_file_backups(&mut doc);
+        let state: PiggyState = serde_json::from_value(doc)
             .with_context(|| format!("parsing state file {}", path.display()))?;
         Ok(state)
     }

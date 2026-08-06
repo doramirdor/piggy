@@ -867,6 +867,11 @@ fn cmd_backups() -> Result<()> {
     // pre-Piggy target and a rolling timestamped history; the advice engine
     // backs up whole files it did not write (a CLAUDE.md is prose, not config,
     // so its restore target has to be the original bytes), one record per edit.
+    //
+    // Two lists, because state.json keeps two: `file_snapshots` is Piggy's edits,
+    // which Undo and Restore Defaults put back, and `file_backups` is what the
+    // user had on disk before a restore overwrote it, which nothing writes back.
+    // Printing them together bills somebody's own prose as an undoable Piggy edit.
     let state = PiggyState::load()?;
     println!();
     println!(
@@ -874,22 +879,26 @@ fn cmd_backups() -> Result<()> {
         state.file_snapshots.len(),
         snapshots::files_backup_dir().display()
     );
-    if state.file_snapshots.is_empty() {
-        println!("  (none yet)");
-    }
-    for record in state.file_snapshots.iter().rev().take(20) {
-        let size = std::fs::metadata(&record.backup)
-            .map(|m| m.len())
-            .unwrap_or(0);
+    print_backup_rows(
+        &state
+            .file_snapshots
+            .iter()
+            .map(|r| (&r.path, &r.backup, &r.applied_at))
+            .collect::<Vec<_>>(),
+    );
+    if !state.file_backups.is_empty() {
+        println!();
         println!(
-            "  {}  ({} bytes, saved {})",
-            record.path,
-            commafy(size),
-            record.applied_at
+            "Your own content, copied before a restore put a file back ({} kept, nothing puts these back):",
+            state.file_backups.len()
         );
-    }
-    if state.file_snapshots.len() > 20 {
-        println!("  … and {} more", state.file_snapshots.len() - 20);
+        print_backup_rows(
+            &state
+                .file_backups
+                .iter()
+                .map(|r| (&r.path, &r.backup, &r.taken_at))
+                .collect::<Vec<_>>(),
+        );
     }
     if !state.scope_moves.is_empty() {
         println!();
@@ -911,6 +920,22 @@ fn cmd_backups() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The newest 20 of a backup ledger as `(path, copy, when)`, each with the size
+/// of its copy on disk. Takes the three fields rather than either record type,
+/// since the two ledgers print the same and share no struct on purpose.
+fn print_backup_rows(rows: &[(&String, &String, &String)]) {
+    if rows.is_empty() {
+        println!("  (none yet)");
+    }
+    for (path, backup, when) in rows.iter().rev().take(20) {
+        let size = std::fs::metadata(backup).map(|m| m.len()).unwrap_or(0);
+        println!("  {}  ({} bytes, saved {})", path, commafy(size), when);
+    }
+    if rows.len() > 20 {
+        println!("  … and {} more", rows.len() - 20);
+    }
 }
 
 // ---------------------------------------------------------------------------

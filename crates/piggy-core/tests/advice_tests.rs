@@ -1332,33 +1332,39 @@ fn undoing_a_file_edited_since_the_apply_backs_that_edit_up_first() {
         "the undo still puts the original back"
     );
 
-    let kept: Vec<&piggy_core::snapshots::FileSnapshot> = state
-        .file_snapshots
+    let kept: Vec<&piggy_core::snapshots::FileBackup> = state
+        .file_backups
         .iter()
-        .filter(|s| s.path == target.to_string_lossy())
+        .filter(|b| b.path == target.to_string_lossy())
         .collect();
     assert_eq!(
         kept.len(),
         1,
-        "what the user wrote after the apply is snapshotted, not overwritten unrecorded: {:?}",
-        state.file_snapshots
-    );
-    assert!(
-        kept[0].advice_id.is_none(),
-        "it is a backup of their content, not an edit of Piggy's for something to reverse later"
+        "what the user wrote after the apply is copied aside, not overwritten unrecorded: {:?}",
+        state.file_backups
     );
     assert_eq!(std::fs::read_to_string(&kept[0].backup).unwrap(), theirs);
+    assert!(
+        state.file_snapshots.is_empty(),
+        "and it lands in the other ledger, where nothing can offer it as an undo: {:?}",
+        state.file_snapshots
+    );
 
     // A file that is exactly as the apply left it costs no second copy.
     let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
     advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
-    let recorded = state.file_snapshots.len();
+    let copies = state.file_backups.len();
     advice::undo(&mut store, &mut state, &catalog, &candidate.id).unwrap();
-    assert_eq!(
-        state.file_snapshots.len(),
-        recorded - 1,
-        "an untouched file is restored with nothing else recorded: {:?}",
+    assert!(
+        state.file_snapshots.is_empty(),
+        "the edit's own record goes with the undo: {:?}",
         state.file_snapshots
+    );
+    assert_eq!(
+        state.file_backups.len(),
+        copies,
+        "an untouched file is restored with nothing else copied aside: {:?}",
+        state.file_backups
     );
 }
 
@@ -1586,6 +1592,189 @@ fn restore_defaults_puts_edited_files_back_and_names_the_one_it_could_not() {
         "only the failure keeps its record; the backup is its only copy"
     );
     assert_eq!(after.file_snapshots[0].path, beta_path);
+}
+
+/// The panic button has to be idempotent. A record with no recorded
+/// `after_hash` - every record written before that field existed, so an upgrade
+/// alone gets here with no user edit anywhere - reads as "edited since the
+/// apply", so the first press copies Piggy's own edit aside before putting the
+/// original back. Restoring *that* copy on the second press writes the edit back
+/// over the original, and the press after that takes it off again, for ever.
+#[test]
+fn restore_defaults_pressed_twice_leaves_the_original_in_place() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (_, proj) = seed_claudemd(&sb, &mut store);
+    let target = proj.join("CLAUDE.md");
+    let before = std::fs::read(&target).unwrap();
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+    assert_ne!(std::fs::read(&target).unwrap(), before);
+
+    // A state.json written by a Piggy that did not record what it wrote.
+    let mut upgraded = PiggyState::load().unwrap();
+    for snap in &mut upgraded.file_snapshots {
+        snap.after_hash = None;
+    }
+    upgraded.save().unwrap();
+
+    let first = engine::restore_defaults().unwrap();
+    assert_eq!(first.files_restored, 1);
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+
+    let second = engine::restore_defaults().unwrap();
+    assert_eq!(
+        second.files_restored, 0,
+        "there was nothing left to put back: {:?}",
+        second.messages
+    );
+    assert!(
+        !second.messages.iter().any(|m| m.contains("put back")),
+        "so the second press does not claim it put a file back: {:?}",
+        second.messages
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        before,
+        "and it does not write Piggy's edit back over the original"
+    );
+
+    // The copy the first press took stays as a recovery copy, in the ledger that
+    // nothing restores from.
+    let after = PiggyState::load().unwrap();
+    assert!(after.file_snapshots.is_empty(), "nothing left to put back");
+    assert_eq!(after.file_backups.len(), 1);
+}
+
+/// An Undo backs up whatever the user wrote over Piggy's edit before it puts the
+/// original back, and records that copy in `file_backups` because it is their
+/// content, not an edit of ours waiting to be reversed. Restore Defaults reads
+/// only the other ledger: putting that copy back would hand the user Piggy's edit
+/// again, on top of the original their Undo just restored.
+#[test]
+fn restore_defaults_does_not_write_back_what_an_undo_saved() {
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (_, proj) = seed_claudemd(&sb, &mut store);
+    let target = proj.join("CLAUDE.md");
+    let before = std::fs::read(&target).unwrap();
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+
+    let theirs = format!(
+        "{}- Always run the linter before you push.\n",
+        std::fs::read_to_string(&target).unwrap()
+    );
+    std::fs::write(&target, &theirs).unwrap();
+    assert!(
+        advice::undo(&mut store, &mut state, &catalog, &candidate.id)
+            .unwrap()
+            .complete()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+
+    let report = engine::restore_defaults().unwrap();
+    assert_eq!(
+        report.files_restored, 0,
+        "the undo already put the only edited file back: {:?}",
+        report.messages
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        before,
+        "Restore Defaults must not re-apply Piggy's edit out of the user's own backup"
+    );
+    let after = PiggyState::load().unwrap();
+    assert!(after.file_snapshots.is_empty());
+    assert_eq!(after.file_backups.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&after.file_backups[0].backup).unwrap(),
+        theirs,
+        "their work is still recoverable by hand"
+    );
+}
+
+/// `chmod 000` denies nobody who is root, and some filesystems ignore the mode
+/// outright. Probe it rather than assume it, so a test about unreadable files
+/// skips instead of failing for the wrong reason.
+#[cfg(unix)]
+fn mode_000_denies_a_read(sb: &Sandbox) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let probe = sb.dir.path().join("readable-probe");
+    std::fs::write(&probe, b"x").unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = std::fs::read(&probe).is_err();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::remove_file(&probe).unwrap();
+    denied
+}
+
+/// "Gone" and "there but unreadable" are not the same answer. A restore that
+/// cannot copy a file's current bytes must not write over them: `write_atomic`
+/// needs only a writable parent directory, so it would succeed on a file nobody
+/// can read and destroy the content with no backup anywhere.
+#[test]
+#[cfg(unix)]
+fn undoing_a_file_that_cannot_be_read_fails_by_name_instead_of_destroying_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = Sandbox::new();
+    if !mode_000_denies_a_read(&sb) {
+        return;
+    }
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (_, proj) = seed_claudemd(&sb, &mut store);
+    let target = proj.join("CLAUDE.md");
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
+    advice::apply(&mut store, &mut state, &catalog, &candidate).unwrap();
+    let applied = std::fs::read(&target).unwrap();
+
+    // The file is still there and still has content; it is reading it that is
+    // refused. Note the mode is exactly what the apply left, so the record's
+    // `after_hash` matches what is on disk - it is the read failure alone that
+    // decides this.
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let undone = advice::undo(&mut store, &mut state, &catalog, &candidate.id).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(
+        !undone.complete(),
+        "a file that could not be read is not a file that was restored"
+    );
+    let failure = &undone.failures[0];
+    assert_eq!(failure.item, target.to_string_lossy());
+    assert!(
+        failure.reason.contains("CLAUDE.md"),
+        "the reason names the file: {}",
+        failure.reason
+    );
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        applied,
+        "the content nobody could copy is still on disk"
+    );
+    assert_eq!(
+        store.advice(&candidate.id).unwrap().unwrap().status,
+        advice_status::APPLIED,
+        "and the row keeps its restore reference, so the undo can be retried"
+    );
+    assert_eq!(
+        state.file_snapshots.len(),
+        1,
+        "the backup is still the only copy of the original"
+    );
 }
 
 #[test]

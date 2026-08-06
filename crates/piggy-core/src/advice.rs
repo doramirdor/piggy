@@ -1808,8 +1808,7 @@ fn apply_claudemd(
     // Backup and write in one call, so the record carries the hash of what was
     // written and a later Undo can tell this content from something the user
     // has since put there.
-    let record =
-        snapshots::snapshot_and_write(file, content.as_bytes(), Some(&candidate.id), state)?;
+    let record = snapshots::snapshot_and_write(file, content.as_bytes(), &candidate.id, state)?;
     state.save()?;
     Ok((
         format!("{REF_FILE_SNAPSHOT}{}", record.backup),
@@ -2052,7 +2051,7 @@ fn undo_file_snapshots(
     let mine: Vec<FileSnapshot> = state
         .file_snapshots
         .iter()
-        .filter(|s| s.advice_id.as_deref() == Some(advice_id))
+        .filter(|s| s.advice_id == advice_id)
         .cloned()
         .collect();
     if mine.is_empty() {
@@ -2080,17 +2079,17 @@ fn refuse_out_of_order(store: &Store, state: &PiggyState, advice_id: &str) -> Re
     for (i, rec) in all
         .iter()
         .enumerate()
-        .filter(|(_, r)| r.advice_id.as_deref() == Some(advice_id))
+        .filter(|(_, r)| r.advice_id == advice_id)
     {
         // Further up the stack, same file, some *other* advice row. Another of
-        // our own records is fine (one suggestion may touch a file twice), and a
-        // record with no advice row behind it is a plain backup rather than an
-        // edit waiting to be reversed.
-        let later = all[i + 1..].iter().find_map(|r| {
-            let other = r.advice_id.as_deref()?;
-            (r.path == rec.path && other != advice_id).then_some(other)
-        });
-        let Some(later) = later else {
+        // our own records is fine: one suggestion may touch a file twice. (The
+        // user's own copies used to live in this list too and had to be skipped
+        // by hand here; they are `state.file_backups` now, so there is nothing
+        // in range that is not an edit waiting to be reversed.)
+        let later = all[i + 1..]
+            .iter()
+            .find(|r| r.path == rec.path && r.advice_id != advice_id);
+        let Some(later) = later.map(|r| r.advice_id.as_str()) else {
             continue;
         };
         bail!(

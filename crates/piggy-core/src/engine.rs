@@ -608,6 +608,13 @@ pub fn restore_defaults() -> Result<RestoreReport> {
     // Files the advice engine rewrote, oldest snapshot winning (see
     // `snapshots::restore`), so a file edited twice comes back to how it was
     // before the first edit.
+    //
+    // The whole list, with nothing to filter out. `state.file_backups` holds the
+    // copies a previous restore took of what was on disk *then* - Piggy's edit
+    // plus whatever the user wrote over it - and this button pressed twice used
+    // to put those back, re-applying the very edit it exists to undo. They are a
+    // different type in a different field now, so that is not a mistake this can
+    // make: they stay as recovery copies, and nothing writes them back.
     let snapshots = state.file_snapshots.clone();
     if !snapshots.is_empty() {
         let outcome = crate::snapshots::restore(&snapshots, &mut state);
