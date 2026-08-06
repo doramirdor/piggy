@@ -49,7 +49,10 @@ fn downloads_verifies_and_generates() {
     let started = Instant::now();
     let mut last = 0u64;
     download::fetch(spec, &cancel, |received, total| {
-        let pct = if total == 0 { 0 } else { received * 100 / total };
+        // `checked_div` rather than a guarded divide: a zero total is a server
+        // that sent no content-length, not an error, and 0% is the honest
+        // reading of "no idea how far along this is".
+        let pct = (received * 100).checked_div(total).unwrap_or(0);
         if pct >= last + 10 {
             last = pct;
             println!("  {pct}% ({received}/{total})");

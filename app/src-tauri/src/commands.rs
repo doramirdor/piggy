@@ -167,9 +167,13 @@ pub async fn sweep_restore() -> Result<SweepRestoreDto, ApiError> {
 /// Regenerate every candidate and report. This IS the refresh: `advice::generate`
 /// recomputes from scratch and reconciles the advice table on every call, so
 /// there is no second command for it.
+///
+/// Takes the app handle because the report is also what starts a local advice
+/// pass: the sheet reads, a cache miss spawns one detached worker, and the
+/// worker emits `stats-updated` when it lands so the open sheet asks again.
 #[tauri::command]
-pub async fn advice_report() -> Result<AdviceReportDto, ApiError> {
-    run(backend::advice_report).await
+pub async fn advice_report(app: AppHandle) -> Result<AdviceReportDto, ApiError> {
+    run(move || backend::advice_report(app)).await
 }
 
 #[tauri::command]

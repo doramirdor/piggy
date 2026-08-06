@@ -1271,6 +1271,12 @@ fn overlay(facts_hash: &str, model: &str) -> AdviceOverlay {
                 had_bom: false,
             },
         )]),
+        // A finished pass records what it tried, drafted or not.
+        attempted: std::collections::BTreeSet::from([cache::draft_key(
+            model,
+            "claudemd-trim-2222222222222222",
+            "hash-of-the-file",
+        )]),
     }
 }
 
@@ -1333,6 +1339,48 @@ fn the_same_facts_produce_a_byte_identical_advice_list() {
             "server-disable-1111111111111111".to_string(),
             "claudemd-trim-2222222222222222".to_string(),
         ]
+    );
+}
+
+/// Determinism where it is worth having: the rejecting path.
+///
+/// Acceptance criterion 6 asks for a byte-identical list from the same facts,
+/// and a guard that accepted everything would satisfy that trivially. What has
+/// to be stable is what it *drops*: an id it never heard of, a number that is
+/// not in the facts, and a hedge. Same input, same three refusals, same one
+/// survivor, and the cache key over those facts does not move either.
+#[test]
+fn the_guard_refuses_the_same_things_every_time() {
+    let f = facts();
+    let raw = r#"{"picks":[
+      {"id":"not-a-candidate-9999999999999999","why":"Nothing has called quiet-server in the window, so every session pays for it."},
+      {"id":"server-disable-1111111111111111","why":"Nothing has called quiet-server in the window, so every session pays for it."},
+      {"id":"claudemd-trim-2222222222222222","why":"This file costs 987654 tokens a month and every session pays it."},
+      {"id":"saver-mix-3333333333333333","why":"Honey might probably be worth turning off at some point."}
+    ]}"#;
+    let run = || {
+        let s = guard::accept_suggestion(raw, &f).unwrap();
+        s.picks
+            .iter()
+            .map(|p| (p.id.clone(), p.rationale.clone()))
+            .collect::<Vec<_>>()
+    };
+    let first = run();
+    assert_eq!(first, run(), "the guard is not a function of its input alone");
+    assert_eq!(
+        first.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        vec!["server-disable-1111111111111111"],
+        "an invented id, a fabricated number and a hedge all have to go: {first:?}"
+    );
+
+    // And the key the overlay is filed under is a function of the same facts,
+    // so a second pass over an unchanged world is a cache hit rather than a
+    // second answer.
+    let model = "qwen3-4b-instruct-2507";
+    assert_eq!(
+        cache::advice_key(model, &f.hash()),
+        cache::advice_key(model, &facts().hash()),
+        "two builds of the same fact sheet must file under one key"
     );
 }
 

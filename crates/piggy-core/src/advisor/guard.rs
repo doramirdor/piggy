@@ -111,6 +111,19 @@ impl Allowlist {
     }
 }
 
+/// Every number reachable in the facts payload, including the ones inside
+/// strings.
+///
+/// Walking strings is deliberate: a finding's prose carries figures the model is
+/// entitled to restate. It does mean **candidate ids widen the list slightly**,
+/// since an id is hex and `numbers_in` cannot tell a digit run inside
+/// `claudemd-fix-7cf5750d2efcbe74` from a figure. Seen and judged rather than
+/// missed: the runs an id contributes are short integers, and short integers are
+/// already admitted wholesale by tool counts, session counts and risk tiers, so
+/// the widening buys a fabricator nothing it did not already have. The figures
+/// that matter (token counts, percentages, multipliers) are not reachable this
+/// way. If ids ever stop being hex, or the allow-list ever stops admitting small
+/// integers from elsewhere, revisit this.
 fn walk(v: &Value, set: &mut BTreeSet<String>) {
     match v {
         Value::Number(n) => {

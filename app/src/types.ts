@@ -513,6 +513,13 @@ export type AdviceKind =
 /** `store::advice_status`. */
 export type AdviceStatus = "open" | "applied" | "dismissed" | "stale";
 
+/** Where a drafted rewrite has got to (`advisor::DraftState`).
+ *
+ *  Four states because one sentence cannot be true in all of them: a user who
+ *  has the advisor on, and whose draft the guard refused, must not be told to
+ *  turn the advisor on. `lib/advice.ts` holds the sentence for each. */
+export type DraftState = "unavailable" | "pending" | "refused" | "ready";
+
 /** `probe::MeasurementStatus::tag`. */
 export type MeasurementState = "measured" | "stale" | "failed" | "never" | "deferred";
 
@@ -547,6 +554,10 @@ export interface AdviceItem {
   applyable: boolean;
   /** One plain sentence when `applyable` is false. */
   blockedReason: string | null;
+  /** Where this card's rewrite has got to, or null for a kind that never needs
+   *  one. The app writes the card's sentence from this, the way it writes the
+   *  figure line from `figureKind`. */
+  draftState: DraftState | null;
   appliedAt: string | null;
 }
 

@@ -13,7 +13,7 @@
 //! Not feature-gated, so the key derivations and the eviction rule are testable
 //! in the default build.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
@@ -93,6 +93,15 @@ pub struct AdviceOverlay {
     pub suggestion: Suggestion,
     /// [`draft_key`] -> the validated replacement.
     pub drafts: BTreeMap<String, Draft>,
+    /// Every [`draft_key`] this pass tried, whether or not a draft came out of
+    /// it.
+    ///
+    /// The difference between "the model has not got to this file yet" and "the
+    /// model tried and the guard refused what it wrote" is invisible in
+    /// [`Self::drafts`], which holds successes only. A UI that cannot tell those
+    /// apart has to pick one sentence and be wrong in the other case, which is
+    /// exactly the defect this field exists to close.
+    pub attempted: BTreeSet<String>,
 }
 
 impl AdviceOverlay {

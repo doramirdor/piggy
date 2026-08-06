@@ -10,6 +10,7 @@
 //! model is process state that has to outlive a single command (a 2.5 GB load is
 //! seconds, and paying it per annotation would be absurd).
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(any(feature = "local-llm", test))]
@@ -18,7 +19,7 @@ use std::sync::{MutexGuard, TryLockError};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use piggy_core::advice::{self, Candidate};
+use piggy_core::advice::{self, Candidate, Prerequisite};
 use piggy_core::advisor::{self, cache, download, facts, facts::Facts, guard};
 use piggy_core::attribution::SaverAttribution;
 use piggy_core::{config, probe, sweep, Pricing, Store};
@@ -28,6 +29,15 @@ use crate::backend::ApiError;
 /// Event channel for download progress. One channel, because only one download
 /// can be in flight (see [`CANCEL`]).
 pub const DOWNLOAD_EVENT: &str = "advisor://download";
+
+/// Emitted when an advice pass has landed in the cache, and only then.
+///
+/// Its own channel rather than `stats-updated`, which fires on the watcher's
+/// 400ms debounce and pulls five other readings with it. A pass lands once every
+/// minute or two at most, and the only thing that needs to know is the advice
+/// sheet, which is showing the deterministic order and a "no rewrite yet" note
+/// until it hears this.
+pub const ADVICE_EVENT: &str = "advice://updated";
 
 /// Set to stop the in-flight download. Also acts as the "a download is running"
 /// flag, so a second request cannot start a competing transfer onto the same
@@ -512,6 +522,143 @@ pub struct AdviceOverlayDto {
     pub drafted: Vec<String>,
 }
 
+/// Where a candidate's drafted rewrite has got to.
+///
+/// One string cannot be right in all of these, and shipping one was a live
+/// honesty defect: a user who had already switched the advisor on, and whose
+/// draft the guard then refused, was told to switch the advisor on. The burden
+/// figure on the card is the insight and it is honest in every state; only this
+/// sentence changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DraftState {
+    /// This build cannot run a model, no model is selected, or its weights are
+    /// not on disk. The only state "turn on the local advisor" is true in.
+    Unavailable,
+    /// The advisor can run and has not answered for this file yet. Either a
+    /// pass is in flight or the next UI read starts one.
+    Pending,
+    /// The advisor ran this file and nothing it wrote cleared
+    /// [`piggy_core::advisor::draft::accept_draft`]. Blocked, and not something
+    /// the user can act on: the shrink threshold is deliberate, and lowering a
+    /// guard so a demo succeeds is the failure mode M5 spent itself fighting.
+    Refused,
+    /// A validated rewrite is attached, the diff opens, and Apply writes it.
+    Ready,
+}
+
+impl DraftState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DraftState::Unavailable => "unavailable",
+            DraftState::Pending => "pending",
+            DraftState::Refused => "refused",
+            DraftState::Ready => "ready",
+        }
+    }
+}
+
+/// What the advisor can say about drafts right now, read once per report.
+///
+/// Reads the cache and never starts a pass, so every command that returns an
+/// advice report can label its cards without paying for a fact sheet.
+pub struct DraftStatus {
+    /// This build can run a model, one is selected, and its weights are present.
+    advisor_ready: bool,
+    /// The selected model's id: half of a [`cache::draft_key`].
+    model_id: Option<&'static str>,
+    /// Every draft key the cached pass tried, drafted or refused.
+    attempted: BTreeSet<String>,
+}
+
+impl DraftStatus {
+    /// Read the advisor's state and whatever pass is cached.
+    pub fn read() -> DraftStatus {
+        // A build with no inference linked in has nothing to look up: no cache
+        // can hold a pass it cannot run, and reading the state file to learn
+        // that would be work for an answer that is already known.
+        if !advisor::compiled_in() {
+            return DraftStatus {
+                advisor_ready: false,
+                model_id: None,
+                attempted: BTreeSet::new(),
+            };
+        }
+        let spec = selected().as_deref().and_then(advisor::model);
+        let advisor_ready =
+            advisor::compiled_in() && spec.map(|m| m.present()).unwrap_or(false);
+        let attempted = advice_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.current().map(|o| o.attempted.clone()))
+            .unwrap_or_default();
+        DraftStatus {
+            advisor_ready,
+            model_id: spec.map(|m| m.id),
+            attempted,
+        }
+    }
+
+    /// A status with no advisor behind it.
+    ///
+    /// The honest answer for a build with the feature off, and what a test that
+    /// is not exercising the advisor wants: it reads no state file, no cache and
+    /// no home directory.
+    #[cfg(test)]
+    pub fn none() -> DraftStatus {
+        DraftStatus {
+            advisor_ready: false,
+            model_id: None,
+            attempted: BTreeSet::new(),
+        }
+    }
+
+    /// A status as it looks after a pass that tried `attempted`.
+    #[cfg(test)]
+    pub fn after_pass(model_id: &'static str, attempted: BTreeSet<String>) -> DraftStatus {
+        DraftStatus {
+            advisor_ready: true,
+            model_id: Some(model_id),
+            attempted,
+        }
+    }
+
+    /// The state a UI may claim for `candidate`, or `None` when this kind never
+    /// needed a draft in the first place.
+    pub fn of(&self, candidate: &Candidate) -> Option<DraftState> {
+        if !candidate
+            .prerequisites
+            .iter()
+            .any(|p| matches!(p, Prerequisite::NeedsAdvisor))
+        {
+            return None;
+        }
+        // Attached, so a pass produced one and the guard accepted it. Checked
+        // first because it is the one state that is true of the candidate in
+        // hand rather than of the machine around it.
+        if candidate.new_content.is_some() {
+            return Some(DraftState::Ready);
+        }
+        if !self.advisor_ready {
+            return Some(DraftState::Unavailable);
+        }
+        // Keyed by the file's hash, not by the fact sheet: a pass that ran over
+        // an older ledger still tried this exact file, and a pass that has not
+        // seen this file yet is pending however old the overlay is.
+        let attempted = match (self.model_id, candidate.source_hash()) {
+            (Some(model), Some(hash)) => self
+                .attempted
+                .contains(&cache::draft_key(model, &candidate.id, hash)),
+            _ => false,
+        };
+        Some(if attempted {
+            DraftState::Refused
+        } else {
+            DraftState::Pending
+        })
+    }
+}
+
 /// The whole advice sheet: the deterministic candidates, in the model's order
 /// when there is one, plus the overlay that explains them.
 ///
@@ -696,6 +843,15 @@ fn advice_cache() -> &'static Mutex<cache::AdviceCache> {
 /// waiting.
 fn advice_overlay(app: AppHandle, facts: &Facts, candidates: &[Candidate]) -> AdviceOverlayDto {
     let hash = facts.hash();
+    // A build with no inference linked in has no pass to wait for. Without this
+    // it would answer `pending` for ever, and a card would say a rewrite was on
+    // its way from a model this binary cannot load.
+    if !advisor::compiled_in() {
+        return AdviceOverlayDto {
+            facts_hash: hash,
+            ..Default::default()
+        };
+    }
     let Some(spec) = selected().as_deref().and_then(advisor::model) else {
         return AdviceOverlayDto {
             facts_hash: hash,
@@ -800,14 +956,24 @@ fn start_advice_pass(
     }
     std::thread::spawn(move || {
         lower_thread_priority();
-        let overlay = run_advice_pass(spec, &facts, &jobs);
-        if let (Some(overlay), Ok(mut cache)) = (overlay, advice_cache().lock()) {
-            cache.put(overlay);
+        let mut landed = false;
+        if let Some(overlay) = run_advice_pass(spec, &facts, &jobs) {
+            if let Ok(mut cache) = advice_cache().lock() {
+                cache.put(overlay);
+                landed = true;
+            }
         }
         ADVICE_RUNNING.store(false, Ordering::SeqCst);
         // The sheet is open and showing the deterministic order; this is what
         // tells it to ask again.
-        let _ = app.emit(crate::STATS_UPDATED, ());
+        //
+        // Only when something landed. A pass that produced nothing has cached
+        // nothing, so telling the UI to re-read would have it miss the cache,
+        // start another pass, and be told again: a model that cannot load would
+        // spin on its own failure for as long as the sheet was open.
+        if landed {
+            let _ = app.emit(ADVICE_EVENT, ());
+        }
     });
 }
 
@@ -861,7 +1027,9 @@ fn run_advice_pass(
     };
 
     let mut drafts = std::collections::BTreeMap::new();
+    let mut attempted = BTreeSet::new();
     for job in jobs {
+        let key = cache::draft_key(spec.id, &job.candidate_id, &job.source_hash);
         // Contents at call time, never stored. A file that has changed since the
         // candidate was computed is skipped rather than drafted against bytes
         // that are gone.
@@ -870,12 +1038,20 @@ fn run_advice_pass(
             Ok(t) => t,
             Err(e) => {
                 eprintln!("piggy: could not read {} to draft it: {e:#}", job.path);
+                // Counted as attempted: the file is not going to become
+                // readable because the sheet was opened again, and a card that
+                // says "still working" forever is the same lie in a politer
+                // tense.
+                attempted.insert(key);
                 continue;
             }
         };
+        // Not counted as attempted: the file moved, so this candidate is about
+        // to be regenerated against the new bytes under a new id and a new key.
         if text.hash != job.source_hash {
             continue;
         }
+        attempted.insert(key);
         match advisor.draft(&job.label, &text.text) {
             Ok(Some(drafted)) => {
                 drafts.insert(
@@ -899,6 +1075,7 @@ fn run_advice_pass(
         model_id: spec.id.to_string(),
         suggestion,
         drafts,
+        attempted,
     })
 }
 
@@ -975,6 +1152,110 @@ fn draft_jobs(candidates: &[Candidate]) -> Vec<DraftJob> {
 #[cfg(test)]
 mod tests {
     use super::claim_inference;
+
+    /// A file in the repo, from this crate's manifest dir.
+    fn repo_file(rel: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(rel);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    }
+
+    /// Acceptance criterion 1, the automatable half: the shipped bundle
+    /// compiles the advisor in, and the path everything else runs on does not.
+    ///
+    /// A repo invariant rather than a unit test, and deliberately so. The whole
+    /// of M5 rests on a build flag in one YAML line: drop it and every shipped
+    /// Settings screen reports the advisor as unsupported, with nothing else
+    /// failing anywhere. Nothing else in the tree notices, so this does.
+    ///
+    /// The fresh-Mac half of the criterion (download the .dmg, opt into a
+    /// model, watch it work offline-tolerant) is a person with a Mac. It is a
+    /// checklist item in `docs/releasing.md`, not a pretend assertion here.
+    #[test]
+    fn the_shipped_bundle_compiles_the_advisor_in_and_the_test_path_does_not() {
+        let workflow = repo_file(".github/workflows/release.yml");
+
+        // The step that produces the .dmg passes the feature.
+        let bundle = workflow
+            .lines()
+            .find(|l| l.contains("--target universal-apple-darwin"))
+            .expect("no bundle build step in release.yml");
+        assert!(
+            bundle.contains("--features local-llm"),
+            "the release bundle would ship with the advisor dark: {bundle}"
+        );
+
+        // And the gate that runs the tests does not, so what CI tests is the
+        // default feature set: linking llama.cpp would put cmake and a C++
+        // toolchain on the critical path of every run.
+        let gate = workflow
+            .lines()
+            .find(|l| l.contains("cargo test"))
+            .expect("no test gate in release.yml");
+        assert!(
+            !gate.contains("--features"),
+            "the test gate stopped exercising the default build: {gate}"
+        );
+
+        // The feature exists here and is not on by default: `compiled_in` is
+        // `cfg!(feature = "local-llm")`, so a default line would make the flag
+        // above meaningless and quietly link llama.cpp into every build.
+        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("this crate's own manifest");
+        assert!(manifest.contains("\nlocal-llm = ["), "the feature is gone: {manifest}");
+        for line in manifest.lines().filter(|l| l.starts_with("default = ")) {
+            assert!(!line.contains("local-llm"), "the advisor is on by default: {line}");
+        }
+
+        // The manual release path documents the same flag. CI is the usual
+        // route and this is the fallback, so the two drifting apart ships a
+        // dark advisor by hand.
+        assert!(
+            repo_file("docs/releasing.md").contains("--features local-llm"),
+            "docs/releasing.md no longer builds the advisor in"
+        );
+    }
+
+    /// The other half of the same invariant, from inside the compiler: this is
+    /// a default build, so nothing here can run a model and every call degrades
+    /// to the deterministic product. [`super::status`] turns this into the
+    /// `unsupported` the Settings screen reports; it is not called here because
+    /// it reads the real `state.json`, and a test that touches a developer's
+    /// home is the thing the CLI harness exists to prevent.
+    #[test]
+    #[cfg(not(feature = "local-llm"))]
+    fn a_default_build_cannot_run_a_model() {
+        assert!(!piggy_core::advisor::compiled_in());
+        assert_eq!(
+            super::DraftStatus::read().of(&drafting_candidate()),
+            Some(super::DraftState::Unavailable),
+            "with no advisor there is only one honest thing to say about a draft"
+        );
+    }
+
+    /// A `ClaudemdTrim`, the one kind whose action is a piece of writing.
+    #[cfg(not(feature = "local-llm"))]
+    fn drafting_candidate() -> piggy_core::advice::Candidate {
+        use piggy_core::advice::{ActionKind, Params, Prerequisite, RISK_CONTENT_EDIT};
+        piggy_core::advice::Candidate {
+            id: "claudemd-trim-1".into(),
+            kind: ActionKind::ClaudemdTrim,
+            target: "~/.claude/CLAUDE.md".into(),
+            title: "Trim your global CLAUDE.md".into(),
+            evidence: Vec::new(),
+            est_tokens_month: 135_000,
+            risk_tier: RISK_CONTENT_EDIT,
+            prerequisites: vec![Prerequisite::NeedsAdvisor],
+            fingerprint: "deadbeef".into(),
+            params: Params::Claudemd {
+                path: "/tmp/CLAUDE.md".into(),
+            },
+            new_content: None,
+            status: "open".into(),
+        }
+    }
 
     #[test]
     fn only_one_model_run_holds_the_slot() {

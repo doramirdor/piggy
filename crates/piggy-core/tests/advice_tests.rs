@@ -1989,3 +1989,205 @@ fn the_sweep_command_still_sees_what_advice_sees() {
         "one source of truth, two entry points"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M5 acceptance: what the spec says has to be true before this ships
+// ---------------------------------------------------------------------------
+
+/// Two projects, each with a CLAUDE.md the deterministic cleanup has something
+/// to say about, so a bundle can contain more than one item.
+fn seed_two_fixable_projects(sb: &Sandbox, store: &mut Store) -> (PathBuf, PathBuf) {
+    let mut out = Vec::new();
+    for name in ["alpha", "beta"] {
+        let proj = sb.project(name);
+        sb.write(
+            &proj.join("CLAUDE.md"),
+            "# Rules\n\n\
+             - The build script lives at scripts/build.sh and is worth reading.\n\
+             - See ./docs/design.md before changing anything.\n\
+             - Keep the tests fast.\n",
+        );
+        seed_session(
+            store,
+            &format!("s-{name}"),
+            &proj.to_string_lossy(),
+            &[],
+            5,
+            0,
+            0,
+            0,
+        );
+        out.push(proj);
+    }
+    (out.remove(0), out.remove(0))
+}
+
+/// Acceptance criterion 4, the apply half: one item in a bundle cannot be
+/// written, and the rest of the bundle still lands.
+///
+/// This drives the same loop `app/src-tauri/src/backend.rs::advice_apply` runs:
+/// one `advice::apply` per id, collecting a reason per failure rather than
+/// letting the first error end the bundle. What is being tested is that the
+/// engine's refusal is per item and names its target; the loop around it is ten
+/// lines of collection.
+///
+/// The restore half of the same criterion is
+/// `restore_defaults_puts_edited_files_back_and_names_the_one_it_could_not`.
+#[test]
+#[cfg(unix)]
+fn one_unwritable_target_in_a_bundle_fails_by_name_and_the_others_still_apply() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = Sandbox::new();
+    sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
+    let mut store = sb.store();
+    let (alpha, beta) = seed_two_fixable_projects(&sb, &mut store);
+
+    let mut state = PiggyState::default();
+    let catalog = Catalog::embedded();
+    let candidates = generate(&mut store, &state);
+    let bundle: Vec<Candidate> = of_kind(&candidates, ActionKind::ClaudemdFix)
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(bundle.len(), 2, "both files should have something to fix");
+
+    // Read-only directory: the atomic write cannot create its temp file, which
+    // is the failure a real `chmod 000` on a target produces without also
+    // making the file unreadable for the comparison below.
+    let beta_before = std::fs::read(beta.join("CLAUDE.md")).unwrap();
+    std::fs::set_permissions(&beta, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(beta.join("probe"), b"x").is_ok() {
+        // Running as root, or a filesystem that ignores the mode.
+        std::fs::set_permissions(&beta, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let mut applied: Vec<String> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for candidate in &bundle {
+        match advice::apply(&mut store, &mut state, &catalog, candidate) {
+            Ok(done) => applied.push(done.id),
+            Err(e) => failures.push((candidate.target.clone(), format!("{e:#}"))),
+        }
+    }
+    std::fs::set_permissions(&beta, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    // One of each, and the bundle did not stop at the bad one.
+    assert_eq!(applied.len(), 1, "the writable item did not apply");
+    assert_eq!(failures.len(), 1, "the unwritable item did not fail");
+
+    // The failure names the file. An id is a sixteen-character hash, so a
+    // reader learns nothing from "abc123def4567890 could not be applied".
+    let (item, reason) = &failures[0];
+    assert!(
+        item.contains("beta"),
+        "the failure names the wrong target: {item}"
+    );
+    assert!(
+        reason.contains("CLAUDE.md"),
+        "the reason has to say what could not be written: {reason}"
+    );
+
+    // Nothing was silently lost. Alpha is edited and restorable; beta is
+    // exactly as it was, with no snapshot claiming otherwise, and its row is
+    // still open so the suggestion can be retried.
+    let alpha_text = std::fs::read_to_string(alpha.join("CLAUDE.md")).unwrap();
+    assert!(!alpha_text.contains("scripts/build.sh"), "alpha was not edited");
+    assert_eq!(
+        std::fs::read(beta.join("CLAUDE.md")).unwrap(),
+        beta_before,
+        "the failed item changed the file anyway"
+    );
+    let state = PiggyState::load().unwrap();
+    assert_eq!(
+        state.file_snapshots.len(),
+        1,
+        "a snapshot exists for the item that failed: {:?}",
+        state.file_snapshots
+    );
+    assert!(state.file_snapshots[0].path.contains("alpha"));
+    let open = store.advice_by_status(advice_status::OPEN).unwrap();
+    let beta_id = &bundle
+        .iter()
+        .find(|c| c.target.contains("beta"))
+        .expect("the beta candidate")
+        .id;
+    assert!(
+        open.iter().any(|r| &r.id == beta_id),
+        "the failed suggestion was retired instead of left to retry"
+    );
+}
+
+/// Acceptance criterion 5: with no advisor, this is still a whole product.
+///
+/// Same candidates, same order, house copy on every one, no drafts, and nothing
+/// that renders as an empty section. The only thing that degrades is the one
+/// action whose content is a piece of writing, and it says so on its own card.
+#[test]
+fn with_no_advisor_every_candidate_still_carries_its_own_copy_and_evidence() {
+    let sb = Sandbox::new();
+    let proj = sb.project("proj");
+    let proj_s = proj.to_string_lossy().into_owned();
+    sb.write_claude_json(&json!({
+        "mcpServers": { "idlesrv": { "command": "npx", "args": ["idle"] } },
+        "projects": {}
+    }));
+    let mut store = sb.store();
+    // An oversized file (the drafting kind) beside a fixable one (deterministic)
+    // and an unused server, so all three families are on the sheet at once.
+    sb.write(
+        &proj.join("CLAUDE.md"),
+        &format!(
+            "# Rules\n\n\
+             - The build script lives at scripts/build.sh and is worth reading.\n\n{}",
+            "- keep functions small and name things for what they are.\n".repeat(300)
+        ),
+    );
+    seed_session(&mut store, "s1", &proj_s, &[], 5, 0, 0, 0);
+
+    let state = PiggyState::default();
+    let candidates = generate(&mut store, &state);
+    assert!(
+        candidates.len() >= 2,
+        "the sheet should not be empty: {:?}",
+        candidates.iter().map(|c| c.title.as_str()).collect::<Vec<_>>()
+    );
+
+    for c in &candidates {
+        assert!(!c.title.trim().is_empty(), "a card with no claim: {c:?}");
+        assert!(
+            !c.evidence.is_empty(),
+            "a claim with no evidence behind it: {}",
+            c.title
+        );
+        for row in &c.evidence {
+            assert!(!row.label.trim().is_empty(), "{}: an unlabelled figure", c.title);
+            assert!(!row.value.trim().is_empty(), "{}: an empty figure", c.title);
+            assert!(!row.basis.trim().is_empty(), "{}: a figure with no basis", c.title);
+        }
+        // Only the drafting kind is blocked, and only for the one reason.
+        if c.kind == ActionKind::ClaudemdTrim {
+            assert!(c.blocked(), "a trim with no model is not applyable");
+            assert!(c.new_content.is_none(), "no draft can exist without a model");
+            assert_eq!(c.prerequisites, vec![advice::Prerequisite::NeedsAdvisor]);
+        } else {
+            assert!(!c.blocked(), "{} needs no model: {:?}", c.title, c.prerequisites);
+            assert!(c.prerequisites.is_empty(), "{}", c.title);
+        }
+    }
+
+    // Same facts, same list, same order. The engine's ranking is what the app
+    // shows when no model has reordered anything, so it has to be stable on its
+    // own (acceptance criterion 6, at the engine end).
+    let again = generate(&mut store, &state);
+    assert_eq!(
+        candidates.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        again.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        "two reads of the same world produced two different lists"
+    );
+    let ranked: Vec<i64> = candidates.iter().map(|c| c.est_tokens_month).collect();
+    let mut sorted = ranked.clone();
+    sorted.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ranked, sorted, "the list is not in the order it claims");
+}

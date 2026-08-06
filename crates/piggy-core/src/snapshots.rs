@@ -184,14 +184,37 @@ pub fn backup_only(path: &Path, state: &mut PiggyState) -> Result<FileBackup> {
 /// written ([`FileSnapshot::after_hash`]), and a caller that took the snapshot
 /// and then wrote separately could forget the second half - at which point Undo
 /// silently loses whatever the user did to the file in between.
+/// A failed write leaves `state` untouched. The copy is taken first, because
+/// there is no copying the original bytes back off a file that has already been
+/// overwritten, but the **record** is pushed only once the write has landed. It
+/// used to be pushed first, and a caller that applied several items through one
+/// `PiggyState` then persisted the phantom on the next successful item: a
+/// snapshot record with an `after_hash` of content that was never written,
+/// claiming Piggy had edited a file it had failed to touch. Restore Defaults
+/// would later write that backup back over whatever the file had since become.
 pub fn snapshot_and_write(
     path: &Path,
     bytes: &[u8],
     advice_id: &str,
     state: &mut PiggyState,
 ) -> Result<FileSnapshot> {
-    let record = record_snapshot(path, advice_id, Some(hash_bytes(bytes)), state)?;
-    write_atomic(path, bytes)?;
+    let (dir, backup) = copy_aside(path)?;
+    if let Err(e) = write_atomic(path, bytes) {
+        // Nothing points at the copy and the file it came from is unchanged, so
+        // it is not a backup of anything. Removing it is best effort: pruning
+        // would get it eventually either way.
+        let _ = std::fs::remove_file(&backup);
+        return Err(e);
+    }
+    let record = FileSnapshot {
+        path: path.to_string_lossy().into_owned(),
+        backup: backup.to_string_lossy().into_owned(),
+        advice_id: advice_id.to_string(),
+        after_hash: Some(hash_bytes(bytes)),
+        applied_at: chrono::Utc::now().to_rfc3339(),
+    };
+    state.file_snapshots.push(record.clone());
+    prune_file_backups(&dir, state);
     Ok(record)
 }
 
@@ -347,9 +370,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
-    tmp.write_all(bytes)?;
-    tmp.as_file().sync_all()?;
+    // Every step names the file the caller asked for, not the temp file it goes
+    // through. A per-item apply failure is shown to the user verbatim, and
+    // `Permission denied at path ".tmp0KNcfU"` names something they have never
+    // seen and which no longer exists by the time they read it.
+    let target = || format!("writing {}", write_path.display());
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir).with_context(target)?;
+    tmp.write_all(bytes).with_context(target)?;
+    tmp.as_file().sync_all().with_context(target)?;
 
     #[cfg(unix)]
     {
@@ -358,7 +386,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let mode = std::fs::metadata(write_path)
             .map(|m| m.permissions().mode())
             .unwrap_or(0o600);
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))?;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
+            .with_context(target)?;
     }
 
     tmp.persist(write_path)

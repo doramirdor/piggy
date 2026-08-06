@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { AdviceSheet } from "../screens/AdviceSheet";
-import { figureLine, hiddenCount, openItems, topOpen, totalLine } from "../lib/advice";
+import {
+  figureLine,
+  hiddenCount,
+  openItems,
+  rankingNote,
+  topOpen,
+  totalLine,
+} from "../lib/advice";
 
 /**
  * What to do next, at the top of Spend.
@@ -64,7 +71,7 @@ export function AdviceSection() {
       <div className="sect">
         What to do next
         <span className="sect-sub">
-          {open} suggestion{open === 1 ? "" : "s"}, ranked by estimated tokens a month
+          {open} suggestion{open === 1 ? "" : "s"}, {rankingNote(advice.advisorRanked)}
         </span>
       </div>
       <div className="attr advice-attr">

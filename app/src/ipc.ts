@@ -117,6 +117,17 @@ export async function onStatsUpdated(cb: () => void): Promise<() => void> {
   return listen("piggy://stats-updated", () => cb());
 }
 
+/** Subscribe to `advice://updated`, emitted when a local advice pass has landed
+ *  in the cache and only then (no-op in mock).
+ *
+ *  Its own channel, not `stats-updated`: a pass lands rarely and the only thing
+ *  that changes is the advice list, so a full five-call refresh would be four
+ *  calls of waste per landing. */
+export async function onAdviceUpdated(cb: () => void): Promise<() => void> {
+  if (IS_MOCK) return () => {};
+  return listen("advice://updated", () => cb());
+}
+
 /** Subscribe to advisor download progress (no-op in mock). */
 export async function onAdvisorProgress(
   cb: (p: AdvisorProgress) => void,

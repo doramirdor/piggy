@@ -38,6 +38,8 @@ use piggy_core::{
     ActionKind, Candidate, Catalog, McpManifest, PiggyState, Pricing, Store,
 };
 
+use crate::advisor::{DraftState, DraftStatus};
+
 /// A time-derived bootstrap seed for the attribution CIs (production runs use a
 /// live seed; the math is otherwise deterministic given it). Mirrors the CLI's
 /// `time_seed` so the GUI and `piggy report` agree.
@@ -1896,6 +1898,15 @@ pub struct AdviceItemDto {
     pub applyable: bool,
     /// One plain sentence when `applyable` is false.
     pub blocked_reason: Option<String>,
+    /// "unavailable" | "pending" | "refused" | "ready"
+    /// ([`crate::advisor::DraftState`]), or null for a kind that never needs a
+    /// drafted rewrite.
+    ///
+    /// The app writes the card's sentence from this, the way it writes the
+    /// figure line from `figure_kind`. One string for all of these was a live
+    /// honesty defect: it told a user who already had the advisor on, and whose
+    /// draft the guard had refused, to turn the advisor on.
+    pub draft_state: Option<String>,
     /// RFC3339, on applied rows only.
     pub applied_at: Option<String>,
 }
@@ -1993,7 +2004,11 @@ pub struct AdviceDiffDto {
 }
 
 /// One candidate as the app sees it.
-fn advice_item(c: &Candidate) -> AdviceItemDto {
+///
+/// `drafts` is read once per report rather than per row: it is a lock and a
+/// clone, and every row on one sheet must describe the same pass.
+fn advice_item(c: &Candidate, drafts: &DraftStatus) -> AdviceItemDto {
+    let draft_state = drafts.of(c);
     AdviceItemDto {
         id: c.id.clone(),
         kind: c.kind.as_str().to_string(),
@@ -2023,21 +2038,43 @@ fn advice_item(c: &Candidate) -> AdviceItemDto {
         status: c.status.clone(),
         has_diff: c.kind.edits_content() && c.new_content.is_some(),
         applyable: c.status == advice_status::OPEN && !c.blocked(),
-        blocked_reason: advice_blocked_reason(c),
+        blocked_reason: advice_blocked_reason(c, draft_state),
+        draft_state: draft_state.map(|s| s.as_str().to_string()),
         applied_at: None,
     }
 }
 
+/// What a card may say about a rewrite that is not there.
+///
+/// Three sentences rather than one, because a single string is a false
+/// statement in two of the three states. The app composes the same three from
+/// `draftState`, the way it composes the figure line from `figureKind`; these
+/// are here so the DTO is honest on its own, for a reader who has only the
+/// payload (`app/src/lib/advice.ts` holds the copy that ships).
+const DRAFT_UNAVAILABLE: &str = "Turn on the local advisor in Settings for a drafted rewrite.";
+const DRAFT_PENDING: &str = "The local advisor has not drafted a rewrite for this file yet.";
+const DRAFT_REFUSED: &str =
+    "The local model could not produce a rewrite worth applying to this file.";
+
 /// Why this cannot be applied right now, in one sentence with no colon in it.
-fn advice_blocked_reason(c: &Candidate) -> Option<String> {
+fn advice_blocked_reason(c: &Candidate, draft: Option<DraftState>) -> Option<String> {
     if c.status == advice_status::STALE {
         return Some(ADVICE_STALE.to_string());
     }
-    if c.blocked() {
-        // The engine's own words for what is missing.
-        return c.prerequisites.first().map(|p| sentence(p.note()));
+    if !c.blocked() {
+        return None;
     }
-    None
+    // A drafting candidate's reason depends on what the advisor did, not on
+    // what it needs: telling someone who has the advisor on to turn it on is
+    // the defect this branch exists to prevent.
+    match draft {
+        Some(DraftState::Pending) => Some(DRAFT_PENDING.to_string()),
+        Some(DraftState::Refused) => Some(DRAFT_REFUSED.to_string()),
+        Some(DraftState::Unavailable) => Some(DRAFT_UNAVAILABLE.to_string()),
+        // Ready is not blocked, and a kind with no draft state is blocked by
+        // something else entirely: the engine's own words for it.
+        _ => c.prerequisites.first().map(|p| sentence(p.note())),
+    }
 }
 
 /// Regenerate every candidate.
@@ -2052,10 +2089,27 @@ fn advice_regenerate(
 ) -> anyhow::Result<Vec<Candidate>> {
     let state = PiggyState::load()?;
     let opts = GenerateOptions::new(catalog, pricing, &state);
-    advice::generate(store, &opts)
+    let mut candidates = advice::generate(store, &opts)?;
+    // A drafted rewrite lives in this process and never in the database, so it
+    // is re-attached to every fresh generation. Without this a trim would be
+    // regenerated as blocked in the same breath a pass had just unblocked it,
+    // and Apply would refuse the row the sheet had just offered.
+    crate::advisor::attach_cached_drafts(&mut candidates);
+    Ok(candidates)
 }
 
-fn advice_report_dto(store: &Store, candidates: &[Candidate]) -> anyhow::Result<AdviceReportDto> {
+/// The whole report, with every card told where its rewrite has got to.
+///
+/// `ranked` is the model's own ordering when a finished pass supplied one. It is
+/// passed in rather than inferred: the candidates arrive already sorted, and a
+/// sorted list cannot say afterwards who sorted it.
+fn advice_report_dto(
+    store: &Store,
+    candidates: &[Candidate],
+    ranked: bool,
+) -> anyhow::Result<AdviceReportDto> {
+    // One read for the sheet: every row must describe the same pass.
+    let drafts = DraftStatus::read();
     let mut rows = store.advice_by_status(advice_status::APPLIED)?;
     // Newest first: what you just did is what you are most likely to want back.
     rows.sort_by(|a, b| b.applied_at.cmp(&a.applied_at));
@@ -2066,7 +2120,7 @@ fn advice_report_dto(store: &Store, candidates: &[Candidate]) -> anyhow::Result<
         let Ok(candidate) = Candidate::from_row(row) else {
             continue;
         };
-        let mut dto = advice_item(&candidate);
+        let mut dto = advice_item(&candidate, &drafts);
         dto.applied_at = row.applied_at.clone();
         applied.push(dto);
     }
@@ -2079,23 +2133,30 @@ fn advice_report_dto(store: &Store, candidates: &[Candidate]) -> anyhow::Result<
         .cloned()
         .collect();
     Ok(AdviceReportDto {
-        items: candidates.iter().map(advice_item).collect(),
+        items: candidates.iter().map(|c| advice_item(c, &drafts)).collect(),
         applied,
         est_tokens_month: advice::total_savings(&open),
         est_tokens_month_burden: advice::total_burden(&open),
         generated_at: chrono::Utc::now().to_rfc3339(),
-        advisor_ranked: false,
+        advisor_ranked: ranked,
     })
 }
 
-pub fn advice_report() -> Result<AdviceReportDto, ApiError> {
+/// The advice sheet, through the advisor rather than around it.
+///
+/// [`crate::advisor::advice_sheet`] is the call this has to make: it generates
+/// the same candidates from the same inputs, and it is also the only thing that
+/// starts an advice pass. Reaching for [`advice_regenerate`] here instead left
+/// the whole M5.4 pass unreachable from the app, so no draft ever landed, no
+/// ranking ever arrived, and every trim card claimed the advisor was off.
+pub fn advice_report(app: tauri::AppHandle) -> Result<AdviceReportDto, ApiError> {
+    let (mut candidates, overlay) = crate::advisor::advice_sheet(app)?;
+    // Drafts live in this process only, so a candidate collects its rewrite on
+    // the way out rather than out of the database.
+    crate::advisor::attach_cached_drafts(&mut candidates);
     (|| -> anyhow::Result<AdviceReportDto> {
-        let home = config::piggy_home();
-        let mut store = Store::open(&home)?;
-        let catalog = Catalog::embedded();
-        let pricing = Pricing::load(&home);
-        let candidates = advice_regenerate(&mut store, &catalog, &pricing)?;
-        advice_report_dto(&store, &candidates)
+        let store = Store::open(&config::piggy_home())?;
+        advice_report_dto(&store, &candidates, !overlay.picks.is_empty())
     })()
     .map_err(generic("Couldn't work out what to suggest"))
 }
@@ -2246,7 +2307,9 @@ pub fn advice_apply(ids: Vec<String>) -> Result<AdviceApplyDto, ApiError> {
         // A second generate, so the sheet needs no follow-up read.
         let after = advice_regenerate(&mut store, &catalog, &pricing)?;
         Ok(AdviceApplyDto {
-            report: advice_report_dto(&store, &after)?,
+            // The model's ranking is a property of the pass, not of this
+            // apply: the next report re-reads it.
+            report: advice_report_dto(&store, &after, false)?,
             applied,
             failures,
             warnings,
@@ -2277,7 +2340,7 @@ pub fn advice_undo(id: String) -> Result<AdviceUndoDto, ApiError> {
     }
     let after = advice_regenerate(&mut store, &catalog, &pricing).map_err(generic(title))?;
     Ok(AdviceUndoDto {
-        report: advice_report_dto(&store, &after).map_err(generic(title))?,
+        report: advice_report_dto(&store, &after, false).map_err(generic(title))?,
         restored: done.restored,
         // Per item, never collapsed into a count: an undo that put three of four
         // files back has to say which one it did not.
@@ -2316,7 +2379,7 @@ pub fn advice_dismiss(id: String) -> Result<AdviceReportDto, ApiError> {
         ));
     }
     let after = advice_regenerate(&mut store, &catalog, &pricing).map_err(generic(title))?;
-    advice_report_dto(&store, &after).map_err(generic(title))
+    advice_report_dto(&store, &after, false).map_err(generic(title))
 }
 
 // ---------------------------------------------------------------------------
@@ -3144,7 +3207,7 @@ mod tests {
                     basis: (*b).to_string(),
                 })
                 .collect();
-            let dto = advice_item(&candidate(ActionKind::ServerDisable, rows));
+            let dto = advice_item(&candidate(ActionKind::ServerDisable, rows), &DraftStatus::none());
             let out: Vec<&str> = dto.evidence.iter().map(|e| e.basis.as_str()).collect();
             assert_eq!(out, all);
             // And the value with it: an app that re-derives a figure is how the
@@ -3157,7 +3220,7 @@ mod tests {
         /// measured and which is by far the biggest number on the list.
         #[test]
         fn a_trims_figure_is_marked_burden_and_every_other_kind_saves() {
-            let burden = advice_item(&candidate(ActionKind::ClaudemdTrim, vec![]));
+            let burden = advice_item(&candidate(ActionKind::ClaudemdTrim, vec![]), &DraftStatus::none());
             assert_eq!(burden.figure_kind, "burden");
             for kind in [
                 ActionKind::ServerDisable,
@@ -3166,10 +3229,75 @@ mod tests {
                 ActionKind::SaverMix,
             ] {
                 assert_eq!(
-                    advice_item(&candidate(kind, vec![])).figure_kind,
+                    advice_item(&candidate(kind, vec![]), &DraftStatus::none()).figure_kind,
                     "saves",
                     "{kind:?}"
                 );
+            }
+        }
+
+        /// THE honesty defect M5.6 closed. One sentence covered every reason a
+        /// trim had no draft, so a user who had already switched the local
+        /// advisor on, and whose draft the guard had then refused for shrinking
+        /// the file by 3.7%, was told to switch the local advisor on. Each
+        /// state now names its own cause, and the burden figure stays put in
+        /// all of them.
+        #[test]
+        fn a_blocked_trim_says_which_of_the_three_things_happened() {
+            use piggy_core::advice::Prerequisite;
+            use std::collections::BTreeSet;
+            const MODEL: &str = "qwen3-4b-instruct-2507";
+
+            let mut c = candidate(ActionKind::ClaudemdTrim, vec![]);
+            c.prerequisites = vec![Prerequisite::NeedsAdvisor];
+
+            // 1. No advisor compiled in, none chosen, or no weights on disk.
+            //    The only state the old single string was ever true in.
+            let dto = advice_item(&c, &DraftStatus::none());
+            assert_eq!(dto.draft_state.as_deref(), Some("unavailable"));
+            assert_eq!(dto.blocked_reason.as_deref(), Some(DRAFT_UNAVAILABLE));
+
+            // 2. The advisor can run and no pass has reached this file yet.
+            let dto = advice_item(&c, &DraftStatus::after_pass(MODEL, BTreeSet::new()));
+            assert_eq!(dto.draft_state.as_deref(), Some("pending"));
+            assert_eq!(dto.blocked_reason.as_deref(), Some(DRAFT_PENDING));
+
+            // 3. A pass tried this exact file and nothing it wrote cleared the
+            //    guard. Keyed by the file's hash, so this is a statement about
+            //    the file rather than about how old the overlay is.
+            let key = piggy_core::advisor::cache::draft_key(MODEL, &c.id, &c.fingerprint);
+            let tried = BTreeSet::from([key]);
+            let dto = advice_item(&c, &DraftStatus::after_pass(MODEL, tried));
+            assert_eq!(dto.draft_state.as_deref(), Some("refused"));
+            let reason = dto.blocked_reason.expect("a refusal explains itself");
+            assert_eq!(reason, DRAFT_REFUSED);
+            assert!(
+                !reason.contains("Settings"),
+                "this reader already has the advisor on: {reason}"
+            );
+
+            // 4. Drafted. Not blocked at all, whatever the machine around it
+            //    looks like now.
+            c.new_content = Some("# Shorter\n".into());
+            let dto = advice_item(&c, &DraftStatus::none());
+            assert_eq!(dto.draft_state.as_deref(), Some("ready"));
+            assert!(dto.applyable, "an attached draft is applyable");
+            assert!(dto.has_diff, "and it has a diff to review first");
+            assert!(dto.blocked_reason.is_none());
+        }
+
+        /// A kind that never drafts anything carries no draft state, so the app
+        /// cannot render a sentence about a rewrite for a server toggle.
+        #[test]
+        fn only_a_drafting_kind_has_a_draft_state() {
+            for kind in [
+                ActionKind::ServerDisable,
+                ActionKind::ServerScope,
+                ActionKind::ClaudemdFix,
+                ActionKind::SaverMix,
+            ] {
+                let dto = advice_item(&candidate(kind, vec![]), &DraftStatus::none());
+                assert_eq!(dto.draft_state, None, "{kind:?}");
             }
         }
 
@@ -3179,7 +3307,7 @@ mod tests {
         fn a_stale_candidate_explains_itself_and_cannot_be_applied() {
             let mut c = candidate(ActionKind::ServerDisable, vec![]);
             c.status = advice_status::STALE.into();
-            let dto = advice_item(&c);
+            let dto = advice_item(&c, &DraftStatus::none());
             assert!(!dto.applyable);
             assert!(dto.blocked_reason.is_some());
             assert!(!dto.blocked_reason.unwrap().contains(':'));

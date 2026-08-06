@@ -195,7 +195,9 @@ export function AdviceSheet({
           {group ?? "What to do next"}
         </div>
         <div className="ssub">
-          {advice === null ? "Checking what there is to act on…" : sheetSummary(items)}
+          {advice === null
+            ? "Checking what there is to act on…"
+            : sheetSummary(items, advice.advisorRanked)}
         </div>
 
         <div className="advice-body">

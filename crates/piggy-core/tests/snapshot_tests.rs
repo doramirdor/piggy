@@ -336,3 +336,57 @@ fn an_atomic_write_keeps_the_files_permissions_and_writes_through_a_symlink() {
         "an atomic write must not widen or narrow the file's mode"
     );
 }
+
+/// A write that fails must leave `state` exactly as it found it.
+///
+/// The record used to be pushed before the write. On its own that looked
+/// harmless, because the caller only persists `state` after a success; but the
+/// app applies a bundle through one `PiggyState`, so the next item that *did*
+/// succeed wrote the phantom out with it. What landed in state.json was a
+/// snapshot record for a file Piggy had failed to touch, carrying an
+/// `after_hash` of content that was never written, and Restore Defaults would
+/// later put that backup back over whatever the file had since become.
+#[test]
+#[cfg(unix)]
+fn a_write_that_fails_records_nothing_and_leaves_no_stray_copy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = Sandbox::new();
+    let path = sb.file("locked/CLAUDE.md", ORIGINAL);
+    let dir = path.parent().unwrap().to_path_buf();
+    let mut state = PiggyState::default();
+
+    // A read-only directory: the atomic write cannot create its temp file. The
+    // file itself stays readable, so the copy-aside half succeeds and only the
+    // write fails, which is the ordering this is about.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(dir.join("probe"), b"x").is_ok() {
+        // Root, or a filesystem that ignores the mode.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let err = snapshots::snapshot_and_write(&path, TRIMMED, "advice-1", &mut state)
+        .expect_err("the write cannot succeed in a read-only directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        format!("{err:#}").contains("CLAUDE.md"),
+        "the failure names the file the caller asked for, not the temp file it \
+         goes through: {err:#}"
+    );
+    assert!(
+        state.file_snapshots.is_empty(),
+        "a phantom snapshot survived a failed write: {:?}",
+        state.file_snapshots
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        ORIGINAL,
+        "the file was modified by a write that reported failure"
+    );
+    // And no copy is left behind claiming to be a backup of something.
+    let strays = std::fs::read_dir(snapshots::files_backup_dir())
+        .map(|rd| rd.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    assert_eq!(strays, 0, "a .bak copy nothing points at was left on disk");
+}

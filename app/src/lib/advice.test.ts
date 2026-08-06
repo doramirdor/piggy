@@ -13,6 +13,7 @@ import {
   failureTitle,
   figureLine,
   hiddenCount,
+  rankingNote,
   savingsTokens,
   sheetSummary,
   topOpen,
@@ -37,9 +38,27 @@ const item = (over: Partial<AdviceItem> = {}): AdviceItem =>
     hasDiff: false,
     applyable: true,
     blockedReason: null,
+    draftState: null,
     appliedAt: null,
     ...over,
   }) as AdviceItem;
+
+/** An oversized CLAUDE.md: the one kind whose action is a piece of writing, so
+ *  the one kind that can be waiting on a local model. */
+const trim = (over: Partial<AdviceItem> = {}): AdviceItem =>
+  item({
+    id: "trim1",
+    kind: "claudemd-trim",
+    group: "CLAUDE.md",
+    target: "~/.claude/CLAUDE.md",
+    title: "Trim your global CLAUDE.md",
+    figureKind: "burden",
+    estTokensMonth: 135_000,
+    riskTier: 3,
+    applyable: false,
+    blockedReason: null,
+    ...over,
+  });
 
 const report = (items: AdviceItem[], over: Partial<AdviceReport> = {}): AdviceReport => ({
   items,
@@ -262,6 +281,110 @@ describe("grouping and blocking", () => {
 
   it("says nothing about an item that is fine", () => {
     expect(blockedNote(item())).toBeNull();
+  });
+});
+
+// THE honesty defect this surface shipped with. One string covered all three
+// states, so a user who had the advisor switched on, and whose draft the guard
+// had refused for being a 3.7% trim, was told to switch the advisor on. Each
+// state gets its own sentence, and none of them may claim another state's
+// cause.
+describe("a trim card waiting on a drafted rewrite", () => {
+  it("asks for the advisor only when the advisor is genuinely off", () => {
+    const note = blockedNote(trim({ draftState: "unavailable" }));
+    expect(note).toBe("Turn on the local advisor in Settings for a drafted rewrite.");
+  });
+
+  it("says a pass has not reached this file yet, and does not blame a setting", () => {
+    const note = blockedNote(trim({ draftState: "pending" }));
+    expect(note).toBe("The local advisor has not drafted a rewrite for this file yet.");
+    expect(note).not.toContain("Settings");
+    expect(note).not.toMatch(/turn on/i);
+  });
+
+  it("says the model could not do it when the guard refused the draft", () => {
+    const note = blockedNote(trim({ draftState: "refused" }));
+    expect(note).toBe(
+      "The local model could not produce a rewrite worth applying to this file.",
+    );
+    // The lie the single string told: this reader already has it on.
+    expect(note).not.toContain("Settings");
+    expect(note).not.toMatch(/turn on/i);
+  });
+
+  it("never lets a stale backend sentence out-argue the draft state", () => {
+    // The old copy arriving in `blockedReason` must not win: the state is the
+    // truth, the sentence is a rendering of it.
+    const note = blockedNote(
+      trim({
+        draftState: "refused",
+        blockedReason: "Turn on the local advisor in Settings for a drafted rewrite.",
+      }),
+    );
+    expect(note).toBe(
+      "The local model could not produce a rewrite worth applying to this file.",
+    );
+  });
+
+  it("stops explaining once a draft is attached", () => {
+    const ready = trim({ draftState: "ready", applyable: true, hasDiff: true });
+    expect(canApply(ready)).toBe(true);
+    expect(blockedNote(ready)).toBeNull();
+  });
+
+  it("keeps the burden figure on the card in every state", () => {
+    // The insight is that the file costs ~135k tokens a month. That is true
+    // with or without a rewrite, and it is what the card is worth reading for.
+    for (const state of ["unavailable", "pending", "refused", "ready"] as const) {
+      expect(figureLine(trim({ draftState: state }))).toBe(
+        "costs ~135k tokens a month · estimated",
+      );
+    }
+  });
+
+  it("still says stale when the plan itself has moved on", () => {
+    const note = blockedNote(trim({ status: "stale", draftState: "refused" }));
+    expect(note).toContain("no longer describes your setup");
+  });
+});
+
+describe("what the list says about its own order", () => {
+  it("claims the engine's ranking when no model ranked it", () => {
+    expect(rankingNote(false)).toBe("ranked by estimated tokens a month");
+    expect(sheetSummary([item()])).toContain("Ranked by estimated tokens a month.");
+  });
+
+  it("credits the advisor when a pass moved the rows", () => {
+    expect(rankingNote(true)).toBe("ordered by the local advisor");
+    expect(sheetSummary([item()], true)).toContain("Ordered by the local advisor.");
+  });
+
+  // The engine sorts on estimated tokens a month with burdens included and says
+  // so in `advice::reconcile`. "Ranked by estimated saving" claimed a sort that
+  // never happened.
+  it("never calls the order a savings ranking", () => {
+    const items = [item(), trim({ draftState: "unavailable" })];
+    expect(sheetSummary(items)).not.toContain("estimated saving");
+  });
+});
+
+// Advisor off is a complete product (acceptance criterion 5): the same cards,
+// the same figures, the same evidence, with one sentence instead of a diff.
+describe("the advice surfaces with no model in the build", () => {
+  it("renders every card fully with no model field anywhere", () => {
+    const items = [
+      item({ id: "s1", estTokensMonth: 40_000 }),
+      trim({ draftState: "unavailable" }),
+    ];
+    const rep = report(items, { advisorRanked: false });
+    // Nothing is filtered out, nothing is dead, and the order is the engine's.
+    expect(topOpen(rep.items).map((a) => a.id)).toEqual(["s1", "trim1"]);
+    // Both halves of the accounting are still stated, and kept apart.
+    expect(totalLine(rep.items)).toContain("~40k tokens a month across 1 suggestion.");
+    expect(totalLine(rep.items)).toContain("costing ~135k tokens a month");
+    // The trim explains itself rather than rendering an empty section.
+    expect(blockedNote(items[1])).toBeTruthy();
+    expect(items[1].hasDiff).toBe(false);
   });
 });
 

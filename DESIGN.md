@@ -78,7 +78,7 @@ scripts/         # verify-against-jq.sh etc.
   `~/.claude/settings.json` (hooks/plugins), `~/.claude.json` → `projects.<path>.mcpServers`,
   `~/.claude/plugins/installed_plugins.json`.
 
-### GUI (M4) - Apple-native desktop window
+### GUI (M4, tabs revised in M5) - Apple-native desktop window
 - Tauri v2 **desktop window** (940×660, resizable, macOS Overlay title bar, Dock icon) with a
   companion menu-bar tray glyph that shows/hides it. Closing the window hides it and keeps the
   background daemon running. React + Tailwind. *(Superseded the original 360×600 tray popover.
@@ -87,23 +87,31 @@ scripts/         # verify-against-jq.sh etc.
   solid dark surface (`--bg #0f151b`) with the blueprint/brand personality in the piggy mark and
   hero cards, native-feeling toggle switches, hairline separators (0.5px), SF-Symbols-style line
   icons, dark mode default + light support, spring animations ≤200ms, no scrollbars until scroll.
-- Layout: left **sidebar** (Piggy mark + wordmark → six nav tabs → master switch + version) and
-  a scrolling **content** column (max-width ~720). Tab ids `overview | savers | discover | proof
-  | reports | settings`; two render under a different label, `overview` as "Dashboard" and
-  `discover` as "Discovery".
-- **Overview:** greeting + "Your plan lasts **N.N× longer**" hero (measured, radial-green glow +
-  stream bars) → Tokens-saved / Money-avoided metric grid → sweep hint → recent-proof feed.
+- Layout: left **sidebar** (Piggy mark + wordmark → five nav tabs → master switch + version) and
+  a scrolling **content** column (max-width ~720). Tab ids `spend | savers | proof | about |
+  settings`, in that order, each under its own name. *(M5 replaced the earlier six. `overview`
+  and `reports` were folded into Spend, which answers "where did my tokens go" in one place
+  instead of a hero on one screen and a table on another; `discover` became a section at the
+  foot of Savers, where a tool you might add belongs next to the tools you have.)*
+- **Spend:** the ledger of where context tokens come from, per source and per project, with the
+  advice section at the top: the three biggest things Piggy can actually change, each a plain
+  claim with the figure it rests on, opening the advice sheet.
 - **Savers:** master "Save everything" card → saver rows (icon · plain label · measured/estimated
-  badge · behavior-change warn dot · toggle).
-- **Proof:** period picker → hero → totals/cost metric grid → per-saver attribution → Share.
-- **Discover:** two-column card grid; author claims labelled, never Piggy's measurements.
+  badge · behavior-change warn dot · toggle) → the Discover feed, whose author claims are
+  labelled as claims and never as Piggy's measurements.
+- **Proof:** period picker → "Your plan lasts **N.N× longer**" hero (measured, radial-green glow
+  + stream bars) → totals/cost metric grid → per-saver attribution → Share.
+- **About:** what Piggy is, what it never does, and the version.
 - Share card: 2400×1260 PNG, dark, vector piggy mark + big number, "measured with holdout · Piggy"
   footer, Copy/Save buttons. Growth loop - must look great.
 
 ## Dependency policy (head-approved)
 
 Beyond the prompt's allowlist (Tauri, React, Tailwind, rusqlite, serde, notify, reqwest):
-clap, anyhow, thiserror, chrono, walkdir, dirs, tempfile (dev), sha2 (checksums).
+clap, anyhow, thiserror, chrono, walkdir, dirs, tempfile (dev), sha2 (checksums), flate2 + tar
+(release assets), libc (M5: one FFI call for the advisor thread's macOS QoS class, already in
+the lock file transitively). The advisor's own llama-cpp-2 + encoding_rs are behind the
+optional `local-llm` feature, so a default build links neither.
 Frontend: zustand or none, no UI kit - hand-rolled Apple-style components.
 Rationale: standard, small, audited crates; hand-rolling arg parsing/error types buys nothing.
 
@@ -114,3 +122,5 @@ Rationale: standard, small, audited crates; hand-rolling arg parsing/error types
   pre-existing hooks present. ✅ = merge.
 - **M3** measurement: dashboard-ready measured deltas with n-counts.
 - **M4** GUI: fresh Mac → `npx @amirdor/piggybank` → toggle master switch → run a session → see it counted.
+- **M5** advisor actions: advice reviewed, applied, undone leaves configs byte-identical; every
+  number on an advice card traces to the database, the probe, or the scanner. ✅ = merge.

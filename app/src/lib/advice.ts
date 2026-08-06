@@ -10,7 +10,7 @@
 // both together; this side prints them side by side and gets out of the way.
 
 import { formatTokens } from "./format";
-import type { AdviceFailure, AdviceItem } from "../types";
+import type { AdviceFailure, AdviceItem, DraftState } from "../types";
 
 /** How confident a figure's label is allowed to look. */
 export type BasisTone = "observed" | "measured" | "estimated" | "waiting";
@@ -110,12 +110,56 @@ export function canApply(a: AdviceItem): boolean {
   return a.applyable && a.status === "open";
 }
 
+/**
+ * What a card says about a rewrite that is not there.
+ *
+ * Three sentences rather than one, and the difference is not a wording
+ * preference. A single string shipped here, and it told a user who had already
+ * switched the local advisor on, and whose draft the guard had then refused, to
+ * switch the local advisor on. The guard refusing a weak rewrite is the feature
+ * working; the card has to say so instead of blaming a setting that is already
+ * set.
+ *
+ * The burden figure stays on the card in every one of these. Knowing a file
+ * costs ~135k tokens a month is the insight, and it is honest with no draft
+ * behind it.
+ *
+ * `advisor::DraftState` in `app/src-tauri/src/advisor.rs` decides which one, and
+ * `backend.rs` carries the same three sentences for a reader who has only the
+ * payload. Keep the two in step, as with `STALE_NOTE`.
+ */
+export const DRAFT_NOTE: Record<Exclude<DraftState, "ready">, string> = {
+  /** No advisor in this build, none chosen, or no weights on disk. */
+  unavailable: "Turn on the local advisor in Settings for a drafted rewrite.",
+  /** The advisor can run and has not reached this file yet. */
+  pending: "The local advisor has not drafted a rewrite for this file yet.",
+  /** It ran, and nothing it wrote was worth showing a diff for. */
+  refused: "The local model could not produce a rewrite worth applying to this file.",
+};
+
 /** Why this one cannot be applied, in one sentence, or null when it can. */
 export function blockedNote(a: AdviceItem): string | null {
   if (canApply(a)) return null;
+  // Stale outranks everything: the plan no longer describes the setup, so what
+  // the advisor did or did not draft for it is beside the point.
+  if (a.status === "stale") return a.blockedReason ?? STALE_NOTE;
+  if (a.draftState && a.draftState !== "ready") return DRAFT_NOTE[a.draftState];
   if (a.blockedReason) return a.blockedReason;
-  if (a.status === "stale") return STALE_NOTE;
   return null;
+}
+
+/**
+ * How the list in front of the reader was ordered.
+ *
+ * The engine sorts by estimated tokens a month with burdens included, and says
+ * so in `advice::reconcile`; a finished advisor pass may then move rows the
+ * guard accepted. "Ranked by estimated saving" was wrong in both cases, so the
+ * order describes itself instead.
+ */
+export function rankingNote(advisorRanked: boolean): string {
+  return advisorRanked
+    ? "ordered by the local advisor"
+    : "ranked by estimated tokens a month";
 }
 
 /**
@@ -208,10 +252,12 @@ export function totalLine(items: AdviceItem[]): string {
 }
 
 /** The sheet's subtitle: the same accounting, plus the promise. */
-export function sheetSummary(items: AdviceItem[]): string {
+export function sheetSummary(items: AdviceItem[], advisorRanked = false): string {
   const open = openItems(items);
   if (open.length === 0) return "Nothing to act on right now.";
-  return `${totalLine(open)} Ranked by estimated saving. Nothing changes until you apply it.`;
+  const note = rankingNote(advisorRanked);
+  const said = note.charAt(0).toUpperCase() + note.slice(1);
+  return `${totalLine(open)} ${said}. Nothing changes until you apply it.`;
 }
 
 /** How many open suggestions the Spend section did not have room for. */
