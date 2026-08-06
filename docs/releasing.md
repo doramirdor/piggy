@@ -49,10 +49,13 @@ workflow builds without releasing, as a dry run for the signing setup.
    ```sh
    TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/piggy.key" \
    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-   npx @tauri-apps/cli build --target universal-apple-darwin
+   npx @tauri-apps/cli build --target universal-apple-darwin --features local-llm
    ```
    (Or run per-arch. `createUpdaterArtifacts` is on, so every build emits the updater
-   `.app.tar.gz` + `.sig` alongside the `.dmg`.)
+   `.app.tar.gz` + `.sig` alongside the `.dmg`.) `--features local-llm` compiles the local
+   advisor into the bundle, which is what CI passes too; drop it and you ship a build whose
+   Settings screen reports the advisor as unsupported. It links llama.cpp, so this build
+   needs cmake and a C++ toolchain and takes noticeably longer than a plain one.
 5. Create GitHub release `vX.Y.Z` and upload:
    - the `.dmg` + `checksums.txt` (`shasum -a 256 *.dmg > checksums.txt`) - the npx
      installer verifies against this file;

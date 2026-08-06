@@ -10,6 +10,7 @@
 //! * the pre-install `settings.json` backup for each saver (the byte-identical
 //!   uninstall target),
 //! * Sweep's disabled items with the exact JSON removed (for one-click restore),
+//! * files Piggy edited, each with the backup that restores its exact bytes,
 //! * a backup ledger and the content hash of `settings.json` after Piggy's last
 //!   write (used to detect external edits before the next write).
 //!
@@ -39,6 +40,10 @@ pub struct PiggyState {
     /// Items Sweep has switched off, each with its restore snapshot.
     #[serde(default)]
     pub sweep_disabled: Vec<SweepDisabled>,
+    /// Files Piggy backed up before editing them (M5 advice applies), newest
+    /// last. Each record is a one-click Undo target; see [`crate::snapshots`].
+    #[serde(default)]
+    pub file_snapshots: Vec<crate::snapshots::FileSnapshot>,
     /// Backup ledger (newest last).
     #[serde(default)]
     pub backups: Vec<BackupRecord>,
@@ -72,6 +77,7 @@ impl Default for PiggyState {
             version: STATE_VERSION,
             savers: BTreeMap::new(),
             sweep_disabled: Vec::new(),
+            file_snapshots: Vec::new(),
             backups: Vec::new(),
             settings_hash: None,
             master_on: None,

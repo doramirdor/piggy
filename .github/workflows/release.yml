@@ -101,6 +101,14 @@ jobs:
         run: cargo test --locked
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      # The shipped bundle turns the local advisor on, and nothing above
+      # compiles that half of the cfg: `local-llm` is off by default precisely
+      # so the lines above stay llama-free. Check the feature graph here, on the
+      # gate, rather than discovering it inside the signed release build an hour
+      # later. `check`, not `build`: this links llama.cpp, and the release job
+      # pays for the real one.
+      - name: cargo check (advisor feature, as shipped)
+        run: cargo check --locked -p piggy-app --features local-llm
       - name: frontend tests
         working-directory: app
         run: npx vitest run
@@ -178,7 +186,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          args: --target universal-apple-darwin
+          # `--features local-llm` is the M5 advisor flip: the shipped .dmg
+          # contains the inference code, and the model itself stays an opt-in
+          # download in Settings. It links llama.cpp (cmake is preinstalled on
+          # the macOS runner image) and grows the bundle; docs/releasing.md's
+          # manual build passes the same flag so a hand-built release matches.
+          args: --target universal-apple-darwin --features local-llm
           # Empty tagName: build only, no release (dry runs, including a
           # dispatch pointed at a tag ref).
           tagName: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && github.ref_name || '' }}
