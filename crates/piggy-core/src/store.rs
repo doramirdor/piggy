@@ -63,7 +63,7 @@ impl Store {
         conn.execute_batch(
             // busy_timeout lets a concurrent open wait for the background
             // indexer's write lock instead of failing instantly with
-            // SQLITE_BUSY — otherwise a command-thread open during a heavy
+            // SQLITE_BUSY. Otherwise a command-thread open during a heavy
             // reindex errors out and the UI misreads it as "no sessions yet".
             "PRAGMA busy_timeout=5000;
              PRAGMA journal_mode=WAL;
@@ -433,7 +433,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
-    // Session tagging (session_savers) — M3 ground truth for A/B attribution
+    // Session tagging (session_savers): M3 ground truth for A/B attribution
     // -----------------------------------------------------------------------
 
     /// Replace the saver-set snapshot for `session_id` with `tags`, atomically.

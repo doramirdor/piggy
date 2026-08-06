@@ -87,7 +87,7 @@ fn planted_effect_is_recovered_within_ci() {
     let mut store = Store::open(home.path()).unwrap();
 
     // 100 ON + 100 OFF sessions. OFF sessions output ~1000 tokens/turn; ON
-    // sessions ~800 tokens/turn — a true 20% reduction — with symmetric
+    // sessions ~800 tokens/turn (a true 20% reduction), with symmetric
     // multiplicative noise (median 1.0) so the medians land on 800 / 1000.
     let mut rng = XorShift64::new(0xC0FF_EE12_3456_789A);
     let n = 100;
@@ -287,7 +287,7 @@ fn subagent_sessions_are_excluded_from_groups() {
         .set_session_savers("main", &[SaverTag::new("rtk", true, source::ROTATION)])
         .unwrap();
 
-    // A subagent file (path contains /subagents/) — upsert with that path.
+    // A subagent file (path contains /subagents/): upsert with that path.
     let mut models = BTreeMap::new();
     models.insert(
         "claude-sonnet-4-5".to_string(),
@@ -889,7 +889,7 @@ fn a_manually_pinned_off_saver_does_not_break_isolation_for_the_others() {
     // Regression: `others_on` counted ANY other saver being off, whatever the
     // source. `controlled_savers` drops a hand-toggled saver from rotation, so
     // one saver pinned off by hand was off in every session, `others_on` was
-    // false everywhere, and every saver's ON and OFF groups came out empty — the
+    // false everywhere, and every saver's ON and OFF groups came out empty: the
     // per-saver table read "not enough data yet" forever at any session count.
     // Seen on a real profile: sweep had 245 randomized on / 45 off and the table
     // showed 52 / 0.
@@ -1000,7 +1000,7 @@ fn a_stream_the_baseline_barely_uses_reports_no_percentage() {
     let mut store = Store::open(home.path()).unwrap();
 
     for i in 0..MIN_GROUP {
-        // input: 20 tokens over 10 turns = 2/turn in BOTH arms — under the floor.
+        // input: 20 tokens over 10 turns = 2/turn in BOTH arms, under the floor.
         // output: a real 50% cut, so the guard is shown to be per-stream.
         let id = format!("on-{i}");
         insert_session(

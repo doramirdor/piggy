@@ -232,7 +232,7 @@ fn null_per_stream_false_positive_rate() {
     // Nominal for a two-sided 90% CI is ~0.10. Fail only on gross anti-conservatism.
     assert!(
         rate < 0.22,
-        "false-positive rate {rate:.3} is far above the ~0.10 nominal of a 90% CI — the \
+        "false-positive rate {rate:.3} is far above the ~0.10 nominal of a 90% CI: the \
          bootstrap CI is too narrow / anti-conservative"
     );
 }
@@ -294,7 +294,7 @@ fn null_saver_any_stream_false_positive_rate() {
     // Only a sanity ceiling; the point is the printed number.
     assert!(
         rate < 0.60,
-        "a do-nothing saver lights up a green badge {rate:.3} of the time — investigate"
+        "a do-nothing saver lights up a green badge {rate:.3} of the time: investigate"
     );
 }
 
@@ -366,7 +366,7 @@ fn recovery_across_planted_effects() {
             // a 90% CI should cover the truth the large majority of the time.
             assert!(
                 power > 0.80,
-                "power {power:.2} at true effect {true_effect:.2} is low — under-powered"
+                "power {power:.2} at true effect {true_effect:.2} is low: under-powered"
             );
             assert!(
                 coverage > 0.75,
@@ -517,7 +517,7 @@ fn heavy_tailed_outliers_do_not_corrupt_delta() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Model/token-rate mix confound — per-turn normalisation does NOT adjust
+// 6. Model/token-rate mix confound: per-turn normalisation does NOT adjust
 //    for composition differences between the two arms.
 // ---------------------------------------------------------------------------
 //
@@ -534,7 +534,7 @@ fn composition_confound_yields_false_measured_badge() {
     let mut store = Store::open(home.path()).unwrap();
     let mut rng = XorShift64::new(0x00C0_FFEE);
     // ON arm: 20 "light" sessions (500/turn). OFF arm: 20 "heavy" sessions
-    // (1500/turn). The saver has zero within-cell effect — the gap is pure
+    // (1500/turn). The saver has zero within-cell effect: the gap is pure
     // composition confound.
     for i in 0..20 {
         let turns = 8 + rng.below(6) as u64;
@@ -654,7 +654,7 @@ fn pre_install_pooling_does_not_manufacture_a_measured_badge() {
     }
 
     // Non-randomised pre-install history: heavier usage era (2000/turn), all-off.
-    // This is observational — nothing about it is attributable to the saver.
+    // This is observational: nothing about it is attributable to the saver.
     for i in 0..30 {
         let turns = 8 + rng.below(6) as u64;
         let out = (2000.0 * noise(&mut rng, 0.5) * turns as f64).round() as u64;

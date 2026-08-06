@@ -115,7 +115,7 @@ pub struct DailyRow {
     pub totals: Totals,
 }
 
-/// One `(source, interface)` slice of the window — e.g. Claude Code sessions
+/// One `(source, interface)` slice of the window, e.g. Claude Code sessions
 /// run from the desktop app vs the terminal, or Codex ditto.
 #[derive(Debug, Clone)]
 pub struct SourceRow {
@@ -205,7 +205,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Breakdown grouped by `(source, interface)` — which tool and surface the
+    /// Breakdown grouped by `(source, interface)`: which tool and surface the
     /// tokens came from. Largest first, so the UI's card order is stable.
     pub fn by_source(&self, period: Period) -> Result<Vec<SourceRow>> {
         let cutoff = period.day_cutoff();

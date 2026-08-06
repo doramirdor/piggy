@@ -1,5 +1,5 @@
 //! Tauri command surface (per `docs/m4-spec.md`). Every command is a thin async
-//! wrapper that runs the `piggy-core`-touching work on a blocking task — the
+//! wrapper that runs the `piggy-core`-touching work on a blocking task: the
 //! engine mutates `settings.json` and must never run on the UI/main thread.
 
 use serde::{Deserialize, Serialize};
@@ -299,7 +299,7 @@ pub async fn open_data_folder(app: AppHandle) -> Result<(), ApiError> {
 // ---------------------------------------------------------------------------
 
 /// What the About screen's system table shows. Every field is read from the
-/// running build or the filesystem — nothing here is a stand-in, because a
+/// running build or the filesystem: nothing here is a stand-in, because a
 /// version or a path that is decorative is worse than absent.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

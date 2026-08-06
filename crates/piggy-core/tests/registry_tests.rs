@@ -44,7 +44,7 @@ fn v1_savers_are_installable_and_deferred_ones_are_not() {
     }
     // Listed-only entries have no steps → shown in Discover, never installable.
     // boost: mechanically an rtk-style hook, but excluded upstream (auto-allows
-    // Bash + telemetry with no opt-out) — see its exclusionReason.
+    // Bash + telemetry with no opt-out). See its exclusionReason.
     for id in ["token-optimizer-mcp", "boost"] {
         assert!(
             !c.get(id).unwrap().has_install_steps(),
@@ -121,8 +121,8 @@ fn nadir_route_is_pinned_to_the_file_the_site_tells_users_to_curl() {
     // getnadir.com/skill documents exactly one install:
     //   mkdir -p ~/.claude/skills/nadir-route &&
     //   curl -fsSL https://getnadir.com/skills/nadir-route/SKILL.md -o …/SKILL.md
-    // Piggy must land the same path from the same URL, and — because that URL
-    // is unversioned — must carry a sha256, or an upstream edit would install
+    // Piggy must land the same path from the same URL, and (because that URL
+    // is unversioned) must carry a sha256, or an upstream edit would install
     // whatever Nadir last published straight into ~/.claude.
     let c = Catalog::embedded();
     let e = c.get("nadir-route").unwrap();
@@ -223,7 +223,7 @@ fn honey_activates_itself_on_install_and_stands_down_on_uninstall() {
 #[test]
 fn honey_intensity_never_offers_the_px_level() {
     // `ultra` tells Claude to fetch the third-party `pxpipe-proxy` package at
-    // run time and read files as images — lossy on exact strings. Piggy caps
+    // run time and read files as images (lossy on exact strings). Piggy caps
     // the option at `full`; the flag file itself is the value.
     let c = Catalog::embedded();
     let opt = &c.get("honey").unwrap().config_options[0];

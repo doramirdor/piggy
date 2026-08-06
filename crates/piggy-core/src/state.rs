@@ -5,7 +5,7 @@
 //!
 //! * which savers are installed / enabled and at what version,
 //! * the **exact hook objects Piggy injected** per saver (removal matches these
-//!   structurally — user hooks are never touched),
+//!   structurally, so user hooks are never touched),
 //! * files Piggy created (downloaded binaries, managed docs),
 //! * the pre-install `settings.json` backup for each saver (the byte-identical
 //!   uninstall target),
@@ -128,7 +128,7 @@ pub struct SaverState {
     pub version: String,
     pub installed_at: String,
     /// `false` means installed-but-toggled-off (hooks removed / plugin disabled,
-    /// artifacts kept) — the fast A/B path.
+    /// artifacts kept): the fast A/B path.
     pub enabled: bool,
     /// The exact hook-group objects Piggy injected, per event name. These are
     /// matched structurally on removal so user hooks are never disturbed.
@@ -139,7 +139,7 @@ pub struct SaverState {
     #[serde(default)]
     pub installed_files: Vec<String>,
     /// Path to the `settings.json` backup captured immediately before this
-    /// saver's first settings mutation — the byte-identical uninstall target.
+    /// saver's first settings mutation: the byte-identical uninstall target.
     #[serde(default)]
     pub pre_install_backup: Option<String>,
     /// Who last flipped this saver's on/off state: `manual` (the user, via the
@@ -150,7 +150,7 @@ pub struct SaverState {
     /// The user's *resting* on/off choice, captured on every manual toggle. The
     /// all-off holdout flips a pinned saver off for its sampled session and this
     /// records what to restore it to afterward, so a hand-pinned setup can still
-    /// produce a clean baseline. `Some(_)` is the durable "pinned" marker — it
+    /// produce a clean baseline. `Some(_)` is the durable "pinned" marker; it
     /// outlives the transient `last_toggle_source = "holdout"` a holdout stamps.
     /// `None` until the first manual toggle (rotation backfills it from `enabled`).
     #[serde(default)]
@@ -165,8 +165,8 @@ pub struct SaverState {
 impl SaverState {
     /// True when the user has taken manual control of this saver, pinning it out
     /// of per-saver rotation. Keys on `manual_enabled` (the durable resting
-    /// choice) so a transient all-off holdout override — which stamps
-    /// `last_toggle_source = "holdout"` for one session — does not read as
+    /// choice) so a transient all-off holdout override (which stamps
+    /// `last_toggle_source = "holdout"` for one session) does not read as
     /// un-pinned. Falls back to the source for a legacy pin whose
     /// `manual_enabled` has not been backfilled yet.
     pub fn is_pinned(&self) -> bool {
@@ -206,7 +206,7 @@ pub struct BackupRecord {
 
 impl PiggyState {
     /// Load state from `<piggy_home>/state.json`, or a fresh default if absent.
-    /// A present-but-unparseable file is an error (never silently discarded —
+    /// A present-but-unparseable file is an error (never silently discarded;
     /// that would orphan installed artifacts).
     pub fn load() -> Result<Self> {
         Self::load_from(&config::state_path())

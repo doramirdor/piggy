@@ -5,11 +5,11 @@
 //! `archived_sessions`). Every line is `{"timestamp": …, "type": …,
 //! "payload": {…}}`:
 //!
-//! * `session_meta` — session id, `cwd`, `originator` (the GUI/TUI
+//! * `session_meta`: session id, `cwd`, `originator` (the GUI/TUI
 //!   discriminator: `codex_desktop` / `codex_vscode` vs `codex_cli_rs` /
 //!   `codex_exec` / …), git info.
-//! * `turn_context` — carries the active `model` for subsequent turns.
-//! * `event_msg` with `payload.type == "token_count"` — **cumulative**
+//! * `turn_context` carries the active `model` for subsequent turns.
+//! * `event_msg` with `payload.type == "token_count"`: **cumulative**
 //!   `info.total_token_usage` counters for the whole session. Per-turn usage
 //!   is recovered by subtracting the previous cumulative total (the same
 //!   delta scheme ccusage uses). A counter that goes *down* means the
@@ -192,7 +192,7 @@ pub fn parse_codex_file(path: &Path) -> io::Result<SessionParse> {
                 let Some(p) = payload else { continue };
                 match p.get("type").and_then(|v| v.as_str()) {
                     Some("token_count") => {
-                        // `info` can be null on housekeeping events — skip those.
+                        // `info` can be null on housekeeping events, so skip those.
                         let Some(total) = p
                             .get("info")
                             .and_then(|i| i.get("total_token_usage"))
@@ -234,7 +234,7 @@ pub fn parse_codex_file(path: &Path) -> io::Result<SessionParse> {
         first_ts,
         last_ts,
         models,
-        // Each positive token_count delta is one model turn — the closest
+        // Each positive token_count delta is one model turn, the closest
         // Codex analogue of a deduplicated assistant message.
         n_assistant_msgs: n_turns,
         n_user_msgs,

@@ -23,7 +23,7 @@ const CACHE_WRITE_1H_MULT: f64 = 2.0;
 /// Output rate as a multiple of input, used only when a model has no price
 /// entry at all.
 ///
-/// Unlike an absolute rate — which this module refuses to guess, on purpose —
+/// Unlike an absolute rate (which this module refuses to guess, on purpose),
 /// the RATIO is stable: every Claude model in the embedded table prices output
 /// at exactly 5x input, and every GPT model at 8x. That makes a cost-WEIGHTED
 /// comparison computable for an unpriced model even though its dollar cost is
@@ -177,7 +177,7 @@ impl Pricing {
 
     /// Plan-metered spend for the streams that count against a usage plan:
     /// input + output + cache creation (5-minute and 1-hour writes at their
-    /// multipliers). Cache **reads** are deliberately excluded — the measurement
+    /// multipliers). Cache **reads** are deliberately excluded: the measurement
     /// doc excludes the cheap read stream from the "spend" weighting used for the
     /// headline multiplier. `None` if the model has no price (never guessed).
     pub fn plan_metered_spend(&self, model: &str, t: &ModelTokens) -> Option<f64> {

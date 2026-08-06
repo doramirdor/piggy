@@ -4,7 +4,7 @@
 //! We hand-roll this deliberately: the honesty story depends on the confidence
 //! interval being *reproducible* (a fixed seed in tests must give a byte-stable
 //! CI), and pulling in `rand` would add a dependency and a non-deterministic
-//! default seed for no benefit. The generator is not cryptographic — it only
+//! default seed for no benefit. The generator is not cryptographic; it only
 //! needs a well-distributed stream of indices for resampling.
 
 /// xorshift64* generator. Seed with any non-zero `u64`.

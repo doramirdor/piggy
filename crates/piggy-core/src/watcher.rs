@@ -32,7 +32,7 @@ const SETTLE: Duration = Duration::from_millis(120);
 
 /// Which OS mechanism backs the watcher.
 ///
-/// Production uses [`WatchBackend::Native`] — the platform's kernel-push watcher
+/// Production uses [`WatchBackend::Native`]: the platform's kernel-push watcher
 /// (FSEvents on macOS), which does no work while idle. [`WatchBackend::Poll`]
 /// re-`stat`s every watched path each interval, so its CPU cost is O(paths)
 /// *forever*; on a large Claude history (10k+ session files) that is a steady
@@ -100,7 +100,7 @@ impl SessionWatcher {
     pub fn with_roots(roots: Vec<SourceRoot>, home: &Path, backend: WatchBackend) -> Result<Self> {
         // The native (FSEvents) backend reports canonical, symlink-resolved paths.
         // `claude_owns` routes each event by prefix-matching against these root
-        // dirs, so canonicalize them once up front — otherwise a symlinked
+        // dirs, so canonicalize them once up front. Otherwise a symlinked
         // ancestor (macOS's /var → /private/var, or a symlinked home) makes every
         // event path fail `starts_with`, and new sessions never get snapshot-
         // tagged. Fall back to the original path if it can't be resolved yet.
@@ -109,7 +109,7 @@ impl SessionWatcher {
             .map(|r| SourceRoot::new(r.dir.canonicalize().unwrap_or(r.dir), r.kind))
             .collect();
         let (tx, rx) = mpsc::channel();
-        // `tx` is moved into whichever arm runs — a value may be moved in several
+        // `tx` is moved into whichever arm runs; a value may be moved in several
         // mutually-exclusive match arms, since only one ever executes.
         let mut watcher: Box<dyn Watcher + Send> = match backend {
             WatchBackend::Native => Box::new(

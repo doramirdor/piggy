@@ -1,6 +1,6 @@
 //! Session sources: which tool wrote a session log, and through which surface.
 //!
-//! Piggy measures two tools — Claude Code and Codex — each usable from a GUI
+//! Piggy measures two tools, Claude Code and Codex, each usable from a GUI
 //! (desktop app / IDE extension) or a TUI (terminal CLI / headless exec). The
 //! log format itself carries the discriminator:
 //!
@@ -11,7 +11,7 @@
 //!   tags.rs`): `codex_desktop`, `codex_vscode`, `codex_cli_rs`, `codex-tui`,
 //!   `codex-cli`, `codex_exec`, `codex_mcp_server`, …
 //!
-//! Unknown values classify as [`Interface::Unknown`] — shown honestly as
+//! Unknown values classify as [`Interface::Unknown`], shown honestly as
 //! "other", never guessed into a bucket.
 
 /// Which tool produced a session log.

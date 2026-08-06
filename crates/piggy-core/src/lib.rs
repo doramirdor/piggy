@@ -1,4 +1,4 @@
-//! `piggy-core` — the ground-truth measurement core for Piggy.
+//! `piggy-core`: the ground-truth measurement core for Piggy.
 //!
 //! It parses Claude Code session logs (`~/.claude/projects/**/*.jsonl`),
 //! aggregates deduplicated per-model token usage, prices it with an embedded

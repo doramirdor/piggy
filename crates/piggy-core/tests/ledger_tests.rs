@@ -145,7 +145,7 @@ fn headroom_is_available_not_achieved_and_stays_quiet_when_trivial() {
     let pricing = Pricing::embedded();
     let mut store = Store::open(home.path()).unwrap();
 
-    // 400 of 1000 cache-write tokens are configurable — 40% of WRITES. But the
+    // 400 of 1000 cache-write tokens are configurable (40% of WRITES). But the
     // session also spends 100 output tokens, and output prices at 5x input while
     // a 5-minute cache write prices at 1.25x. In cost units:
     //     writes  1000 * 1.25 = 1250
