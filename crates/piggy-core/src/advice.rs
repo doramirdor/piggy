@@ -748,7 +748,7 @@ pub fn server_disable(inputs: &Inputs) -> Vec<Candidate> {
                 "Context cost per session",
                 format!(
                     "{}{} tokens",
-                    if measured { "" } else { "~" },
+                    if item.tokens_estimated { "~" } else { "" },
                     commas(item.est_tokens)
                 ),
                 if measured {
@@ -864,10 +864,18 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
         if freed_sessions <= 0 {
             continue;
         }
-        let (tokens, measured) = match probe::measured_tokens(&inputs.manifests, server) {
-            Some(t) => (t.max(0) as u64, true),
-            None => (sweep::est_mcp_tokens(&server.config), false),
-        };
+        // `measured` is about the bytes, `estimated` about the count: the
+        // shipped tokenizer divides by 3.5, so a measured manifest still keeps
+        // its tilde.
+        let (tokens, measured, estimated) =
+            match probe::measured_manifest(&inputs.manifests, server) {
+                Some(m) => (
+                    m.schema_tokens.max(0) as u64,
+                    true,
+                    m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE,
+                ),
+                None => (sweep::est_mcp_tokens(&server.config), false, true),
+            };
         let est_tokens_month = tokens as i64 * freed_sessions;
 
         let mut evidence = Vec::new();
@@ -888,11 +896,7 @@ pub fn server_scope(inputs: &Inputs) -> Vec<Candidate> {
         }
         evidence.push(EvidenceRow::new(
             "Tool schemas it loads",
-            format!(
-                "{}{} tokens",
-                if measured { "" } else { "~" },
-                commas(tokens)
-            ),
+            format!("{}{} tokens", if estimated { "~" } else { "" }, commas(tokens)),
             if measured {
                 basis::MEASURED_MANIFEST
             } else {
@@ -1061,13 +1065,13 @@ fn claudemd_edit(
     let mut drop_lines: BTreeSet<usize> = BTreeSet::new();
 
     // Dead references, every occurrence rather than the capped display list -
-    // but only the ones that name a file. A CLAUDE.md that lists its project's
-    // URL routes is full of tokens that resolve like paths and are not paths,
-    // and this transform deletes whole lines. Reporting one of those as a
-    // finding costs a shrug; deleting the line costs the user a rule.
+    // but only the ones Piggy can prove name a file. A CLAUDE.md that lists its
+    // project's HTTP routes is full of tokens that resolve like paths and are
+    // not paths, and this transform deletes whole lines. Reporting one of those
+    // as a finding costs a shrug; deleting the line costs the user a rule.
     let mut dead_refs: Vec<String> = Vec::new();
     for dead in claudemd::dead_refs_located(text) {
-        if !claudemd::has_file_extension(&dead.reference) {
+        if !claudemd::deletable_ref(&dead) {
             continue;
         }
         if !dead_refs.contains(&dead.reference) {

@@ -190,8 +190,9 @@ pub struct Finding {
 pub struct ScannedFile {
     /// Exactly what was written to `claudemd_files`.
     pub file: ClaudemdFile,
-    /// Sessions over the last 30 days that load this file: the project's own
-    /// for a project file, every project's for a global one.
+    /// Claude Code sessions over the last 30 days that load this file: the
+    /// project's own for a project file, every project's for a global one.
+    /// Codex sessions do not load CLAUDE.md, so they are not counted.
     pub sessions_30d: i64,
     /// `est_tokens` x [`Self::sessions_30d`]. Estimated, always.
     pub est_tokens_month: i64,
@@ -301,9 +302,10 @@ pub fn scan(store: &mut Store) -> Result<ClaudemdReport> {
         store.upsert_claudemd_file(&row)?;
         seen.insert(path.clone());
 
-        // A global file is loaded by every session; a project file only by its
-        // own project's. Both counts are observed, only the multiplication is
-        // an estimate.
+        // A global file is loaded by every Claude Code session; a project file
+        // only by that project's. Codex sessions are not in either count: they
+        // never load a CLAUDE.md. Both counts are observed, only the
+        // multiplication is an estimate.
         let sessions_30d = match &t.project {
             Some(p) => counts.by_project.get(p).copied().unwrap_or(0),
             None => counts.total,
@@ -461,8 +463,37 @@ pub fn dead_refs_located(f: &FileText) -> Vec<DeadRef> {
                 resolved,
             }
         })
+        .filter(names_a_path)
         .filter(|d| !d.resolved.exists())
         .collect()
+}
+
+/// Whether a token that resolves to nothing was a path reference at all.
+///
+/// [`path_token`] accepts anything anchored, which is right for `/opt/thing` and
+/// wrong for the HTTP routes a project's own guidance is full of. "The API
+/// exposes GET /v1/sessions and POST /users/:id/refresh" is three sentences
+/// about a web service and zero claims about the disk, and reporting it as three
+/// broken references is both wrong and loud enough to discredit the real ones.
+///
+/// A name and an extension (`docs/x.md`) or a trailing slash (`vendor/`) say
+/// "file" on their own. Without either, the evidence has to come from the
+/// neighbourhood: a reference to something that used to be there sits next to a
+/// directory that still is. `~/.claude/rules` keeps flagging because
+/// `~/.claude` exists; `/v1/sessions` does not, because `/v1` never did, and
+/// `/login` does not because the filesystem root is not evidence of anything.
+fn names_a_path(d: &DeadRef) -> bool {
+    has_path_ext(&d.reference) || d.reference.ends_with('/') || parent_is_a_real_dir(&d.resolved)
+}
+
+/// Whether `resolved` sits inside a directory that exists and is not the
+/// filesystem root. The root is excluded on purpose: it exists everywhere, so a
+/// one-segment path (`/login`, `/openapi.json`) would otherwise clear a bare
+/// "does its parent exist" test, which is the whole question being asked.
+fn parent_is_a_real_dir(resolved: &Path) -> bool {
+    resolved
+        .parent()
+        .is_some_and(|p| p.parent().is_some() && p.is_dir())
 }
 
 /// Paths the file points at that are not there.
@@ -599,16 +630,33 @@ fn path_token(raw: &str) -> Option<String> {
     None
 }
 
-/// Whether a reference names a *file* rather than merely resolving like a path.
+/// Whether Piggy is sure enough that a dead reference names a *file* to let
+/// [`crate::advice`] delete the whole line carrying it.
 ///
-/// [`path_token`] deliberately accepts anything anchored (`/login`, `~/x`), and
-/// it is right to: a CLAUDE.md that points at `/opt/thing` and is wrong about it
-/// is worth reporting. But a project whose guidance lists its own URL routes
-/// (`/login`, `/api/healthz`) produces a page of "dead references" that are not
-/// references at all, and [`crate::advice`] deletes the lines it is sure about.
-/// Naming a file, by carrying a known extension, is that surer test.
-pub fn has_file_extension(token: &str) -> bool {
-    has_path_ext(token)
+/// Reporting is allowed to be wrong about a token; deleting is not, so this bar
+/// sits above [`names_a_path`]'s. Two tests:
+///
+/// * it carries a known file extension. `/login` and `/healthz/live` never get
+///   this far.
+/// * and, when it is anchored at `/`, the directory it resolves into is a real
+///   directory somewhere other than the filesystem root. A route can carry an
+///   extension too (`/openapi.json`, `/static/app.js`), and what gives those
+///   away is that nothing around them is on disk. The root is not evidence of
+///   anything: it exists on every machine, so a one-segment absolute path would
+///   clear a bare "does its parent exist" test.
+///
+/// A relative or `~/`-anchored reference is not an HTTP route to begin with, and
+/// it is exactly the case this transform exists for ("the `scripts/` directory
+/// is gone, so every line pointing into it is stale"), so it is not asked for
+/// the same proof.
+pub fn deletable_ref(dead: &DeadRef) -> bool {
+    if !has_path_ext(&dead.reference) {
+        return false;
+    }
+    if !dead.reference.starts_with('/') {
+        return true;
+    }
+    parent_is_a_real_dir(&dead.resolved)
 }
 
 fn has_path_ext(token: &str) -> bool {
@@ -842,12 +890,12 @@ pub fn mcp_server_names(path: &Path) -> Result<Vec<String>> {
 // Store reads the scanner needs
 // ---------------------------------------------------------------------------
 
-/// Sessions over a window, per project and in total.
+/// Claude Code sessions over a window, per project and in total.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionCounts {
     pub by_project: BTreeMap<String, i64>,
-    /// Every session in the window, including those with no recorded project:
-    /// they still loaded the global files.
+    /// Every counted session in the window, including those with no recorded
+    /// project: they still loaded the global files.
     pub total: i64,
 }
 
@@ -855,7 +903,9 @@ impl Store {
     /// Every distinct project path in the sessions table, in path order.
     ///
     /// The scan's roots: a project CLAUDE.md is worth inventorying exactly when
-    /// Piggy has seen a session run there.
+    /// Piggy has seen a session run there. Deliberately unfiltered by source, so
+    /// a project Piggy has only seen Codex run in is still inventoried (at zero
+    /// sessions, see [`Store::session_counts_since`]).
     pub fn session_projects(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT project FROM sessions
@@ -870,18 +920,27 @@ impl Store {
         Ok(out)
     }
 
-    /// Session counts with last activity on or after `cutoff` (all time when
-    /// `None`), per project and in total.
+    /// Claude Code session counts with last activity on or after `cutoff` (all
+    /// time when `None`), per project and in total.
+    ///
+    /// Codex sessions are excluded on purpose. Piggy indexes Codex rollouts into
+    /// the same table, but CLAUDE.md is a Claude Code artifact and a Codex
+    /// session never loads one, so counting those rows would inflate both
+    /// `sessions_30d` and every monthly burden derived from it. The companion
+    /// [`Store::session_projects`] stays unfiltered: a project Piggy has only
+    /// ever seen Codex run in still gets its CLAUDE.md inventoried, now honestly
+    /// at zero sessions and zero monthly burden.
     pub fn session_counts_since(&self, cutoff: Option<&str>) -> Result<SessionCounts> {
         let mut out = SessionCounts::default();
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(project, ''), COUNT(*) FROM sessions
-             WHERE (?1 IS NULL OR ended_at >= ?1)
+             WHERE (?1 IS NULL OR ended_at >= ?1) AND source = ?2
              GROUP BY COALESCE(project, '')",
         )?;
-        let rows = stmt.query_map(rusqlite::params![cutoff], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![cutoff, crate::sources::SourceKind::ClaudeCode.as_str()],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )?;
         for row in rows {
             let (project, n) = row?;
             out.total += n;

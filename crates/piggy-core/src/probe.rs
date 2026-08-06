@@ -15,8 +15,10 @@
 //!   probe adds no new trust grant, but Piggy still refuses to execute anything
 //!   without an explicit click (or `piggy probe --all --yes`).
 //! * **Bounded.** One [`PROBE_TIMEOUT`] wall-clock budget, [`STDOUT_CAP_BYTES`]
-//!   of output, no retries, and the child is killed and reaped on every path out
-//!   of the probe.
+//!   of output, a ceiling on the server-to-client requests Piggy will answer
+//!   (the budget covers reads, so what Piggy *writes* has to be bounded by
+//!   count), no retries, and the child is killed and reaped on every path out of
+//!   the probe.
 //! * **Quiet about secrets.** Configured env values go into
 //!   [`ConfiguredServer::config_hash`] and nowhere else: error strings and
 //!   captured stderr are scrubbed to `KEY=<redacted>` before anything is
@@ -69,6 +71,31 @@ pub const TOKENIZER_BYTES_ESTIMATE: &str = "est-bytes/3.5";
 /// Ceiling on `tools/list` pages followed, so a server whose `nextCursor` never
 /// settles fails with a clear reason instead of burning the whole budget.
 const MAX_TOOL_PAGES: u32 = 100;
+
+/// Ceiling on server-to-client requests Piggy will refuse before it gives up on
+/// the server, counted across the whole [`Session`] rather than per request.
+///
+/// Every refusal is a line Piggy *writes*, and a server that stops reading its
+/// stdin cannot be made to drain them. Once the pipe fills, `write_all` parks in
+/// the kernel with no deadline (the budget is only checked while reading), so an
+/// unbounded refusal loop is an unbounded hang with an orphaned server process
+/// on the end of it. 32 refusals is about 3.8 KB; adding `initialize` and
+/// [`MAX_TOOL_PAGES`] pages (each drained before the next is written, since a
+/// server has to read a request to answer it) keeps everything Piggy can have
+/// outstanding at once under 9 KB, inside the smallest 16 KiB pipe buffer on any
+/// platform Piggy runs on. A server needing a 33rd answer is not going to
+/// produce a tool list.
+const MAX_SERVER_REQUESTS: u32 = 32;
+
+/// Ceiling on a `nextCursor` Piggy will echo back in the next `tools/list`.
+///
+/// A cursor is an opaque resumption token of a few dozen bytes; this is three
+/// orders of magnitude of headroom. It is a bound rather than a courtesy because
+/// the cursor is the one part of a request Piggy writes that the *server* sizes,
+/// and a megabyte of it (a line under [`STDOUT_CAP_BYTES`] is allowed to be that
+/// big) would overflow the pipe on its own and hang the same write
+/// [`MAX_SERVER_REQUESTS`] exists to keep bounded.
+const MAX_CURSOR_BYTES: usize = 4 * 1024;
 
 /// Shortest env value scrubbed from free text. Below this a value is
 /// indistinguishable from an ordinary word (`"1"`, `"dev"`), and scrubbing it
@@ -456,11 +483,7 @@ pub fn status(manifests: &[McpManifest], server: &ConfiguredServer) -> Measureme
     if server.transport == Transport::Remote {
         return MeasurementStatus::Deferred;
     }
-    let scope = server.scope();
-    let Some(row) = manifests
-        .iter()
-        .find(|m| m.server_key == server.key && m.scope == scope)
-    else {
+    let Some(row) = stored_row(manifests, server) else {
         return MeasurementStatus::Never;
     };
     if row.config_hash != server.config_hash() {
@@ -473,14 +496,34 @@ pub fn status(manifests: &[McpManifest], server: &ConfiguredServer) -> Measureme
     }
 }
 
-/// The measured schema tokens for `server`, when a stored row measured *this*
-/// config successfully. `None` means "not measured" - a stale or failed row is
-/// not a number anyone may quote, and the caller keeps its own estimate.
-pub fn measured_tokens(manifests: &[McpManifest], server: &ConfiguredServer) -> Option<i64> {
-    match status(manifests, server) {
-        MeasurementStatus::Measured(m) => Some(m.schema_tokens),
-        _ => None,
+/// The stored row for `server`, whatever state it is in.
+fn stored_row<'a>(
+    manifests: &'a [McpManifest],
+    server: &ConfiguredServer,
+) -> Option<&'a McpManifest> {
+    let scope = server.scope();
+    manifests
+        .iter()
+        .find(|m| m.server_key == server.key && m.scope == scope)
+}
+
+/// The stored row that measured *this* server's current config successfully.
+/// `None` means "not measured" - a stale or failed row is not a number anyone
+/// may quote, and the caller keeps its own estimate.
+///
+/// The whole row, not just `schema_tokens`, and deliberately so: `tokenizer`
+/// says whether the count is a real tokenization or the [`BytesEstimate`]
+/// divisor, and a caller that took the number alone had no way to tell. Handing
+/// back only the figure is what let sweep print an estimate without its tilde.
+pub fn measured_manifest<'a>(
+    manifests: &'a [McpManifest],
+    server: &ConfiguredServer,
+) -> Option<&'a McpManifest> {
+    if server.transport == Transport::Remote {
+        return None;
     }
+    let row = stored_row(manifests, server)?;
+    (row.ok && row.config_hash == server.config_hash()).then_some(row)
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +626,15 @@ fn run(server: &ConfiguredServer, opts: &ProbeOptions) -> Result<Measurement, Pr
             .and_then(Value::as_str)
             .filter(|c| !c.is_empty())
             .map(str::to_string);
+        if let Some(c) = &cursor {
+            if c.len() > MAX_CURSOR_BYTES {
+                return Err(ProbeError::Protocol(format!(
+                    "tools/list answered with a {} byte nextCursor; \
+                     piggy will not echo back more than {MAX_CURSOR_BYTES}",
+                    c.len()
+                )));
+            }
+        }
         if cursor.is_none() {
             break;
         }
@@ -707,6 +759,13 @@ struct Session {
     deadline: Instant,
     timeout: Duration,
     stdout_cap: usize,
+    /// Server-to-client requests answered so far, over the whole session.
+    ///
+    /// On the session and not on [`Session::request`] deliberately: a per-call
+    /// counter would hand each of the up-to-[`MAX_TOOL_PAGES`] pages a fresh
+    /// budget, which is 100 times the ceiling and back to unbounded for any
+    /// practical purpose.
+    server_requests: u32,
 }
 
 impl Drop for Session {
@@ -823,6 +882,7 @@ impl Session {
             deadline: Instant::now() + opts.timeout,
             timeout: opts.timeout,
             stdout_cap: opts.stdout_cap,
+            server_requests: 0,
         })
     }
 
@@ -842,6 +902,16 @@ impl Session {
             // of deadlocking against our timeout.
             if msg.get("method").is_some() {
                 if let Some(rid) = msg.get("id").cloned() {
+                    // Bounded, because each refusal is a write and the budget
+                    // does not cover writes. See [`MAX_SERVER_REQUESTS`].
+                    self.server_requests += 1;
+                    if self.server_requests > MAX_SERVER_REQUESTS {
+                        return Err(ProbeError::Protocol(format!(
+                            "the server asked piggy to do {MAX_SERVER_REQUESTS} things \
+                             before answering {method}; piggy is a probe and implements no \
+                             client methods, so it stopped replying"
+                        )));
+                    }
                     self.send(&json!({
                         "jsonrpc": "2.0",
                         "id": rid,

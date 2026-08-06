@@ -440,11 +440,13 @@ fn the_deterministic_fix_drops_dead_lines_and_the_redundant_copy_of_a_block() {
     );
 }
 
-/// The scanner flags anything anchored that does not resolve, which is right for
-/// a finding and wrong for a deletion: a project whose guidance lists its own
-/// URL routes would have those lines removed.
+/// A project whose guidance documents its own HTTP routes must not have those
+/// lines reported as broken references, and must never have them deleted. The
+/// extension-bearing routes are the sharp case: `/openapi.json` looks exactly
+/// like a file, so the scanner still reports it and the deletion gate is the one
+/// thing standing between a documented route and a silent removal.
 #[test]
-fn a_route_that_looks_like_a_path_is_reported_but_never_deleted() {
+fn a_route_that_looks_like_a_path_is_never_deleted() {
     let sb = Sandbox::new();
     sb.write_claude_json(&json!({ "mcpServers": {}, "projects": {} }));
     let mut store = sb.store();
@@ -454,26 +456,39 @@ fn a_route_that_looks_like_a_path_is_reported_but_never_deleted() {
         "# Project\n\n\
          - The health probe is served at /api/healthz and must stay public.\n\
          - Sign-in lives at /login.\n\
+         - The schema is published at /openapi.json.\n\
+         - The bundle is served from /static/app.js.\n\
          - The build script is at scripts/build.sh.\n",
     );
     seed_session(&mut store, "s1", &proj.to_string_lossy(), &[], 5, 0, 0, 0);
 
-    // The scanner still reports all three: being wrong about `/api/healthz` is
-    // worth a shrug, and it is not this module's call to make.
+    // The two extension-less routes are not references at all, so they are not
+    // findings. The two that carry an extension are indistinguishable from a
+    // file reference into a directory that is also gone, so they are reported.
     let report = piggy_core::claudemd::scan(&mut store).unwrap();
-    let flagged = report
+    let flagged: Vec<String> = report
         .findings()
-        .filter(|f| matches!(f.kind, piggy_core::FindingKind::DeadRef { .. }))
-        .count();
-    assert_eq!(flagged, 3, "the scanner's findings are unchanged");
+        .filter_map(|f| match &f.kind {
+            piggy_core::FindingKind::DeadRef { reference, .. } => Some(reference.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![
+            "/openapi.json".to_string(),
+            "/static/app.js".to_string(),
+            "scripts/build.sh".to_string(),
+        ],
+        "route findings"
+    );
 
     let state = PiggyState::default();
     let candidate = one_of_kind(&generate(&mut store, &state), ActionKind::ClaudemdFix).clone();
     let new = candidate.new_content.as_deref().unwrap();
-    assert!(
-        new.contains("/api/healthz") && new.contains("/login"),
-        "route lines survive:\n{new}"
-    );
+    for route in ["/api/healthz", "/login", "/openapi.json", "/static/app.js"] {
+        assert!(new.contains(route), "the {route} line went:\n{new}");
+    }
     assert!(!new.contains("scripts/build.sh"), "the file reference goes");
     assert_eq!(
         candidate.title,

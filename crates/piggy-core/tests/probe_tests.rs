@@ -123,10 +123,11 @@ fn ok_server_is_measured_across_both_pages() {
         probe::status(&manifests, &server),
         MeasurementStatus::Measured(row)
     );
-    assert_eq!(
-        probe::measured_tokens(&manifests, &server),
-        Some(OK_SCHEMA_TOKENS)
-    );
+    // The whole row, so the caller can still see which tokenizer produced the
+    // count rather than quoting a bare number.
+    let measured = probe::measured_manifest(&manifests, &server).expect("a measurement");
+    assert_eq!(measured.schema_tokens, OK_SCHEMA_TOKENS);
+    assert_eq!(measured.tokenizer, probe::TOKENIZER_BYTES_ESTIMATE);
 }
 
 #[test]
@@ -152,6 +153,52 @@ fn slow_server_times_out_and_does_not_hang() {
         elapsed < Duration::from_secs(20),
         "probe took {elapsed:?}, which means the timeout did not stop it"
     );
+}
+
+#[test]
+fn a_flood_of_server_requests_is_refused_a_bounded_number_of_times() {
+    let node = node_or_skip!("a_flood_of_server_requests_is_refused_a_bounded_number_of_times");
+    let (_home, mut db) = store();
+    let server = fixture_server("flood", &node, "flood-server.mjs", json!({}));
+
+    // The shipped budget on purpose: the point is that the probe stops without
+    // needing a clock at all. Before the ceiling existed it never stopped, since
+    // the timeout only guards reads and this hang is a blocked write.
+    let started = Instant::now();
+    let row = probe::probe(&mut db, &server, &probe::ProbeOptions::default())
+        .unwrap()
+        .expect("a row is written even when the probe fails");
+    let elapsed = started.elapsed();
+
+    assert!(!row.ok);
+    let err = row.error.clone().unwrap_or_default();
+    assert!(err.contains("stopped replying"), "unexpected reason: {err}");
+    assert!(
+        !err.contains("timed out"),
+        "the ceiling should classify this, not the clock: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "probe took {elapsed:?}; it answered the flood instead of cutting it off"
+    );
+
+    // And the server it started is gone: an orphaned MCP process is half of what
+    // made the hang expensive.
+    assert!(
+        !fixture_process_is_running("flood-server.mjs"),
+        "the probe left its server running"
+    );
+}
+
+/// Whether any process on this machine is still running `script`. `false` when
+/// `pgrep` is unavailable, so the assertion above never fails for want of a
+/// tool.
+fn fixture_process_is_running(script: &str) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", script])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 #[test]
@@ -350,6 +397,7 @@ fn sweep_prefers_a_measured_manifest_over_its_estimate() {
     // Unprobed: the config-size heuristic, labelled as the guess it is.
     let item = mcp_item(&sweep::scan(&db, 50).unwrap());
     assert_eq!(item.cost_basis, sweep::COST_BASIS_ESTIMATE);
+    assert!(item.tokens_estimated);
     let heuristic = item.est_tokens;
 
     // Measured: the probe's number and the probe's label.
@@ -357,6 +405,22 @@ fn sweep_prefers_a_measured_manifest_over_its_estimate() {
     let item = mcp_item(&sweep::scan(&db, 50).unwrap());
     assert_eq!(item.cost_basis, sweep::COST_BASIS_MEASURED);
     assert_eq!(item.est_tokens, 12_345);
+    // The manifest was measured, the token count was not: the shipped tokenizer
+    // divides bytes by 3.5, and dropping that on the way to the row is what let
+    // sweep print an estimate as an exact figure.
+    assert!(
+        item.tokens_estimated,
+        "a bytes/3.5 count is an estimate however real the bytes are"
+    );
+
+    // A row a real tokenizer wrote is the one case the count is exact.
+    db.upsert_mcp_manifest(&measured_with(&server, 12_345, "qwen3-4b"))
+        .unwrap();
+    let item = mcp_item(&sweep::scan(&db, 50).unwrap());
+    assert_eq!(item.cost_basis, sweep::COST_BASIS_MEASURED);
+    assert!(!item.tokens_estimated);
+    // Back to the shipped tokenizer for the rest of the walk.
+    db.upsert_mcp_manifest(&measured(&server, 12_345)).unwrap();
 
     // Changed config: the stored row measured something else, so sweep falls
     // back rather than quoting a number for a server that no longer exists.
@@ -399,8 +463,19 @@ fn mcp_item(report: &sweep::SweepReport) -> sweep::SweepItem {
         .clone()
 }
 
-/// A successful manifest row for `server`, as the probe would have written it.
+/// A successful manifest row for `server`, as the probe would have written it
+/// with the shipped bytes/3.5 tokenizer.
 fn measured(server: &probe::ConfiguredServer, tokens: i64) -> McpManifest {
+    measured_with(server, tokens, probe::TOKENIZER_BYTES_ESTIMATE)
+}
+
+/// The same, with an explicit `tokenizer` label: what M5.4 writes once the
+/// advisor's real tokenizer counts the schemas.
+fn measured_with(
+    server: &probe::ConfiguredServer,
+    tokens: i64,
+    tokenizer: &str,
+) -> McpManifest {
     McpManifest {
         server_key: server.key.clone(),
         scope: server.scope().to_string(),
@@ -408,7 +483,7 @@ fn measured(server: &probe::ConfiguredServer, tokens: i64) -> McpManifest {
         tool_count: 24,
         schema_bytes: tokens * 7 / 2,
         schema_tokens: tokens,
-        tokenizer: probe::TOKENIZER_BYTES_ESTIMATE.to_string(),
+        tokenizer: tokenizer.to_string(),
         measured_at: "2026-08-06T10:00:00Z".to_string(),
         ok: true,
         error: None,

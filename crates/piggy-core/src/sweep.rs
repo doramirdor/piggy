@@ -82,6 +82,21 @@ pub struct SweepItem {
     /// this server's current config). The label travels with the number so no
     /// surface can show a measured figure as a guess, or the reverse.
     pub cost_basis: String,
+    /// Whether [`Self::est_tokens`] is an estimated *token count*, which is a
+    /// different question from [`Self::cost_basis`].
+    ///
+    /// A probed server's schema bytes are genuinely measured, so its
+    /// `cost_basis` is [`COST_BASIS_MEASURED`] and stays that way. Turning those
+    /// bytes into tokens is a separate step, and the shipped
+    /// [`crate::probe::BytesEstimate`] tokenizer divides by 3.5 rather than
+    /// tokenizing anything. Reading the tilde off `cost_basis` therefore printed
+    /// every probed row as an exact count it never was. This field carries the
+    /// tokenizer's own verdict instead, so the row reads "~12,345 measured
+    /// manifest": the bytes are real, the tokens are not.
+    ///
+    /// Always true for the plugin, skill and hook rows, whose figures are
+    /// file-size heuristics with no tokenizer behind them at all.
+    pub tokens_estimated: bool,
     /// Whether Piggy recommends turning it off (unused in the window).
     pub recommend_disable: bool,
     /// For a user-scope MCP server whose calls all come from one project: that
@@ -246,10 +261,16 @@ fn mcp_item(
 
     // A probe measurement of *this* config beats the heuristic. Anything else -
     // never probed, config changed since, or a failed probe - keeps the estimate
-    // and its label.
-    let (est_tokens, cost_basis) = match probe::measured_tokens(manifests, server) {
-        Some(tokens) => (tokens.max(0) as u64, COST_BASIS_MEASURED),
-        None => (est_mcp_tokens(&server.config), COST_BASIS_ESTIMATE),
+    // and its label. The row's own tokenizer says whether the count it carries
+    // is exact, which is not the same question as where the bytes came from.
+    let (est_tokens, cost_basis, tokens_estimated) = match probe::measured_manifest(manifests, server)
+    {
+        Some(m) => (
+            m.schema_tokens.max(0) as u64,
+            COST_BASIS_MEASURED,
+            m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE,
+        ),
+        None => (est_mcp_tokens(&server.config), COST_BASIS_ESTIMATE, true),
     };
 
     SweepItem {
@@ -261,6 +282,7 @@ fn mcp_item(
         used_windowed: true,
         est_tokens,
         cost_basis: cost_basis.into(),
+        tokens_estimated,
         recommend_disable: used == 0,
         scope_to,
         reason,
@@ -296,6 +318,7 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             used_windowed: false,
             est_tokens: 800, // estimate: a plugin's skills/commands manifest
             cost_basis: COST_BASIS_ESTIMATE.into(),
+            tokens_estimated: true,
             recommend_disable: recommend,
             scope_to: None, // plugins have no per-project scope to move to
             reason: if recommend {
@@ -342,6 +365,7 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             used_windowed: false,
             est_tokens: est,
             cost_basis: COST_BASIS_ESTIMATE.into(),
+            tokens_estimated: true,
             recommend_disable: recommend,
             scope_to: None, // skills are user-wide; Claude Code has no project scope for them
             reason: if recommend {
@@ -422,6 +446,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
                 used_windowed: false,
                 est_tokens: 0, // hooks fire on events; they cost no context tokens
                 cost_basis: COST_BASIS_ESTIMATE.into(),
+                tokens_estimated: true,
                 recommend_disable: false,
                 scope_to: None,
                 reason: "hook - fires on events, not usage-measurable and costs no context tokens (informational)".into(),

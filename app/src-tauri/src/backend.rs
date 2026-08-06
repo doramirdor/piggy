@@ -1627,6 +1627,10 @@ pub struct SweepItemDto {
     /// `"window" | "lifetime" | "n/a"` — how to read `used`.
     pub used_scope: String,
     pub est_tokens: u64,
+    /// Whether `est_tokens` is an estimated count. True for every row Piggy can
+    /// produce today (the shipped tokenizer divides bytes by 3.5), which is why
+    /// the sheet renders a "~" unconditionally: see
+    /// [`piggy_core::sweep::SweepItem::tokens_estimated`].
     pub estimated: bool,
     pub recommend_disable: bool,
     pub reason: String,
@@ -1671,7 +1675,7 @@ fn dto_from(report: sweep::SweepReport) -> SweepReportDto {
                 source: i.source,
                 used: i.used,
                 est_tokens: i.est_tokens,
-                estimated: true,
+                estimated: i.tokens_estimated,
                 recommend_disable: i.recommend_disable,
                 reason: i.reason,
             })

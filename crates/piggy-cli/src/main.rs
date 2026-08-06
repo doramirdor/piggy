@@ -488,7 +488,12 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                         _ => "lifetime",
                     },
                     "estTokens": i.est_tokens,
-                    "estimated": i.cost_basis != sweep::COST_BASIS_MEASURED,
+                    // Whether the *count* is an estimate, which is not the same
+                    // as where the bytes came from: the shipped tokenizer
+                    // divides bytes by 3.5, so a measured manifest still yields
+                    // an estimated token count. `piggy probe --json` says the
+                    // same thing about the same row.
+                    "estimated": i.tokens_estimated,
                     // "rough estimate" (config-size heuristic) or "measured
                     // manifest" (this server's schemas, as probed).
                     "costBasis": i.cost_basis,
@@ -503,10 +508,8 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         let out = serde_json::json!({
             "sessionsConsidered": report.sessions_considered,
             "estRecoverableTokens": report.est_recoverable_tokens(),
-            // The total is only fully measured when every item behind it is.
-            "estimated": report
-                .recommended()
-                .any(|i| i.cost_basis != sweep::COST_BASIS_MEASURED),
+            // The total is only exact when every count behind it is.
+            "estimated": report.recommended().any(|i| i.tokens_estimated),
             "items": arr,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -531,10 +534,17 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                 i.kind.clone(),
                 i.id.clone(),
                 commafy(i.used),
-                if i.cost_basis == sweep::COST_BASIS_MEASURED {
-                    format!("{} measured", commafy(i.est_tokens))
-                } else {
-                    format!("~{}", commafy(i.est_tokens))
+                // The tilde is about the count, the trailing label is about
+                // where the bytes came from. A probed server measured with the
+                // bytes/3.5 tokenizer is honestly both: "~12,345 measured
+                // manifest".
+                {
+                    let tilde = if i.tokens_estimated { "~" } else { "" };
+                    if i.cost_basis == sweep::COST_BASIS_MEASURED {
+                        format!("{tilde}{} {}", commafy(i.est_tokens), i.cost_basis)
+                    } else {
+                        format!("{tilde}{}", commafy(i.est_tokens))
+                    }
                 },
                 if i.recommend_disable {
                     format!("turn off - {}", i.reason)
@@ -582,7 +592,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         .iter()
         .any(|i| i.cost_basis == sweep::COST_BASIS_MEASURED)
     {
-        println!("token costs are estimates (config-size heuristic) except the rows marked measured, whose tool schemas `piggy probe` read from the server itself.");
+        println!("token costs are estimates (config-size heuristic) except the rows marked `measured manifest`, whose tool schemas `piggy probe` read from the server itself. A `~` on one of those means the schema bytes are real and only their conversion to tokens is an estimate.");
     } else {
         println!("token costs are estimates (config-size heuristic), not measured. `piggy probe` measures an MCP server's real tool schemas.");
     }
@@ -753,17 +763,31 @@ fn measurement_cell(status: &probe::MeasurementStatus) -> String {
 
 fn server_json(s: &probe::ConfiguredServer, status: &probe::MeasurementStatus) -> serde_json::Value {
     let m = status.manifest();
+    // Numbers come from the status, not from the row's own `ok` flag. A row can
+    // be `ok` and still describe a configuration that no longer exists: a
+    // changed command/args/env makes it Stale, which is decided before `ok` is
+    // ever consulted. Quoting a previous configuration's tool count under this
+    // configuration's hash is how a machine surface tells a lie.
+    let measured = match status {
+        probe::MeasurementStatus::Measured(row) => Some(row),
+        _ => None,
+    };
     serde_json::json!({
         "server": s.key,
         "scope": s.scope(),
         "scopeLabel": s.project.as_deref().unwrap_or("user"),
         "transport": s.transport.label(),
         "configHash": s.config_hash(),
+        // The config the stored row measured. Equal to `configHash` exactly when
+        // the status is `measured` or `failed`, and different when it is
+        // `stale`, so the payload says which configuration it describes instead
+        // of leaving a consumer to infer it.
+        "measuredConfigHash": m.map(|m| m.config_hash.clone()),
         "status": status.tag(),
         "measuredAt": m.map(|m| m.measured_at.clone()),
-        "toolCount": m.filter(|m| m.ok).map(|m| m.tool_count),
-        "schemaBytes": m.filter(|m| m.ok).map(|m| m.schema_bytes),
-        "schemaTokens": m.filter(|m| m.ok).map(|m| m.schema_tokens),
+        "toolCount": measured.map(|m| m.tool_count),
+        "schemaBytes": measured.map(|m| m.schema_bytes),
+        "schemaTokens": measured.map(|m| m.schema_tokens),
         "tokenizer": m.map(|m| m.tokenizer.clone()),
         // Schema bytes are measured; the token count is only as good as the
         // tokenizer that produced it.
@@ -2446,5 +2470,89 @@ fn render_table(headers: &[&str], rows: &[Vec<String>]) {
     println!("{}", render_row(&sep));
     for row in rows {
         println!("{}", render_row(row));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use piggy_core::store::SCOPE_USER;
+    use piggy_core::McpManifest;
+    use serde_json::json;
+
+    /// One stored row for `atlas`, successful, measured against `config_hash`.
+    fn row(config_hash: &str) -> McpManifest {
+        McpManifest {
+            server_key: "atlas".to_string(),
+            scope: SCOPE_USER.to_string(),
+            config_hash: config_hash.to_string(),
+            tool_count: 24,
+            schema_bytes: 4_200,
+            schema_tokens: 1_200,
+            tokenizer: probe::TOKENIZER_BYTES_ESTIMATE.to_string(),
+            measured_at: "2026-08-01T10:00:00Z".to_string(),
+            ok: true,
+            error: None,
+        }
+    }
+
+    /// `ok` is the row's own success flag, not a statement about freshness. A row
+    /// that measured a previous command is still `ok = true`, and `status`
+    /// returns `Stale` for it before `ok` is ever consulted - so gating the
+    /// numbers on `ok` published a configuration the user has since changed,
+    /// under the *current* configuration's hash.
+    #[test]
+    fn a_stale_row_publishes_no_numbers_and_says_which_config_it_measured() {
+        let config = json!({
+            "mcpServers": { "atlas": { "command": "node", "args": ["atlas.mjs"] } }
+        });
+        let server = probe::servers_from_root(&config).remove(0);
+
+        let stale = vec![row("the-config-before-this-one")];
+        let v = server_json(&server, &probe::status(&stale, &server));
+        assert_eq!(v["status"], "stale");
+        for field in ["toolCount", "schemaBytes", "schemaTokens"] {
+            assert!(v[field].is_null(), "{field} came from a stale row: {v}");
+        }
+        // The row's own metadata still travels, and now says which configuration
+        // it belongs to.
+        assert_eq!(v["measuredAt"], "2026-08-01T10:00:00Z");
+        assert_eq!(v["tokenizer"], probe::TOKENIZER_BYTES_ESTIMATE);
+        assert_eq!(v["measuredConfigHash"], "the-config-before-this-one");
+        assert_ne!(v["measuredConfigHash"], v["configHash"]);
+
+        // The same row against the config it actually measured does publish.
+        let fresh = vec![row(&server.config_hash())];
+        let v = server_json(&server, &probe::status(&fresh, &server));
+        assert_eq!(v["status"], "measured");
+        assert_eq!(v["toolCount"], 24);
+        assert_eq!(v["schemaBytes"], 4_200);
+        assert_eq!(v["schemaTokens"], 1_200);
+        assert_eq!(v["measuredConfigHash"], v["configHash"]);
+    }
+
+    /// A failed probe of the *current* config is a row with numbers of zero and
+    /// a reason. It is not a measurement, so it publishes no numbers either.
+    #[test]
+    fn a_failed_row_publishes_no_numbers_but_keeps_its_reason() {
+        let config = json!({
+            "mcpServers": { "atlas": { "command": "node", "args": ["atlas.mjs"] } }
+        });
+        let server = probe::servers_from_root(&config).remove(0);
+        let mut failed = row(&server.config_hash());
+        failed.ok = false;
+        failed.error = Some("the server stopped before answering".to_string());
+
+        let v = server_json(&server, &probe::status(&[failed], &server));
+        assert_eq!(v["status"], "failed");
+        for field in ["toolCount", "schemaBytes", "schemaTokens"] {
+            assert!(v[field].is_null(), "{field} came from a failed row: {v}");
+        }
+        assert_eq!(v["error"], "the server stopped before answering");
+        assert_eq!(v["measuredConfigHash"], v["configHash"]);
     }
 }

@@ -110,6 +110,41 @@ fn dead_refs_flags_the_missing_and_spares_the_resolving() {
 }
 
 #[test]
+fn documented_routes_are_not_dead_references() {
+    let f = fixture_text("routes.md");
+    let got = refs(&claudemd::dead_refs(&f));
+
+    // A route with no file extension is not a reference at all, so it is not a
+    // finding either.
+    for route in [
+        "/v1/sessions",
+        "/users/:id/refresh",
+        "/healthz/live",
+        "/login",
+        "/docs/getting-started",
+    ] {
+        assert!(!got.contains(route), "{route} is a route, not a reference");
+    }
+    assert!(got.contains("src/gone.rs"), "the real one still flags");
+
+    // These two clear the extension test, so only the neighbourhood tells them
+    // apart from a file. They are still reported (a file reference into a
+    // directory that is itself gone looks the same), and the deletion gate is
+    // what has to refuse them.
+    let located = claudemd::dead_refs_located(&f);
+    let by_ref = |r: &str| located.iter().find(|d| d.reference == r);
+    for route in ["/openapi.json", "/static/app.js"] {
+        let dead = by_ref(route).unwrap_or_else(|| panic!("{route} was dropped from the findings"));
+        assert!(
+            !claudemd::deletable_ref(dead),
+            "{route} would have had its line deleted"
+        );
+    }
+    // A relative reference to a file is exactly what the deletion is for.
+    assert!(claudemd::deletable_ref(by_ref("src/gone.rs").unwrap()));
+}
+
+#[test]
 fn dead_ref_list_is_capped_with_the_rest_counted() {
     let dir = tempfile::tempdir().unwrap();
     let mut body = String::from("# Many\n\n");
@@ -442,7 +477,8 @@ fn monthly_burden_is_est_tokens_times_sessions_in_the_window() {
         project_file.file.est_tokens * 3
     );
 
-    // A global file is loaded by every session, whatever project it ran in.
+    // A global file is loaded by every Claude Code session, whatever project it
+    // ran in.
     let global_file = report.files.iter().find(|f| f.scope() == "global").unwrap();
     assert_eq!(global_file.sessions_30d, 5);
     assert_eq!(global_file.est_tokens_month, global_file.file.est_tokens * 5);
@@ -450,6 +486,57 @@ fn monthly_burden_is_est_tokens_times_sessions_in_the_window() {
         report.est_tokens_month(),
         project_file.est_tokens_month + global_file.est_tokens_month
     );
+}
+
+#[test]
+fn codex_sessions_do_not_count_toward_a_claude_md_burden() {
+    let sandbox = Sandbox::new();
+    let proj = sandbox.project("proj");
+    let codex_only = sandbox.project("codex-only");
+    let claude = sandbox.claude_dir();
+    std::fs::write(claude.join("CLAUDE.md"), "# Global\n\nOne rule for everyone.\n").unwrap();
+    std::fs::write(proj.join("CLAUDE.md"), "# Proj\n\nA project rule.\n").unwrap();
+    std::fs::write(codex_only.join("CLAUDE.md"), "# Codex only\n\nA rule.\n").unwrap();
+
+    let mut store = sandbox.store();
+    for i in 0..2 {
+        seed_session(&mut store, &format!("cc-{i}"), &proj, &now());
+    }
+    // Codex never loads a CLAUDE.md, in this project or any other.
+    for i in 0..5 {
+        seed_session_from(&mut store, &format!("cx-{i}"), &proj, &now(), "codex");
+    }
+    for i in 0..3 {
+        seed_session_from(&mut store, &format!("cxo-{i}"), &codex_only, &now(), "codex");
+    }
+
+    let report = claudemd::scan(&mut store).unwrap();
+    let file = |name: &str| {
+        report
+            .files
+            .iter()
+            .find(|f| f.file.path.starts_with(name))
+            .unwrap_or_else(|| panic!("{name} not inventoried"))
+    };
+
+    let project_file = file(proj.to_string_lossy().as_ref());
+    assert_eq!(project_file.sessions_30d, 2, "the two Claude Code ones only");
+    assert_eq!(
+        project_file.est_tokens_month,
+        project_file.file.est_tokens * 2
+    );
+
+    // A global file is loaded by every Claude Code session and by no Codex one.
+    let global_file = report.files.iter().find(|f| f.scope() == "global").unwrap();
+    assert_eq!(global_file.sessions_30d, 2);
+    assert_eq!(global_file.est_tokens_month, global_file.file.est_tokens * 2);
+
+    // Inventoried because the project exists, at zero because nothing there
+    // ever loaded it.
+    let codex_file = file(codex_only.to_string_lossy().as_ref());
+    assert_eq!(codex_file.sessions_30d, 0);
+    assert_eq!(codex_file.est_tokens_month, 0);
+    assert!(codex_file.file.est_tokens > 0, "the file itself is still sized");
 }
 
 #[test]
@@ -568,8 +655,13 @@ impl Sandbox {
     }
 }
 
-/// One session in `project` whose last activity is `ended_at`.
+/// One Claude Code session in `project` whose last activity is `ended_at`.
 fn seed_session(store: &mut Store, id: &str, project: &Path, ended_at: &str) {
+    seed_session_from(store, id, project, ended_at, "claude-code");
+}
+
+/// One session in `project` from a named tool (`sessions.source`).
+fn seed_session_from(store: &mut Store, id: &str, project: &Path, ended_at: &str, source: &str) {
     let mut models = std::collections::BTreeMap::new();
     models.insert(
         "claude-sonnet-5".to_string(),
@@ -583,7 +675,7 @@ fn seed_session(store: &mut Store, id: &str, project: &Path, ended_at: &str) {
     );
     let parse = SessionParse {
         session_id: id.to_string(),
-        source: "claude-code".to_string(),
+        source: source.to_string(),
         interface: "unknown".to_string(),
         client: None,
         project_path: Some(project.to_string_lossy().into_owned()),
