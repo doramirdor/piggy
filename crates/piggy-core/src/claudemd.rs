@@ -96,6 +96,11 @@ pub struct FileText {
     pub mtime_ns: i64,
     /// The text with any BOM stripped: what the model actually reads.
     pub text: String,
+    /// Whether the bytes on disk began with a BOM. [`Self::text`] has it
+    /// stripped, so anything rebuilding the file from the text (M5.3's
+    /// deterministic edits) has to put it back or the rewrite silently changes
+    /// the first three bytes.
+    pub had_bom: bool,
 }
 
 impl FileText {
@@ -381,6 +386,7 @@ fn md_files_in(dir: &Path) -> Vec<PathBuf> {
 pub fn read_file_text(path: &Path, project: Option<String>) -> Result<FileText> {
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let body = raw.strip_prefix(&BOM).unwrap_or(&raw);
+    let had_bom = body.len() != raw.len();
     let text = std::str::from_utf8(body)
         .with_context(|| format!("{} is not valid UTF-8", path.display()))?
         .to_string();
@@ -394,6 +400,7 @@ pub fn read_file_text(path: &Path, project: Option<String>) -> Result<FileText> 
         hash: hash_bytes(&raw),
         mtime_ns: mtime_ns(path),
         text,
+        had_bom,
     })
 }
 
@@ -426,21 +433,53 @@ fn home_anchor() -> PathBuf {
 // Detector: dead references
 // ---------------------------------------------------------------------------
 
+/// One reference that does not resolve, and where in the file it sits.
+///
+/// The uncapped, per-occurrence view behind [`dead_refs`]: the finding list is
+/// for reading (deduplicated, capped at [`MAX_DEAD_REFS`]), this is for acting
+/// on ([`crate::advice`] deletes the lines).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadRef {
+    /// 0-based line the reference was written on.
+    pub line: usize,
+    /// The reference exactly as the file writes it.
+    pub reference: String,
+    /// Where it resolved to, absolute.
+    pub resolved: PathBuf,
+}
+
+/// Every dead reference in `f`, one entry per occurrence, in file order.
+pub fn dead_refs_located(f: &FileText) -> Vec<DeadRef> {
+    let base = f.base();
+    path_tokens_located(&f.text)
+        .into_iter()
+        .map(|(line, reference)| {
+            let resolved = resolve(&reference, &base);
+            DeadRef {
+                line,
+                reference,
+                resolved,
+            }
+        })
+        .filter(|d| !d.resolved.exists())
+        .collect()
+}
+
 /// Paths the file points at that are not there.
 ///
 /// Extraction is deliberately conservative (see [`path_token`]): a wrong flag
 /// costs the user's trust in every other finding, a missed one costs nothing
 /// but a missed finding.
 pub fn dead_refs(f: &FileText) -> Vec<Finding> {
-    let base = f.base();
     let name = file_name(&f.path);
-    let dead: Vec<(String, PathBuf)> = path_tokens(&f.text)
+    let base = f.base();
+    // One finding per distinct reference: a path written on five lines is one
+    // thing to fix, not five.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let dead: Vec<(String, PathBuf)> = dead_refs_located(f)
         .into_iter()
-        .map(|token| {
-            let resolved = resolve(&token, &base);
-            (token, resolved)
-        })
-        .filter(|(_, resolved)| !resolved.exists())
+        .filter(|d| seen.insert(d.reference.clone()))
+        .map(|d| (d.reference, d.resolved))
         .collect();
 
     let more = dead.len().saturating_sub(MAX_DEAD_REFS);
@@ -488,16 +527,16 @@ pub fn dead_refs(f: &FileText) -> Vec<Finding> {
     out
 }
 
-/// Path-like tokens in `text`, first-appearance order, deduplicated.
+/// Path-like tokens in `text` with the 0-based line each was written on, in
+/// file order and **not** deduplicated.
 ///
 /// Fenced code blocks are skipped: they are illustrations (`cargo run --config
 /// /some/example`), and treating an example as a claim about the repository is
 /// the single biggest source of false flags.
-fn path_tokens(text: &str) -> Vec<String> {
+pub fn path_tokens_located(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut fenced = false;
-    for line in text.lines() {
+    for (i, line) in text.lines().enumerate() {
         if line.trim_start().starts_with("```") {
             fenced = !fenced;
             continue;
@@ -507,9 +546,7 @@ fn path_tokens(text: &str) -> Vec<String> {
         }
         for raw in line.split_whitespace() {
             if let Some(token) = path_token(raw) {
-                if seen.insert(token.clone()) {
-                    out.push(token);
-                }
+                out.push((i, token));
             }
         }
     }
@@ -560,6 +597,18 @@ fn path_token(raw: &str) -> Option<String> {
         return Some(token.to_string());
     }
     None
+}
+
+/// Whether a reference names a *file* rather than merely resolving like a path.
+///
+/// [`path_token`] deliberately accepts anything anchored (`/login`, `~/x`), and
+/// it is right to: a CLAUDE.md that points at `/opt/thing` and is wrong about it
+/// is worth reporting. But a project whose guidance lists its own URL routes
+/// (`/login`, `/api/healthz`) produces a page of "dead references" that are not
+/// references at all, and [`crate::advice`] deletes the lines it is sure about.
+/// Naming a file, by carrying a known extension, is that surer test.
+pub fn has_file_extension(token: &str) -> bool {
+    has_path_ext(token)
 }
 
 fn has_path_ext(token: &str) -> bool {
@@ -650,34 +699,59 @@ pub fn duplicate_blocks(files: &[FileText]) -> Vec<Finding> {
     out
 }
 
+/// One normalized paragraph and the lines it was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paragraph {
+    /// 0-based index of the paragraph's first line.
+    pub start: usize,
+    /// 0-based index one past its last line.
+    pub end: usize,
+    /// The normalized text (what [`duplicate_blocks`] hashes).
+    pub text: String,
+}
+
+/// Normalized paragraphs with the line range each came from.
+///
+/// The positions are what makes a duplicate *removable*: the normalized text
+/// alone says two files share a block, not which lines to delete.
+pub fn paragraphs_located(text: &str) -> Vec<Paragraph> {
+    let mut out = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            push_paragraph(&mut out, &current, start, i);
+            current.clear();
+            start = i + 1;
+        } else {
+            current.push(line);
+        }
+    }
+    push_paragraph(&mut out, &current, start, text.lines().count());
+    out
+}
+
 /// Normalized paragraphs: split on blank lines, trimmed, internal whitespace
 /// collapsed, and anything under [`DUP_MIN_BYTES`] dropped.
 ///
 /// Normalizing is what makes the match useful: the same block re-wrapped by an
 /// editor is the same block, and a raw hash would miss every one of them.
 fn paragraphs(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            push_paragraph(&mut out, &current);
-            current.clear();
-        } else {
-            current.push(line);
-        }
-    }
-    push_paragraph(&mut out, &current);
-    out
+    paragraphs_located(text).into_iter().map(|p| p.text).collect()
 }
 
-fn push_paragraph(out: &mut Vec<String>, lines: &[&str]) {
+fn push_paragraph(out: &mut Vec<Paragraph>, lines: &[&str], start: usize, end: usize) {
     if lines.is_empty() {
         return;
     }
     let joined = lines.join(" ");
     let normalized = joined.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.len() >= DUP_MIN_BYTES {
-        out.push(normalized);
+        out.push(Paragraph {
+            start,
+            end,
+            text: normalized,
+        });
     }
 }
 

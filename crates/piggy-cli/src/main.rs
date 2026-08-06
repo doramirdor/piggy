@@ -26,8 +26,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
+    advice::{self, GenerateOptions},
     attribution::{self, Badge, HeadlineBaseline},
-    claudemd, config, discovery, engine, parse_file, probe,
+    claudemd, config, discovery, engine, parse_file, probe, snapshots,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -117,7 +118,8 @@ enum Cmd {
     },
     /// Undo everything Piggy changed and restore settings.json to pre-Piggy.
     RestoreDefaults,
-    /// List the settings.json backups Piggy has taken.
+    /// List everything Piggy can put back: settings.json backups, files it
+    /// edited, and MCP servers it re-scoped.
     Backups,
     /// Measured savings: per-saver attribution table + honest headline.
     Report {
@@ -135,6 +137,15 @@ enum Cmd {
     /// The CLAUDE.md files every session loads: what they cost, and what is
     /// wrong with them.
     Claudemd {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Suggestions with the evidence behind each: what to switch off, move,
+    /// clean up or trim. Listing only - applying is done in the app.
+    Advise {
+        /// Look back over this many recent sessions for usage (default 50).
+        #[arg(long, value_name = "N")]
+        sessions: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -248,6 +259,7 @@ fn main() -> Result<()> {
         Cmd::Report { json } => cmd_report(json),
         Cmd::Insights { since, json } => cmd_insights(since.as_deref(), json),
         Cmd::Claudemd { json } => cmd_claudemd(json),
+        Cmd::Advise { sessions, json } => cmd_advise(sessions, json),
         Cmd::Ledger {
             since,
             projects,
@@ -562,7 +574,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     let rescope = report.rescope().count();
     if rescope > 0 {
         println!(
-            "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. Re-add each from its own project to stop that; Piggy will not move config it did not write."
+            "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. `piggy advise` lists the move with its evidence, and the app applies it with a one-click undo."
         );
     }
     if report
@@ -825,6 +837,54 @@ fn cmd_backups() -> Result<()> {
     }
     if entries.len() > 20 {
         println!("  … and {} more", entries.len() - 20);
+    }
+
+    // File snapshots: the other backup ledger. `settings.json` has one
+    // pre-Piggy target and a rolling timestamped history; the advice engine
+    // backs up whole files it did not write (a CLAUDE.md is prose, not config,
+    // so its restore target has to be the original bytes), one record per edit.
+    let state = PiggyState::load()?;
+    println!();
+    println!(
+        "Files Piggy edited ({} restorable, under {}):",
+        state.file_snapshots.len(),
+        snapshots::files_backup_dir().display()
+    );
+    if state.file_snapshots.is_empty() {
+        println!("  (none yet)");
+    }
+    for record in state.file_snapshots.iter().rev().take(20) {
+        let size = std::fs::metadata(&record.backup)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        println!(
+            "  {}  ({} bytes, saved {})",
+            record.path,
+            commafy(size),
+            record.applied_at
+        );
+    }
+    if state.file_snapshots.len() > 20 {
+        println!("  … and {} more", state.file_snapshots.len() - 20);
+    }
+    if !state.scope_moves.is_empty() {
+        println!();
+        println!(
+            "MCP servers Piggy re-scoped ({}, reversible from the app or `piggy restore-defaults`):",
+            state.scope_moves.len()
+        );
+        for record in state.scope_moves.iter().rev() {
+            println!(
+                "  {} → {}",
+                record.server,
+                record
+                    .before_projects
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -1464,6 +1524,127 @@ fn finding_json(f: &piggy_core::Finding) -> serde_json::Value {
         }
     }
     v
+}
+
+// ---------------------------------------------------------------------------
+// advise
+// ---------------------------------------------------------------------------
+
+/// The candidate list: what Piggy would suggest, and the evidence behind each.
+///
+/// Listing only, on purpose. Applying an action writes to files this process was
+/// not asked to touch, and the spec puts every one of those writes behind the
+/// app's per-item consent (a diff for a content edit, a checkbox for the rest).
+/// A CLI flag would be a second, quieter door onto the same writes.
+///
+/// Ranking here is by estimated tokens a month, full stop. The advisor's
+/// re-ranking and its drafted CLAUDE.md rewrites are app-only in v1, and this
+/// says so rather than pretending the list is the model's.
+fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let catalog = Catalog::embedded();
+    let pricing = Pricing::load(&home);
+    let state = PiggyState::load()?;
+    let mut opts = GenerateOptions::new(&catalog, &pricing, &state);
+    if let Some(n) = sessions {
+        opts.n_sessions = n;
+    }
+    let candidates = advice::generate(&mut store, &opts)?;
+
+    if json {
+        let items: Vec<serde_json::Value> = candidates.iter().map(candidate_json).collect();
+        let out = serde_json::json!({
+            "candidates": items,
+            "estTokensMonth": candidates.iter().map(|c| c.est_tokens_month).sum::<i64>(),
+            "sessionsConsidered": opts.n_sessions,
+            // Model ranking and CLAUDE.md drafts are app-only in v1.
+            "ranking": "estimated-tokens-month",
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if candidates.is_empty() {
+        println!("Piggy advice - nothing to suggest.");
+        println!();
+        println!("Every add-on is in use, the CLAUDE.md stack is clean, and no saver's own");
+        println!("measurements argue for a different setting. Run `piggy index` if that looks");
+        println!("wrong, or `piggy probe --all --yes` to replace the schema estimates with");
+        println!("measurements.");
+        return Ok(());
+    }
+
+    let total: i64 = candidates.iter().map(|c| c.est_tokens_month).sum();
+    println!(
+        "Piggy advice - {} suggestion(s), ~{} tokens/month between them",
+        candidates.len(),
+        commafy(total.max(0) as u64)
+    );
+
+    // Grouped by family, and each family in the order its members were ranked.
+    // The groups themselves come out in the order they first appear in that
+    // ranking, so the biggest single opportunity still leads the page.
+    let mut groups: Vec<&str> = Vec::new();
+    for candidate in &candidates {
+        if !groups.contains(&candidate.kind.group_label()) {
+            groups.push(candidate.kind.group_label());
+        }
+    }
+    for group in groups {
+        println!();
+        println!("{group}");
+        for candidate in candidates.iter().filter(|c| c.kind.group_label() == group) {
+            println!();
+            println!("  {} [{}]", candidate.title, candidate.status);
+            println!(
+                "    id {} · {} · risk {} · ~{} tokens/month",
+                candidate.id,
+                candidate.kind.as_str(),
+                candidate.risk_tier,
+                commafy(candidate.est_tokens_month.max(0) as u64)
+            );
+            for row in &candidate.evidence {
+                // The two literal spaces are the gap: a label longer than the
+                // column must not run into its own value.
+                println!("      {:<44}  {}  ({})", row.label, row.value, row.basis);
+            }
+            for prereq in &candidate.prerequisites {
+                println!("      needs: {}", prereq.note());
+            }
+        }
+    }
+
+    println!();
+    println!("Every figure carries how it was arrived at: `observed` was counted in your");
+    println!("session database, `measured manifest` is a real byte count of a server's tool");
+    println!("schemas, `measured` is a randomized A/B result, and `estimated` is arithmetic");
+    println!("over one of those. Apply any of these in the app - `piggy advise` only lists.");
+    Ok(())
+}
+
+/// One candidate as JSON. The transform result is deliberately absent: a
+/// rewritten CLAUDE.md is the user's prose, and it belongs in a diff view, not
+/// in a command's stdout.
+fn candidate_json(c: &piggy_core::Candidate) -> serde_json::Value {
+    serde_json::json!({
+        "id": c.id,
+        "kind": c.kind.as_str(),
+        "group": c.kind.group_label(),
+        "target": c.target,
+        "title": c.title,
+        "status": c.status,
+        "riskTier": c.risk_tier,
+        "estTokensMonth": c.est_tokens_month,
+        "fingerprint": c.fingerprint,
+        "blocked": c.blocked(),
+        "prerequisites": c.prerequisites.iter().map(|p| {
+            serde_json::json!({ "id": p.as_str(), "note": p.note() })
+        }).collect::<Vec<_>>(),
+        "evidence": c.evidence.iter().map(|e| {
+            serde_json::json!({ "label": e.label, "value": e.value, "basis": e.basis })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 // ---------------------------------------------------------------------------

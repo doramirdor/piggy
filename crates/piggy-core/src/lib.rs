@@ -8,6 +8,7 @@
 //! The crate is UI-agnostic: the `piggy` CLI and (later) the Tauri app both
 //! link against it.
 
+pub mod advice;
 pub mod advisor;
 pub mod attribution;
 pub mod claudemd;
@@ -37,6 +38,7 @@ pub mod sweep;
 pub mod tagging;
 pub mod watcher;
 
+pub use advice::{ActionKind, Applied, Candidate, EvidenceRow, Prerequisite, Undone};
 pub use advisor::{
     facts::Facts, guard::Annotation, available, model, recommended, AdvisorModel, AdvisorState,
     CATALOG,

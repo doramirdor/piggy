@@ -412,6 +412,13 @@ pub struct SaverAttribution {
     pub saver_id: String,
     pub n_on: usize,
     pub n_off: usize,
+    /// Breakdown of the ON group by source (`rotation`/`holdout`/`manual`/…).
+    /// The symmetric partner of [`Self::off_by_source`]: `n_on` alone cannot say
+    /// whether the ON side was randomized, because [`pick_group`] pools
+    /// observational rows in when the randomized ones are thin. A caller that
+    /// needs "how many *randomized* sessions per side" - [`crate::advice`]'s
+    /// SaverMix gate - has to read it here.
+    pub on_by_source: BTreeMap<String, usize>,
     /// Breakdown of the OFF group by source (`rotation`/`holdout`/`pre_install`),
     /// so the report can flag the pre-install baseline separately.
     pub off_by_source: BTreeMap<String, usize>,
@@ -434,6 +441,23 @@ impl SaverAttribution {
     /// asking "what did this saver do" is owed it in the same breath.
     pub fn arms(&self) -> impl Iterator<Item = &StreamStat> {
         self.streams.iter().chain(std::iter::once(&self.turns))
+    }
+
+    /// Sessions on each side that Piggy's own scheduler placed there
+    /// (`rotation` or `holdout`), as `(on, off)`.
+    ///
+    /// Not `n_on`/`n_off`: those are the sizes of the groups actually compared,
+    /// which [`pick_group`] may have padded with observational sessions. A rule
+    /// that says "after N randomized sessions per side" has to count the
+    /// randomized ones or it is not the rule it claims to be.
+    pub fn randomized_counts(&self) -> (usize, usize) {
+        let count = |m: &BTreeMap<String, usize>| {
+            m.iter()
+                .filter(|(src, _)| is_randomized(src))
+                .map(|(_, n)| *n)
+                .sum()
+        };
+        (count(&self.on_by_source), count(&self.off_by_source))
     }
 
     /// The one-line learning: what this saver's comparison has shown, in the
@@ -1540,11 +1564,15 @@ pub fn attribute_with_map(
         .collect();
     // Counted over the rows this saver's number could actually rest on, so the
     // footnote cannot advertise sessions the comparison excluded.
+    let mut on_by_source: BTreeMap<String, usize> = BTreeMap::new();
     let mut off_by_source: BTreeMap<String, usize> = BTreeMap::new();
     for r in rows.iter().filter(|r| r.others_on) {
-        if !r.enabled {
-            *off_by_source.entry(r.source.clone()).or_insert(0) += 1;
-        }
+        let side = if r.enabled {
+            &mut on_by_source
+        } else {
+            &mut off_by_source
+        };
+        *side.entry(r.source.clone()).or_insert(0) += 1;
     }
 
     // Prefer the randomized rows on each side (measured-eligible). Only lean on
@@ -1602,6 +1630,7 @@ pub fn attribute_with_map(
         saver_id: saver_id.to_string(),
         n_on: on.len(),
         n_off: off_used.len(),
+        on_by_source,
         off_by_source,
         streams,
         turns,

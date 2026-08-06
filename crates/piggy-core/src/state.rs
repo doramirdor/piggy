@@ -11,6 +11,7 @@
 //!   uninstall target),
 //! * Sweep's disabled items with the exact JSON removed (for one-click restore),
 //! * files Piggy edited, each with the backup that restores its exact bytes,
+//! * MCP servers the advice engine re-scoped, with the before-JSON of both ends,
 //! * a backup ledger and the content hash of `settings.json` after Piggy's last
 //!   write (used to detect external edits before the next write).
 //!
@@ -44,6 +45,10 @@ pub struct PiggyState {
     /// last. Each record is a one-click Undo target; see [`crate::snapshots`].
     #[serde(default)]
     pub file_snapshots: Vec<crate::snapshots::FileSnapshot>,
+    /// MCP servers the advice engine re-scoped inside `~/.claude.json`, each
+    /// carrying the exact before-JSON of both ends; see [`crate::advice`].
+    #[serde(default)]
+    pub scope_moves: Vec<crate::advice::ScopeMove>,
     /// Backup ledger (newest last).
     #[serde(default)]
     pub backups: Vec<BackupRecord>,
@@ -78,6 +83,7 @@ impl Default for PiggyState {
             savers: BTreeMap::new(),
             sweep_disabled: Vec::new(),
             file_snapshots: Vec::new(),
+            scope_moves: Vec::new(),
             backups: Vec::new(),
             settings_hash: None,
             master_on: None,

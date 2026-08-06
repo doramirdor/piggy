@@ -198,7 +198,7 @@ fn scan_mcp_servers(
 /// Share of a user-scope server's calls that must come from a single project
 /// before Sweep calls it that project's tool rather than a global one. Not 1.0:
 /// one stray call from another cwd should not keep a server loaded everywhere.
-const SCOPE_CONCENTRATION: f64 = 0.9;
+pub(crate) const SCOPE_CONCENTRATION: f64 = 0.9;
 
 /// One configured MCP server as a sweep item.
 ///
@@ -236,7 +236,7 @@ fn mcp_item(
         format!(
             "{used} tool call(s) in the window, effectively all from {project}. \
              It loads at user scope, so every other session pays for it too: \
-             re-add it in that project instead."
+             pin it to that project instead (`piggy advise`)."
         )
     } else if source.is_none() {
         format!("{used} tool call(s) across {n_projects} project(s) - global, keep at user scope")
@@ -455,13 +455,14 @@ pub fn apply(
         .clone();
 
     // A "scope to <project>" row belongs to a server the user actually calls, so
-    // disabling it would take away the tool its own suggestion told them to keep,
-    // and re-scoping it here would be Piggy moving config it did not write. Refuse
-    // and point at the manual re-add, the way the hook arm below bails.
+    // disabling it would take away the tool its own suggestion told them to keep.
+    // Moving it is a different action with a different undo, and it lives in
+    // `crate::advice` (`ServerScope`); this path only switches things off.
     if let Some(project) = item.scope_to.as_deref().filter(|_| !item.recommend_disable) {
         bail!(
             "'{}' is in use ({} tool call(s) in the window) and only needs re-scoping, not removing. \
-             Re-add it in {project} yourself and then drop the user-scope copy: Piggy will not move config it did not write.",
+             `piggy advise` lists the move into {project}, and the app applies it with a one-click undo; \
+             sweep only switches add-ons off.",
             item.id,
             item.used
         );
@@ -569,6 +570,32 @@ pub struct RestoreFailure {
 pub struct RestoreOutcome {
     pub restored: usize,
     pub failures: Vec<RestoreFailure>,
+}
+
+/// Restore the newest Sweep-disabled item matching `(kind, id, source)`,
+/// dropping its record on success. Returns false when there is no such record.
+///
+/// The single-item counterpart of [`restore_all`], for the advice engine's Undo:
+/// an advice row's apply disabled exactly one item, so its Undo must put back
+/// exactly that one and leave every other swept item alone. A failure keeps the
+/// record (the snapshot is its only copy) and surfaces as the error.
+pub fn restore_item(
+    state: &mut PiggyState,
+    kind: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<bool> {
+    let Some(pos) = state
+        .sweep_disabled
+        .iter()
+        .rposition(|d| d.kind == kind && d.id == id && d.source.as_deref() == source)
+    else {
+        return Ok(false);
+    };
+    let item = state.sweep_disabled[pos].clone();
+    restore_one(state, &item)?;
+    state.sweep_disabled.remove(pos);
+    Ok(true)
 }
 
 /// Restore every Sweep-disabled item and clear the list. Items that fail stay
@@ -707,7 +734,7 @@ fn read_usage(v: Option<&Value>, out: &mut BTreeMap<String, u64>) {
 /// `…/Stacked/app/src`). Left split, a server used in exactly one repo counts as
 /// two projects and passes as global, which is the one wrong answer this whole
 /// scope call exists to avoid.
-fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+pub(crate) fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
     let mut out: BTreeMap<String, u64> = BTreeMap::new();
     for (project, n) in by_project {
         let root = by_project
@@ -728,7 +755,7 @@ fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
 /// The `mcpServers` map a server lives in inside `~/.claude.json`: the top level
 /// when `source` is `None` (user scope), otherwise that project's. `create`
 /// inserts the map when it is missing, which restore needs and disable does not.
-fn mcp_servers_mut<'a>(
+pub(crate) fn mcp_servers_mut<'a>(
     root: &'a mut Value,
     source: Option<&str>,
     create: bool,
@@ -749,13 +776,13 @@ fn mcp_servers_mut<'a>(
 }
 
 /// The server segment of an `mcp__<server>__<tool>` name (`None` otherwise).
-fn mcp_server_of(name: &str) -> Option<&str> {
+pub(crate) fn mcp_server_of(name: &str) -> Option<&str> {
     name.strip_prefix("mcp__")?.split("__").next()
 }
 
 /// Normalize a server name for matching config keys against tool-name segments
 /// (lowercase; non-alphanumerics folded to `_`).
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -771,7 +798,7 @@ fn normalize(s: &str) -> String {
 /// is a deliberately rough, clearly-labelled heuristic - the true cost is the
 /// server's tool-schema manifest, which [`crate::probe`] can only see by
 /// connecting, and which the user has to ask for one server at a time.
-fn est_mcp_tokens(cfg: &Value) -> u64 {
+pub(crate) fn est_mcp_tokens(cfg: &Value) -> u64 {
     let len = cfg.to_string().len() as u64;
     (300 + len / 3).min(4000)
 }
@@ -804,7 +831,7 @@ fn unique_bak_path(dir: &Path, stem: &str) -> std::path::PathBuf {
 /// every key in place and `arbitrary_precision` keeps every number's exact source
 /// text (so Claude Code's telemetry floats no longer shift by a ULP). The net
 /// diff is therefore just the one entry `mutate` changed.
-fn edit_json_atomic<F>(path: &Path, mutate: F) -> Result<()>
+pub(crate) fn edit_json_atomic<F>(path: &Path, mutate: F) -> Result<()>
 where
     F: FnOnce(&mut Value) -> Result<()>,
 {

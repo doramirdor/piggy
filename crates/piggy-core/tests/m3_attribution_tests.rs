@@ -1152,6 +1152,7 @@ fn attribution(streams: Vec<StreamStat>, turns: StreamStat, n_on: usize, n_off: 
         saver_id: "x".into(),
         n_on,
         n_off,
+        on_by_source: BTreeMap::new(),
         off_by_source: BTreeMap::new(),
         streams,
         turns,

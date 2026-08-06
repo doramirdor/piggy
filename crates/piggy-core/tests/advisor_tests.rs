@@ -518,6 +518,7 @@ fn regressing_saver() -> SaverAttribution {
         saver_id: "sweep".into(),
         n_on: 400,
         n_off: 400,
+        on_by_source: BTreeMap::new(),
         off_by_source: BTreeMap::new(),
         streams: vec![arm(
             Stream::Output,

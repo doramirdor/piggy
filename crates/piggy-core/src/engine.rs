@@ -568,6 +568,11 @@ pub fn health_check(catalog: &Catalog, id: &str) -> Result<HealthReport> {
 #[derive(Debug, Clone, Default)]
 pub struct RestoreReport {
     pub swept_restored: usize,
+    /// Files the advice engine edited that were put back to their exact
+    /// pre-edit bytes.
+    pub files_restored: usize,
+    /// MCP servers the advice engine re-scoped that were moved back.
+    pub scopes_restored: usize,
     pub savers_removed: usize,
     pub files_removed: usize,
     /// True if `settings.json` was returned to its exact pre-Piggy bytes.
@@ -577,11 +582,16 @@ pub struct RestoreReport {
 
 /// The Restore Defaults panic button: undo everything Piggy changed.
 ///
-/// Restores every Sweep-disabled item, returns `settings.json` to its exact
+/// Restores every Sweep-disabled item and every file the advice engine edited,
+/// moves every re-scoped MCP server back, returns `settings.json` to its exact
 /// pre-Piggy bytes (the one-time `pre-piggy.json` backup) when available — which
 /// also clears any Piggy-added `enabledPlugins`/hook entries — otherwise strips
 /// Piggy's owned hooks structurally, deletes Piggy-installed binaries, and
 /// clears the saver ledger. Always safe to run.
+///
+/// Every restore is per item: a file whose permissions were revoked is named in
+/// `messages` and keeps its record (the backup is the only copy of its original
+/// bytes), and the other items still come back.
 pub fn restore_defaults() -> Result<RestoreReport> {
     let mut state = PiggyState::load()?;
     let swept = crate::sweep::restore_all(&mut state)?;
@@ -593,6 +603,33 @@ pub fn restore_defaults() -> Result<RestoreReport> {
         report
             .messages
             .push(format!("could not restore '{}': {}", f.id, f.reason));
+    }
+
+    // Files the advice engine rewrote, oldest snapshot winning (see
+    // `snapshots::restore`), so a file edited twice comes back to how it was
+    // before the first edit.
+    let snapshots = state.file_snapshots.clone();
+    if !snapshots.is_empty() {
+        let outcome = crate::snapshots::restore(&snapshots);
+        report.files_restored = outcome.restored;
+        for f in &outcome.failures {
+            report
+                .messages
+                .push(format!("could not restore '{}': {}", f.path, f.reason));
+        }
+        crate::advice::prune_restored(&mut state.file_snapshots, &snapshots, &outcome);
+    }
+
+    // Re-scoped MCP servers, newest first: the same "oldest wins" reasoning as
+    // the file snapshots, applied to the one config entry each move touched.
+    for record in state.scope_moves.clone().into_iter().rev() {
+        match crate::advice::restore_scope_move(&mut state, &record.advice_id) {
+            Ok(()) => report.scopes_restored += 1,
+            Err(e) => report.messages.push(format!(
+                "could not move '{}' back to user scope: {e:#}",
+                record.server
+            )),
+        }
     }
 
     let settings_path = config::claude_settings_path();
@@ -656,6 +693,12 @@ pub fn restore_defaults() -> Result<RestoreReport> {
         "cleared {} saver(s), restored {} swept item(s)",
         report.savers_removed, report.swept_restored
     ));
+    if report.files_restored > 0 || report.scopes_restored > 0 {
+        report.messages.push(format!(
+            "put back {} edited file(s) and {} re-scoped server(s)",
+            report.files_restored, report.scopes_restored
+        ));
+    }
     Ok(report)
 }
 
