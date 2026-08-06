@@ -28,7 +28,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
     advice::{self, GenerateOptions},
     attribution::{self, Badge, HeadlineBaseline},
-    claudemd, config, discovery, engine, parse_file, probe, snapshots,
+    claudemd, config, diff, discovery, engine, parse_file, probe, snapshots,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -148,6 +148,14 @@ enum Cmd {
         sessions: Option<usize>,
         #[arg(long)]
         json: bool,
+        /// With --json, include the proposed edit to each CLAUDE.md as diff
+        /// rows. This PRINTS LINES OF YOUR OWN CLAUDE.md files: only the ones
+        /// the deterministic cleanup removes, plus a few lines of context
+        /// around each. Never a drafted rewrite. Off by default, and there for
+        /// building the app's dev fixture from real data rather than an
+        /// invented one.
+        #[arg(long, requires = "json")]
+        diff: bool,
     },
     /// Where your context tokens come from: exact per-source ledger, no A/B needed.
     Ledger {
@@ -259,7 +267,11 @@ fn main() -> Result<()> {
         Cmd::Report { json } => cmd_report(json),
         Cmd::Insights { since, json } => cmd_insights(since.as_deref(), json),
         Cmd::Claudemd { json } => cmd_claudemd(json),
-        Cmd::Advise { sessions, json } => cmd_advise(sessions, json),
+        Cmd::Advise {
+            sessions,
+            json,
+            diff,
+        } => cmd_advise(sessions, json, diff),
         Cmd::Ledger {
             since,
             projects,
@@ -1589,7 +1601,7 @@ fn finding_json(f: &piggy_core::Finding) -> serde_json::Value {
 /// Ranking here is by estimated tokens a month, full stop. The advisor's
 /// re-ranking and its drafted CLAUDE.md rewrites are app-only in v1, and this
 /// says so rather than pretending the list is the model's.
-fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
+fn cmd_advise(sessions: Option<usize>, json: bool, with_diff: bool) -> Result<()> {
     let home = config::piggy_home();
     let mut store = Store::open(&home)?;
     let catalog = Catalog::embedded();
@@ -1602,7 +1614,18 @@ fn cmd_advise(sessions: Option<usize>, json: bool) -> Result<()> {
     let candidates = advice::generate(&mut store, &opts)?;
 
     if json {
-        let items: Vec<serde_json::Value> = candidates.iter().map(candidate_json).collect();
+        let items: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|c| {
+                let mut v = candidate_json(c);
+                if with_diff {
+                    if let Some(d) = candidate_diff_json(c) {
+                        v["diff"] = d;
+                    }
+                }
+                v
+            })
+            .collect();
         let out = serde_json::json!({
             "candidates": items,
             // Savings only. The oversized-file kind's figure is what the file
@@ -1724,6 +1747,65 @@ fn candidate_json(c: &piggy_core::Candidate) -> serde_json::Value {
             serde_json::json!({ "label": e.label, "value": e.value, "basis": e.basis })
         }).collect::<Vec<_>>(),
     })
+}
+
+/// The proposed edit to one CLAUDE.md, as the same diff rows the app renders.
+///
+/// `None` for every kind but [`ActionKind::ClaudemdFix`], and for a fix whose
+/// file will not read. The drafting kind is deliberately excluded even once it
+/// has a draft: a rewritten CLAUDE.md is the user's prose in the model's words,
+/// and that belongs in a diff view the user is looking at, not in a command's
+/// stdout.
+fn candidate_diff_json(c: &piggy_core::Candidate) -> Option<serde_json::Value> {
+    if c.kind != piggy_core::ActionKind::ClaudemdFix {
+        return None;
+    }
+    let advice::Params::Claudemd { path } = &c.params else {
+        return None;
+    };
+    let after = c.new_content.as_deref()?;
+    let before = std::fs::read_to_string(path).ok()?;
+    let d = diff::unified(&before, after);
+    let before_bytes = before.len() as i64;
+    let after_bytes = after.len() as i64;
+    Some(serde_json::json!({
+        "id": c.id,
+        "displayPath": tilde(path),
+        "hunks": d.hunks.iter().map(|h| serde_json::json!({
+            "header": h.header,
+            "lines": h.lines.iter().map(|l| serde_json::json!({
+                "op": l.op.as_str(),
+                "text": l.text,
+                "oldNo": l.old_no,
+                "newNo": l.new_no,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "added": d.added,
+        "removed": d.removed,
+        // Real byte counts of the two versions: observed. The token pair beside
+        // them is bytes/3.5 and is labelled estimated wherever it is shown.
+        "beforeBytes": before_bytes,
+        "afterBytes": after_bytes,
+        "beforeEstTokens": claudemd::est_tokens(before_bytes),
+        "afterEstTokens": claudemd::est_tokens(after_bytes),
+        "truncated": d.truncated,
+    }))
+}
+
+/// Abbreviate `$HOME` back to `~`, on a whole-component match only, so output
+/// pasted into an issue does not carry the account name.
+fn tilde(path: &str) -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return path.to_string();
+    };
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match std::path::Path::new(path).strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => std::path::Path::new("~").join(rest).to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------

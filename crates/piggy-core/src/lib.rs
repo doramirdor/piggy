@@ -15,6 +15,7 @@ pub mod claudemd;
 pub mod cli_link;
 pub mod codex;
 pub mod config;
+pub mod diff;
 pub mod discovery;
 pub mod engine;
 pub mod index;

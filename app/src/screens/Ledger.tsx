@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { PiggyMark } from "../components/PiggyMark";
+import { AdviceSection } from "../components/AdviceSection";
 import { UsageChart } from "../components/UsageChart";
 import { Sparkline } from "../components/Sparkline";
 import { formatTokens, commafy, pctMagnitude } from "../lib/format";
@@ -743,6 +744,13 @@ export function Ledger() {
           <div className="sub">See where your tokens went and what caused them.</div>
         </div>
       </div>
+      {/* What to act on, above the breakdown that explains it. Inside
+          `.analytics` rather than beside it, so Spend still animates as one
+          page turn - and outside `.slice`, which dims and disables itself
+          during a period switch. Advice is not period-scoped: the advice table
+          has no period column. */}
+      <AdviceSection />
+
       {/* The bar stays put through an empty period and through a slice swap:
           the controls that got you into a window are the ones that get you out
           of it. */}

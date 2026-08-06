@@ -7,7 +7,8 @@ use tauri::AppHandle;
 
 use crate::advisor::{self, AdvisorStatusDto, AnnotationDto};
 use crate::backend::{
-    self, ApiError, AppPrefs, ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ReindexDto,
+    self, AdviceApplyDto, AdviceDiffDto, AdviceReportDto, AdviceUndoDto, ApiError, AppPrefs,
+    ConfigOptionDto, DiscoverDto, DoctorDto, Environment, ProbeReportDto, ReindexDto,
     RestoreDto, SaversState, ShareCardData, SourcesOverview, StatsOverview, SweepReportDto,
     SweepRestoreDto,
     InsightDto, LedgerOverview, TaskTable, UsageSeries,
@@ -157,6 +158,57 @@ pub async fn sweep_apply(item_ids: Vec<String>) -> Result<SweepReportDto, ApiErr
 #[tauri::command]
 pub async fn sweep_restore() -> Result<SweepRestoreDto, ApiError> {
     run(backend::sweep_restore).await
+}
+
+// ---------------------------------------------------------------------------
+// advice
+// ---------------------------------------------------------------------------
+
+/// Regenerate every candidate and report. This IS the refresh: `advice::generate`
+/// recomputes from scratch and reconciles the advice table on every call, so
+/// there is no second command for it.
+#[tauri::command]
+pub async fn advice_report() -> Result<AdviceReportDto, ApiError> {
+    run(backend::advice_report).await
+}
+
+#[tauri::command]
+pub async fn advice_diff(id: String) -> Result<AdviceDiffDto, ApiError> {
+    run(move || backend::advice_diff(id)).await
+}
+
+/// Apply a bundle. Per-item failures ride in the result; one bad item never
+/// fails the rest.
+#[tauri::command]
+pub async fn advice_apply(ids: Vec<String>) -> Result<AdviceApplyDto, ApiError> {
+    run(move || backend::advice_apply(ids)).await
+}
+
+#[tauri::command]
+pub async fn advice_undo(id: String) -> Result<AdviceUndoDto, ApiError> {
+    run(move || backend::advice_undo(id)).await
+}
+
+#[tauri::command]
+pub async fn advice_dismiss(id: String) -> Result<AdviceReportDto, ApiError> {
+    run(move || backend::advice_dismiss(id)).await
+}
+
+// ---------------------------------------------------------------------------
+// probe
+// ---------------------------------------------------------------------------
+
+/// List the configured MCP servers and what Piggy has measured. Launches nothing.
+#[tauri::command]
+pub async fn probe_report() -> Result<ProbeReportDto, ApiError> {
+    run(backend::probe_report).await
+}
+
+/// Launch one configured MCP server, read its tool list, stop it. User-initiated
+/// only: nothing in the watcher loop may reach this.
+#[tauri::command]
+pub async fn probe_measure(server_key: String, scope: String) -> Result<ProbeReportDto, ApiError> {
+    run(move || backend::probe_measure(server_key, scope)).await
 }
 
 #[tauri::command]
@@ -348,8 +400,9 @@ pub struct SystemInfoDto {
     pub database: Option<String>,
 }
 
-/// Put `~` back so a screenshot of About doesn't carry the user's home path.
-fn tildify(p: &std::path::Path) -> String {
+/// Put `~` back so a screenshot of About - or of the advice sheet - doesn't
+/// carry the user's home path.
+pub(crate) fn tildify(p: &std::path::Path) -> String {
     match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => tildify_under(p, std::path::Path::new(&h)),
         _ => p.to_string_lossy().to_string(),

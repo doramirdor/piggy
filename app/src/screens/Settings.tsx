@@ -3,6 +3,7 @@ import { api } from "../ipc";
 import { useStore } from "../store";
 import { Switch } from "../components/Switch";
 import { AdvisorSettings } from "../components/AdvisorSettings";
+import { ProbeSettings } from "../components/ProbeSettings";
 import type { Doctor, Settings as SettingsData, UpdateInfo } from "../types";
 
 // Single source of truth for the version shown in the UI (the sidebar imports it
@@ -180,6 +181,10 @@ export function Settings() {
           />
         </div>
       </div>
+
+      {/* Beside the advisor, because both are "a local thing runs on your Mac
+          if you say so". Renders nothing when no MCP server is configured. */}
+      <ProbeSettings />
 
       <div className="sect">Updates</div>
       <div className="rows">

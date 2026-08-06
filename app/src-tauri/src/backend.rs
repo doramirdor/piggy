@@ -29,11 +29,13 @@ use piggy_core::attribution::{
     self, Badge as CoreBadge, Headline as CoreHeadline, HeadlineBaseline,
     MultiplierState as CoreMultiplierState, SaverAttribution, MIN_GROUP,
 };
+use piggy_core::advice::{self, GenerateOptions, Params};
 use piggy_core::registry::Entry;
 use piggy_core::rotation::{self, RotationOutcome};
+use piggy_core::store::advice_status;
 use piggy_core::{
-    cli_link, config, discovery, engine, stats::Period, sweep, tagging, Catalog, PiggyState,
-    Pricing, Store,
+    claudemd, cli_link, config, diff, discovery, engine, probe, stats::Period, sweep, tagging,
+    ActionKind, Candidate, Catalog, McpManifest, PiggyState, Pricing, Store,
 };
 
 /// A time-derived bootstrap seed for the attribution CIs (production runs use a
@@ -228,6 +230,50 @@ fn generic(title: &str) -> impl FnOnce(anyhow::Error) -> ApiError + '_ {
 /// Trim a chained error message to its leading, most human portion.
 fn first_sentence(s: &str) -> String {
     s.split(':').next().unwrap_or(s).trim().to_string()
+}
+
+/// Longest per-item failure reason the banner will print.
+const REASON_MAX: usize = 160;
+
+/// One per-item failure reason, whole.
+///
+/// Deliberately not [`first_sentence`]: that cuts at the first colon, and the
+/// advice engine's refusals put the part that matters *after* one - "nothing to
+/// write for {path}: turn on the local advisor in Settings for a drafted
+/// rewrite". Through `generic` the reader gets a bare file path and no reason at
+/// all. This keeps the colon and the whole first line, drops a trailing period
+/// so it can be joined into the banner's own sentence, and caps the length so
+/// one runaway chain cannot push the rest of a bundle's failures off the screen.
+fn one_sentence(e: &anyhow::Error) -> String {
+    let raw = e.to_string();
+    let line = raw.lines().next().unwrap_or("").trim();
+    let line = line.strip_suffix('.').unwrap_or(line);
+    if line.chars().count() <= REASON_MAX {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(REASON_MAX).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// An engine note as a standalone sentence: capital in, full stop on. The
+/// wording stays the engine's.
+fn sentence(s: &str) -> String {
+    let mut chars = s.chars();
+    let mut out = String::with_capacity(s.len() + 1);
+    if let Some(first) = chars.next() {
+        out.extend(first.to_uppercase());
+        out.push_str(chars.as_str());
+    }
+    if !out.is_empty() && !out.ends_with('.') {
+        out.push('.');
+    }
+    out
+}
+
+/// The date half of an RFC3339 stamp. A row has no room for a timestamp, and
+/// the minute a probe ran is not a fact anybody acts on.
+fn day(ts: &str) -> &str {
+    ts.split('T').next().unwrap_or(ts)
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,27 +1705,32 @@ fn used_scope(kind: &str) -> &'static str {
 
 fn dto_from(report: sweep::SweepReport) -> SweepReportDto {
     let est_recoverable = report.est_recoverable_tokens();
+    let items: Vec<SweepItemDto> = report
+        .items
+        .into_iter()
+        .map(|i| SweepItemDto {
+            idx: i.idx,
+            stable_id: stable_id(&i.kind, &i.id, i.source.as_deref()),
+            used_scope: used_scope(&i.kind).to_string(),
+            kind: i.kind,
+            id: i.id,
+            source: i.source,
+            used: i.used,
+            est_tokens: i.est_tokens,
+            estimated: i.tokens_estimated,
+            recommend_disable: i.recommend_disable,
+            reason: i.reason,
+        })
+        .collect();
     SweepReportDto {
         sessions_considered: report.sessions_considered,
         est_recoverable_tokens: est_recoverable,
-        estimated: true,
-        items: report
-            .items
-            .into_iter()
-            .map(|i| SweepItemDto {
-                idx: i.idx,
-                stable_id: stable_id(&i.kind, &i.id, i.source.as_deref()),
-                used_scope: used_scope(&i.kind).to_string(),
-                kind: i.kind,
-                id: i.id,
-                source: i.source,
-                used: i.used,
-                est_tokens: i.est_tokens,
-                estimated: i.tokens_estimated,
-                recommend_disable: i.recommend_disable,
-                reason: i.reason,
-            })
-            .collect(),
+        // Derived, never hardcoded. The total is only as exact as the rows
+        // behind it, and a probed manifest measured every row would make this
+        // false: saying "estimated" over an exact figure is the same class of
+        // mislabel as the reverse.
+        estimated: items.iter().any(|i| i.estimated),
+        items,
     }
 }
 
@@ -1755,6 +1806,624 @@ pub fn sweep_restore() -> Result<SweepRestoreDto, ApiError> {
         })
     })()
     .map_err(generic("Couldn't restore those"))
+}
+
+// ---------------------------------------------------------------------------
+// advice
+//
+// The app's job here is to render what the engine computed and get out of the
+// way. Every figure crosses this boundary already formatted and already carrying
+// the label that says how it was arrived at; nothing below re-derives a number,
+// and nothing below maps a basis string to a different word.
+// ---------------------------------------------------------------------------
+
+/// What the reader is told when the plan behind a suggestion has moved.
+const ADVICE_GONE: &str =
+    "This suggestion is no longer current. Piggy re-checked and the numbers behind it have moved.";
+
+/// What a `stale` row says for itself.
+const ADVICE_STALE: &str = "Piggy re-checked and the numbers behind this moved, so the plan no \
+                            longer describes your setup. It comes back on the next scan if it \
+                            still applies.";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceEvidenceDto {
+    pub label: String,
+    /// Preformatted by the engine: thousands separators, units, and a leading
+    /// `~` on an estimate. Rendered verbatim. The app re-deriving an evidence
+    /// figure is how a number and its basis label drift apart.
+    pub value: String,
+    /// One of `piggy_core::advice::basis`, carried across the wire unchanged:
+    /// "observed" | "estimated" | "measured manifest" | "measured" |
+    /// "estimated (observational)" | "not enough data yet". The app maps it to a
+    /// colour and never to a different word.
+    pub basis: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceItemDto {
+    pub id: String,
+    /// "server-disable" | "server-scope" | "claudemd-fix" | "claudemd-trim" |
+    /// "saver-mix" (`ActionKind::as_str`).
+    pub kind: String,
+    /// "Add-ons" | "CLAUDE.md" | "Savers" (`ActionKind::group_label`).
+    pub group: String,
+    pub target: String,
+    /// The claim, in the registry `plainLabel` voice. The engine writes it.
+    pub title: String,
+    pub evidence: Vec<AdviceEvidenceDto>,
+    pub est_tokens_month: i64,
+    /// How to read `est_tokens_month`: "saves" for every kind but
+    /// `claudemd-trim`, where it is what the file COSTS and a rewrite could at
+    /// best recover part of it. Straight off `ActionKind::est_is_burden`, never
+    /// guessed, because "saves 140k" over a figure that is a burden is a claim
+    /// Piggy has not measured.
+    pub figure_kind: String,
+    /// 1 toggle, 2 config move, 3 content edit (`advice::RISK_*`).
+    pub risk_tier: u8,
+    /// "open" | "applied" | "dismissed" | "stale" (`store::advice_status`).
+    pub status: String,
+    /// True when this row edits file content and there is a draft for
+    /// `advice_diff` to answer with.
+    pub has_diff: bool,
+    pub applyable: bool,
+    /// One plain sentence when `applyable` is false.
+    pub blocked_reason: Option<String>,
+    /// RFC3339, on applied rows only.
+    pub applied_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceReportDto {
+    /// Every candidate the engine regenerated, biggest figure first, ties on id.
+    /// The engine's order. The app never re-sorts it.
+    pub items: Vec<AdviceItemDto>,
+    /// Applied rows, newest first, read from the table rather than from `items`:
+    /// applying is what stops a candidate regenerating.
+    pub applied: Vec<AdviceItemDto>,
+    /// What the open list is worth a month: the savings, and nothing else.
+    pub est_tokens_month: i64,
+    /// The other half, kept apart: what the open items whose figure is a burden
+    /// cost today. Never added to the savings - the two summed is roughly a 10x
+    /// overstatement in the shape a reader is most likely to believe.
+    pub est_tokens_month_burden: i64,
+    pub generated_at: String,
+    /// False in v1. Model ranking is M5.4's, so the app says "ranked by
+    /// estimated tokens a month" rather than implying a model chose.
+    pub advisor_ranked: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceFailureDto {
+    /// The candidate id for an apply failure; the file, server or saver name for
+    /// an undo failure (`advice::UndoFailure::item`).
+    pub id: String,
+    /// One sentence, already plain, in the engine's own words.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceApplyDto {
+    pub report: AdviceReportDto,
+    /// Ids that applied, in the order asked.
+    pub applied: Vec<String>,
+    /// One entry per id that did not. A bundle never fails whole because one
+    /// member did.
+    pub failures: Vec<AdviceFailureDto>,
+    /// `Applied::warnings`, flattened: a conflicting saver switched off, and the
+    /// like.
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceUndoDto {
+    pub report: AdviceReportDto,
+    pub restored: usize,
+    pub failures: Vec<AdviceFailureDto>,
+    /// `Undone::message`, in the engine's words.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLineDto {
+    /// "ctx" | "add" | "del".
+    pub op: String,
+    pub text: String,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunkDto {
+    pub header: String,
+    pub lines: Vec<DiffLineDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdviceDiffDto {
+    pub id: String,
+    /// `~`-abbreviated, so a screenshot of the sheet does not carry the account
+    /// name.
+    pub display_path: String,
+    pub hunks: Vec<DiffHunkDto>,
+    pub added: usize,
+    pub removed: usize,
+    /// Real byte counts of the two versions: observed.
+    pub before_bytes: i64,
+    pub after_bytes: i64,
+    /// bytes / 3.5, through `claudemd::est_tokens`. Estimated, and labelled so
+    /// wherever it is printed.
+    pub before_est_tokens: i64,
+    pub after_est_tokens: i64,
+    pub truncated: bool,
+}
+
+/// One candidate as the app sees it.
+fn advice_item(c: &Candidate) -> AdviceItemDto {
+    AdviceItemDto {
+        id: c.id.clone(),
+        kind: c.kind.as_str().to_string(),
+        group: c.kind.group_label().to_string(),
+        target: c.target.clone(),
+        title: c.title.clone(),
+        evidence: c
+            .evidence
+            .iter()
+            .map(|e| AdviceEvidenceDto {
+                label: e.label.clone(),
+                // Both verbatim. An evidence value is already formatted and an
+                // evidence basis is already chosen; touching either here is the
+                // one defect this whole surface exists to avoid.
+                value: e.value.clone(),
+                basis: e.basis.clone(),
+            })
+            .collect(),
+        est_tokens_month: c.est_tokens_month,
+        figure_kind: if c.kind.est_is_burden() {
+            "burden"
+        } else {
+            "saves"
+        }
+        .to_string(),
+        risk_tier: c.risk_tier,
+        status: c.status.clone(),
+        has_diff: c.kind.edits_content() && c.new_content.is_some(),
+        applyable: c.status == advice_status::OPEN && !c.blocked(),
+        blocked_reason: advice_blocked_reason(c),
+        applied_at: None,
+    }
+}
+
+/// Why this cannot be applied right now, in one sentence with no colon in it.
+fn advice_blocked_reason(c: &Candidate) -> Option<String> {
+    if c.status == advice_status::STALE {
+        return Some(ADVICE_STALE.to_string());
+    }
+    if c.blocked() {
+        // The engine's own words for what is missing.
+        return c.prerequisites.first().map(|p| sentence(p.note()));
+    }
+    None
+}
+
+/// Regenerate every candidate.
+///
+/// `advice::generate` reconciles the advice table as a side effect (new rows
+/// open, vanished open rows stale, spent dismissals retired), which is why there
+/// is no separate refresh command: asking for the report IS the refresh.
+fn advice_regenerate(
+    store: &mut Store,
+    catalog: &Catalog,
+    pricing: &Pricing,
+) -> anyhow::Result<Vec<Candidate>> {
+    let state = PiggyState::load()?;
+    let opts = GenerateOptions::new(catalog, pricing, &state);
+    advice::generate(store, &opts)
+}
+
+fn advice_report_dto(store: &Store, candidates: &[Candidate]) -> anyhow::Result<AdviceReportDto> {
+    let mut rows = store.advice_by_status(advice_status::APPLIED)?;
+    // Newest first: what you just did is what you are most likely to want back.
+    rows.sort_by(|a, b| b.applied_at.cmp(&a.applied_at));
+    let mut applied = Vec::new();
+    for row in &rows {
+        // A row whose payload will not parse is a row Piggy cannot describe, and
+        // an undescribed entry in an Undo list is worse than no entry.
+        let Ok(candidate) = Candidate::from_row(row) else {
+            continue;
+        };
+        let mut dto = advice_item(&candidate);
+        dto.applied_at = row.applied_at.clone();
+        applied.push(dto);
+    }
+
+    // Totals over the OPEN items only, split by the engine's own definition of
+    // which figure is a saving and which is a burden.
+    let open: Vec<Candidate> = candidates
+        .iter()
+        .filter(|c| c.status == advice_status::OPEN)
+        .cloned()
+        .collect();
+    Ok(AdviceReportDto {
+        items: candidates.iter().map(advice_item).collect(),
+        applied,
+        est_tokens_month: advice::total_savings(&open),
+        est_tokens_month_burden: advice::total_burden(&open),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        advisor_ranked: false,
+    })
+}
+
+pub fn advice_report() -> Result<AdviceReportDto, ApiError> {
+    (|| -> anyhow::Result<AdviceReportDto> {
+        let home = config::piggy_home();
+        let mut store = Store::open(&home)?;
+        let catalog = Catalog::embedded();
+        let pricing = Pricing::load(&home);
+        let candidates = advice_regenerate(&mut store, &catalog, &pricing)?;
+        advice_report_dto(&store, &candidates)
+    })()
+    .map_err(generic("Couldn't work out what to suggest"))
+}
+
+/// The proposed edit to one CLAUDE.md, as structured diff rows.
+///
+/// Regenerates rather than reading the stored row: `Candidate::new_content` is
+/// never serialized (CLAUDE.md contents stay out of the database), so the draft
+/// exists only in the list this call computes. An id that is no longer in that
+/// list is a plan whose evidence has moved, and the id hash is what proves it.
+pub fn advice_diff(id: String) -> Result<AdviceDiffDto, ApiError> {
+    let title = "Couldn't show the changes";
+    let home = config::piggy_home();
+    let candidates = (|| -> anyhow::Result<Vec<Candidate>> {
+        let mut store = Store::open(&home)?;
+        let catalog = Catalog::embedded();
+        let pricing = Pricing::load(&home);
+        advice_regenerate(&mut store, &catalog, &pricing)
+    })()
+    .map_err(generic(title))?;
+
+    let candidate = candidates
+        .iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| ApiError::new(title, ADVICE_GONE, false))?;
+    let Params::Claudemd { path } = &candidate.params else {
+        return Err(ApiError::new(
+            title,
+            "That suggestion changes a setting rather than a file, so there is nothing to show.",
+            false,
+        ));
+    };
+    let Some(after) = candidate.new_content.as_deref() else {
+        // A drafting kind with no draft yet. The engine already knows what is
+        // missing; say that rather than inventing a reason.
+        let note = candidate
+            .prerequisites
+            .first()
+            .map(|p| p.note())
+            .unwrap_or("there is no drafted replacement for this file");
+        return Err(ApiError::new("No draft yet", sentence(note), false));
+    };
+    let before = std::fs::read_to_string(path)
+        .map_err(|e| ApiError::new(title, format!("Piggy could not read {path}. {e}"), false))?;
+
+    let d = diff::unified(&before, after);
+    let before_bytes = before.len() as i64;
+    let after_bytes = after.len() as i64;
+    Ok(AdviceDiffDto {
+        id,
+        display_path: crate::commands::tildify(std::path::Path::new(path)),
+        hunks: d
+            .hunks
+            .into_iter()
+            .map(|h| DiffHunkDto {
+                header: h.header,
+                lines: h
+                    .lines
+                    .into_iter()
+                    .map(|l| DiffLineDto {
+                        op: l.op.as_str().to_string(),
+                        text: l.text,
+                        old_no: l.old_no,
+                        new_no: l.new_no,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        added: d.added,
+        removed: d.removed,
+        before_bytes,
+        after_bytes,
+        before_est_tokens: claudemd::est_tokens(before_bytes),
+        after_est_tokens: claudemd::est_tokens(after_bytes),
+        truncated: d.truncated,
+    })
+}
+
+/// Apply a bundle, reporting per item.
+pub fn advice_apply(ids: Vec<String>) -> Result<AdviceApplyDto, ApiError> {
+    let _guard = state_write();
+    (|| -> anyhow::Result<AdviceApplyDto> {
+        let home = config::piggy_home();
+        let mut store = Store::open(&home)?;
+        let catalog = Catalog::embedded();
+        let pricing = Pricing::load(&home);
+        // One generate for the whole bundle, and matching by id afterwards. The
+        // candidate id is a hash over the kind, the target, the fingerprint and
+        // every evidence row, so "the id is still here" is a proof that the plan
+        // and every number behind it are unchanged. Regenerating between items
+        // would buy nothing on top of that: each kind's apply re-resolves its own
+        // target and refuses if it moved.
+        let candidates = advice_regenerate(&mut store, &catalog, &pricing)?;
+
+        let mut applied: Vec<String> = Vec::new();
+        let mut failures: Vec<AdviceFailureDto> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+        let mut kinds: Vec<ActionKind> = Vec::new();
+        for id in &ids {
+            let Some(candidate) = candidates.iter().find(|c| &c.id == id) else {
+                failures.push(AdviceFailureDto {
+                    id: id.clone(),
+                    reason: ADVICE_GONE.to_string(),
+                });
+                continue;
+            };
+            // Load state per item, never once around the loop. A server-disable
+            // drives `sweep::apply`, which writes the whole document back, and a
+            // saver-mix has `engine::set_enabled` save its own copy: an instance
+            // carried across a mixed bundle would write back over whatever the
+            // item before it had just saved. Re-reading also means each item sees
+            // the snapshot and scope-move records the previous one left behind,
+            // which is the behaviour Undo depends on rather than a cost.
+            let mut state = match PiggyState::load() {
+                Ok(state) => state,
+                Err(e) => {
+                    failures.push(AdviceFailureDto {
+                        id: id.clone(),
+                        reason: one_sentence(&e),
+                    });
+                    continue;
+                }
+            };
+            match advice::apply(&mut store, &mut state, &catalog, candidate) {
+                Ok(done) => {
+                    applied.push(done.id);
+                    warnings.extend(done.warnings);
+                    kinds.push(done.kind);
+                }
+                // The engine's refusal names the candidate and says what moved.
+                // Straight through: paraphrasing it here would lose the one
+                // detail that tells the reader what to do next.
+                Err(e) => failures.push(AdviceFailureDto {
+                    id: id.clone(),
+                    reason: one_sentence(&e),
+                }),
+            }
+        }
+
+        // Both of these change what attribution reads.
+        if kinds
+            .iter()
+            .any(|k| matches!(k, ActionKind::SaverMix | ActionKind::ServerDisable))
+        {
+            bump_attr_version();
+        }
+
+        // A second generate, so the sheet needs no follow-up read.
+        let after = advice_regenerate(&mut store, &catalog, &pricing)?;
+        Ok(AdviceApplyDto {
+            report: advice_report_dto(&store, &after)?,
+            applied,
+            failures,
+            warnings,
+        })
+    })()
+    .map_err(generic("Couldn't apply that"))
+}
+
+/// Reverse one applied row.
+pub fn advice_undo(id: String) -> Result<AdviceUndoDto, ApiError> {
+    let _guard = state_write();
+    let title = "Couldn't put that back";
+    let home = config::piggy_home();
+    let catalog = Catalog::embedded();
+    let pricing = Pricing::load(&home);
+    let mut store = Store::open(&home).map_err(generic(title))?;
+    let mut state = PiggyState::load().map_err(generic(title))?;
+
+    // Undo can refuse: a later Piggy edit to the same file is still applied, and
+    // putting this one back would write over it. That refusal names the
+    // suggestion to undo first, which is the whole answer, so it reaches the
+    // banner intact rather than through `generic`, which cuts at the first colon.
+    let done = advice::undo(&mut store, &mut state, &catalog, &id)
+        .map_err(|e| ApiError::new(title, one_sentence(&e), false))?;
+
+    if matches!(done.kind, ActionKind::SaverMix | ActionKind::ServerDisable) {
+        bump_attr_version();
+    }
+    let after = advice_regenerate(&mut store, &catalog, &pricing).map_err(generic(title))?;
+    Ok(AdviceUndoDto {
+        report: advice_report_dto(&store, &after).map_err(generic(title))?,
+        restored: done.restored,
+        // Per item, never collapsed into a count: an undo that put three of four
+        // files back has to say which one it did not.
+        failures: done
+            .failures
+            .into_iter()
+            .map(|f| AdviceFailureDto {
+                id: f.item,
+                reason: f.reason,
+            })
+            .collect(),
+        message: done.message,
+    })
+}
+
+/// "Not for me": suppress this target until its evidence roughly doubles.
+pub fn advice_dismiss(id: String) -> Result<AdviceReportDto, ApiError> {
+    let title = "Couldn't set that aside";
+    let home = config::piggy_home();
+    let catalog = Catalog::embedded();
+    let pricing = Pricing::load(&home);
+    let mut store = Store::open(&home).map_err(generic(title))?;
+
+    // `None` for the note: there is no UI for typing a reason, and a note Piggy
+    // invented would become the baseline the reopen rule measures against.
+    // Dismiss also refuses an applied row, since `dismissed` carries no
+    // restore_ref and moving one there would destroy the only handle Undo has;
+    // the sheet does not offer it, and this is the second door.
+    let existed = advice::dismiss(&mut store, &id, None)
+        .map_err(|e| ApiError::new(title, one_sentence(&e), false))?;
+    if !existed {
+        return Err(ApiError::new(
+            title,
+            "Piggy no longer has that suggestion. Reopen this panel and try again.",
+            false,
+        ));
+    }
+    let after = advice_regenerate(&mut store, &catalog, &pricing).map_err(generic(title))?;
+    advice_report_dto(&store, &after).map_err(generic(title))
+}
+
+// ---------------------------------------------------------------------------
+// probe
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeServerDto {
+    pub key: String,
+    /// The `mcp_manifests.scope` value: the project path, or the user-scope
+    /// marker. Identity, not display - it is what `probe_measure` matches on.
+    pub scope: String,
+    /// "Every project" at user scope, else the `~`-abbreviated project path.
+    pub scope_label: String,
+    /// "stdio" | "remote" (`Transport::label`).
+    pub transport: String,
+    /// "measured" | "stale" | "failed" | "never" | "deferred"
+    /// (`MeasurementStatus::tag`).
+    pub measurement: String,
+    /// Present only on a `measured` row. A stale row's stored numbers describe a
+    /// command that is not what runs today, so they are not sent at all: there
+    /// is no label under which printing them would be true.
+    pub tool_count: Option<i64>,
+    pub schema_bytes: Option<i64>,
+    pub schema_tokens: Option<i64>,
+    pub tokenizer: Option<String>,
+    /// True when `schema_tokens` came from `probe::TOKENIZER_BYTES_ESTIMATE`.
+    /// The schema BYTES are measured either way; the token count is only as good
+    /// as the tokenizer that produced it, and today that is a division by 3.5.
+    pub tokens_estimated: bool,
+    /// Date only. A row has no room for a timestamp.
+    pub measured_at: Option<String>,
+    /// Already redacted by `probe.rs`; never re-wrap it.
+    pub error: Option<String>,
+    /// False for http/sse. No button on those.
+    pub probeable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeReportDto {
+    pub servers: Vec<ProbeServerDto>,
+    pub measured: usize,
+    pub deferred: usize,
+}
+
+fn probe_dto(servers: &[probe::ConfiguredServer], manifests: &[McpManifest]) -> ProbeReportDto {
+    let mut out = Vec::with_capacity(servers.len());
+    let mut measured_count = 0usize;
+    let mut deferred_count = 0usize;
+    for server in servers {
+        let status = probe::status(manifests, server);
+        match status {
+            probe::MeasurementStatus::Measured(_) => measured_count += 1,
+            probe::MeasurementStatus::Deferred => deferred_count += 1,
+            _ => {}
+        }
+        // Figures come from the status, not from the row's own `ok` flag. A row
+        // can be `ok` and still describe a configuration that no longer exists:
+        // a changed command, args or env makes it Stale, and quoting a previous
+        // configuration's tool count under this configuration is how a surface
+        // tells a lie without anyone writing one.
+        let measured = match &status {
+            probe::MeasurementStatus::Measured(row) => Some(row),
+            _ => None,
+        };
+        let row = status.manifest();
+        out.push(ProbeServerDto {
+            key: server.key.clone(),
+            scope: server.scope().to_string(),
+            scope_label: match &server.project {
+                None => "Every project".to_string(),
+                Some(p) => crate::commands::tildify(std::path::Path::new(p)),
+            },
+            transport: server.transport.label().to_string(),
+            measurement: status.tag().to_string(),
+            tool_count: measured.map(|m| m.tool_count),
+            schema_bytes: measured.map(|m| m.schema_bytes),
+            schema_tokens: measured.map(|m| m.schema_tokens),
+            tokenizer: measured.map(|m| m.tokenizer.clone()),
+            tokens_estimated: measured.is_some_and(|m| m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE),
+            measured_at: row.map(|m| day(&m.measured_at).to_string()),
+            error: row.and_then(|m| m.error.clone()),
+            probeable: server.transport == probe::Transport::Stdio,
+        });
+    }
+    ProbeReportDto {
+        servers: out,
+        measured: measured_count,
+        deferred: deferred_count,
+    }
+}
+
+/// The listing. Reads the configs and the stored measurements; launches nothing.
+pub fn probe_report() -> Result<ProbeReportDto, ApiError> {
+    (|| -> anyhow::Result<ProbeReportDto> {
+        let store = Store::open(&config::piggy_home())?;
+        let servers = probe::configured_servers()?;
+        let manifests = store.mcp_manifests()?;
+        Ok(probe_dto(&servers, &manifests))
+    })()
+    .map_err(generic("Couldn't read your MCP servers"))
+}
+
+/// Start one configured server, read its tool list, stop it.
+///
+/// Keyed on both the server name and its scope, because `mcp_manifests` is, and
+/// the same server can exist at user scope and under a project with different
+/// arguments. One server per call and no "measure all" in the app: the timeout
+/// is ten seconds per server, and a dozen of them is minutes on one blocking
+/// thread with no progress to show for it. `piggy probe --all --yes` is the bulk
+/// path.
+pub fn probe_measure(server_key: String, scope: String) -> Result<ProbeReportDto, ApiError> {
+    (|| -> anyhow::Result<ProbeReportDto> {
+        let mut store = Store::open(&config::piggy_home())?;
+        let servers = probe::configured_servers()?;
+        let target = servers
+            .iter()
+            .find(|s| s.key == server_key && s.scope() == scope)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Piggy no longer sees a server called '{server_key}' there. \
+                     Your Claude config changed since this list was read."
+                )
+            })?;
+        probe::probe(&mut store, &target, &probe::ProbeOptions::default())?;
+        let manifests = store.mcp_manifests()?;
+        Ok(probe_dto(&servers, &manifests))
+    })()
+    .map_err(generic("Couldn't measure that server"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2391,6 +3060,254 @@ pub fn rotation_tick_if_enabled() -> bool {
 mod tests {
     use super::measuring_note;
     use piggy_core::store::source;
+
+    // -----------------------------------------------------------------------
+    // The advice and probe boundary
+    //
+    // Everything here guards the one defect this milestone treats as a product
+    // failure rather than a bug: a figure shown under a label that is not the
+    // one the engine computed it with.
+    // -----------------------------------------------------------------------
+
+    mod wire {
+        use super::super::*;
+        use piggy_core::advice::{basis, EvidenceRow, Params, RISK_CONTENT_EDIT, RISK_TOGGLE};
+
+        fn candidate(kind: ActionKind, evidence: Vec<EvidenceRow>) -> Candidate {
+            Candidate {
+                id: "abc123".into(),
+                kind,
+                target: "~/.claude/CLAUDE.md".into(),
+                title: "Trim this file".into(),
+                evidence,
+                est_tokens_month: 140_000,
+                risk_tier: if kind.edits_content() {
+                    RISK_CONTENT_EDIT
+                } else {
+                    RISK_TOGGLE
+                },
+                prerequisites: Vec::new(),
+                fingerprint: "deadbeef".into(),
+                params: Params::Claudemd {
+                    path: "/tmp/CLAUDE.md".into(),
+                },
+                new_content: None,
+                status: advice_status::OPEN.into(),
+            }
+        }
+
+        /// THE boundary guard. The engine hands every figure across with the
+        /// label that says how it was arrived at; if this wrapper ever
+        /// "helpfully" shortens `estimated (observational)` to something
+        /// confident, an A/B on a non-randomized baseline starts reading as a
+        /// measurement and the product's whole claim is gone.
+        #[test]
+        fn an_evidence_basis_reaches_the_wire_verbatim() {
+            let all = [
+                basis::OBSERVED,
+                basis::ESTIMATED,
+                basis::MEASURED_MANIFEST,
+                basis::MEASURED,
+                basis::ESTIMATED_AB,
+                basis::MEASURING,
+            ];
+            let rows: Vec<EvidenceRow> = all
+                .iter()
+                .map(|b| EvidenceRow {
+                    label: "Tokens a month it saves".into(),
+                    value: "~12,345".into(),
+                    basis: (*b).to_string(),
+                })
+                .collect();
+            let dto = advice_item(&candidate(ActionKind::ServerDisable, rows));
+            let out: Vec<&str> = dto.evidence.iter().map(|e| e.basis.as_str()).collect();
+            assert_eq!(out, all);
+            // And the value with it: an app that re-derives a figure is how the
+            // number and its label drift apart.
+            assert!(dto.evidence.iter().all(|e| e.value == "~12,345"));
+        }
+
+        /// A trim's figure is what the file COSTS. A card that prints it as a
+        /// saving claims a rewrite gives all of it back, which nobody has
+        /// measured and which is by far the biggest number on the list.
+        #[test]
+        fn a_trims_figure_is_marked_burden_and_every_other_kind_saves() {
+            let burden = advice_item(&candidate(ActionKind::ClaudemdTrim, vec![]));
+            assert_eq!(burden.figure_kind, "burden");
+            for kind in [
+                ActionKind::ServerDisable,
+                ActionKind::ServerScope,
+                ActionKind::ClaudemdFix,
+                ActionKind::SaverMix,
+            ] {
+                assert_eq!(
+                    advice_item(&candidate(kind, vec![])).figure_kind,
+                    "saves",
+                    "{kind:?}"
+                );
+            }
+        }
+
+        /// A stale row is a plan computed against something that has since
+        /// moved. It explains itself and it is never applyable.
+        #[test]
+        fn a_stale_candidate_explains_itself_and_cannot_be_applied() {
+            let mut c = candidate(ActionKind::ServerDisable, vec![]);
+            c.status = advice_status::STALE.into();
+            let dto = advice_item(&c);
+            assert!(!dto.applyable);
+            assert!(dto.blocked_reason.is_some());
+            assert!(!dto.blocked_reason.unwrap().contains(':'));
+        }
+
+        /// The failure banner reads `<name> · <reason>`, so the reason cannot
+        /// carry a colon-truncated fragment. `first_sentence` cuts at the first
+        /// colon, and the engine puts the actionable half after one: piped
+        /// through `generic`, "nothing to write for /a/b: turn on the local
+        /// advisor" reaches the reader as a bare file path.
+        #[test]
+        fn a_per_item_failure_reason_keeps_its_colon_and_its_whole_sentence() {
+            let e = anyhow::anyhow!(
+                "nothing to write for /a/b: turn on the local advisor in Settings for a drafted rewrite"
+            );
+            let reason = one_sentence(&e);
+            assert!(reason.starts_with("nothing to write for /a/b:"), "{reason}");
+            assert!(reason.ends_with("drafted rewrite"), "{reason}");
+            // The old behaviour, for contrast.
+            assert_eq!(first_sentence(&e.to_string()), "nothing to write for /a/b");
+        }
+
+        #[test]
+        fn a_very_long_failure_reason_is_capped_on_a_character_boundary() {
+            let e = anyhow::anyhow!("{}", "é".repeat(400));
+            let reason = one_sentence(&e);
+            assert_eq!(reason.chars().count(), REASON_MAX + 1);
+        }
+    }
+
+    mod probe_wire {
+        use super::super::*;
+
+        fn server(key: &str, project: Option<&str>) -> probe::ConfiguredServer {
+            probe::ConfiguredServer {
+                key: key.into(),
+                project: project.map(str::to_string),
+                transport: probe::Transport::Stdio,
+                config: serde_json::json!({ "command": "node", "args": ["server.mjs"] }),
+            }
+        }
+
+        fn manifest(s: &probe::ConfiguredServer, config_hash: &str, tokenizer: &str) -> McpManifest {
+            McpManifest {
+                server_key: s.key.clone(),
+                scope: s.scope().to_string(),
+                config_hash: config_hash.to_string(),
+                tool_count: 21,
+                schema_bytes: 43_190,
+                schema_tokens: 12_340,
+                tokenizer: tokenizer.to_string(),
+                measured_at: "2026-08-01T09:14:02Z".into(),
+                ok: true,
+                error: None,
+            }
+        }
+
+        /// The bytes are real and the token count is a division by 3.5. Reading
+        /// one label off the other printed every probed row as an exact count it
+        /// never was.
+        #[test]
+        fn a_bytes_over_35_token_count_is_flagged_estimated_though_the_bytes_are_measured() {
+            let s = server("github", None);
+            let m = manifest(&s, &s.config_hash(), probe::TOKENIZER_BYTES_ESTIMATE);
+            let dto = probe_dto(&[s], &[m]);
+            let row = &dto.servers[0];
+            assert_eq!(row.measurement, "measured");
+            assert_eq!(row.schema_bytes, Some(43_190));
+            assert!(row.tokens_estimated);
+            assert_eq!(dto.measured, 1);
+        }
+
+        #[test]
+        fn a_real_tokenizer_leaves_the_token_count_unhedged() {
+            let s = server("github", None);
+            let m = manifest(&s, &s.config_hash(), "qwen3-4b");
+            let dto = probe_dto(&[s], &[m]);
+            assert!(!dto.servers[0].tokens_estimated);
+        }
+
+        /// A stale row's stored numbers describe a command that is not what runs
+        /// today. There is no label under which printing them is true, so they
+        /// do not cross the wire at all.
+        #[test]
+        fn a_stale_manifest_sends_no_figures() {
+            let s = server("github", None);
+            let m = manifest(&s, "a-hash-from-a-different-command", probe::TOKENIZER_BYTES_ESTIMATE);
+            let dto = probe_dto(&[s], &[m]);
+            let row = &dto.servers[0];
+            assert_eq!(row.measurement, "stale");
+            assert_eq!(row.tool_count, None);
+            assert_eq!(row.schema_bytes, None);
+            assert_eq!(row.schema_tokens, None);
+            assert_eq!(row.tokenizer, None);
+            assert!(!row.tokens_estimated);
+        }
+
+        #[test]
+        fn a_user_scope_server_is_labelled_for_every_project_and_a_remote_has_no_button() {
+            let user = server("github", None);
+            let mut remote = server("linear", None);
+            remote.transport = probe::Transport::Remote;
+            let dto = probe_dto(&[user, remote], &[]);
+            assert_eq!(dto.servers[0].scope_label, "Every project");
+            assert_eq!(dto.servers[0].measurement, "never");
+            assert!(dto.servers[0].probeable);
+            assert_eq!(dto.servers[1].measurement, "deferred");
+            assert!(!dto.servers[1].probeable);
+            assert_eq!(dto.deferred, 1);
+        }
+    }
+
+    mod sweep_wire {
+        use super::super::*;
+
+        fn item(cost_basis: &str, tokens_estimated: bool) -> sweep::SweepItem {
+            sweep::SweepItem {
+                idx: 1,
+                kind: "mcp".into(),
+                id: "github".into(),
+                source: None,
+                used: 0,
+                used_windowed: true,
+                est_tokens: 12_340,
+                cost_basis: cost_basis.into(),
+                tokens_estimated,
+                recommend_disable: true,
+                scope_to: None,
+                reason: "no tool calls in the look-back window".into(),
+            }
+        }
+
+        /// The report used to hardcode `estimated: true`, which called a probed
+        /// manifest a guess. The flag now follows the rows.
+        #[test]
+        fn a_sweep_report_of_exact_rows_is_not_called_estimated() {
+            let exact = dto_from(sweep::SweepReport {
+                sessions_considered: 50,
+                items: vec![item(sweep::COST_BASIS_MEASURED, false)],
+            });
+            assert!(!exact.estimated);
+            assert!(!exact.items[0].estimated);
+
+            let hedged = dto_from(sweep::SweepReport {
+                sessions_considered: 50,
+                items: vec![
+                    item(sweep::COST_BASIS_MEASURED, false),
+                    item(sweep::COST_BASIS_ESTIMATE, true),
+                ],
+            });
+            assert!(hedged.estimated, "one estimated row hedges the total");
+        }
+    }
 
     #[test]
     fn boost_is_wired_to_discover_not_home() {

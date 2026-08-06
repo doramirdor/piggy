@@ -6,6 +6,10 @@
 import { MOCK_MODE } from "./ipc";
 import snapshot from "./dev-snapshot.json";
 import type {
+  AdviceDiff,
+  AdviceItem,
+  AdviceKind,
+  AdviceReport,
   AdvisorStatus,
   Annotation,
   ConfigOption,
@@ -15,6 +19,8 @@ import type {
   Insight,
   LedgerOverview,
   Period,
+  ProbeReport,
+  ProbeServer,
   ReindexResult,
   RestoreResult,
   SaverRow,
@@ -23,8 +29,6 @@ import type {
   ShareCardData,
   SourcesOverview,
   StatsOverview,
-  SweepItem,
-  SweepReport,
   SystemInfo,
   TaskTable,
   UsageSeries,
@@ -268,95 +272,109 @@ function saversState(notice?: string): SaversState {
   return { masterOn: masterOn(), savers: savers.map((s) => ({ ...s })), notice: notice ?? null };
 }
 
+
 // ---------------------------------------------------------------------------
-// sweep
+// advice + probe
+//
+// Served from the SNAPSHOT OF THE REAL DATABASE, never from numbers typed here:
+// a hand-written fixture drifts, and this surface's whole job is to label
+// figures honestly. `piggy advise --json --diff` and `piggy probe --json` fill
+// these in; until `npm run snapshot` has run against a build that carries them,
+// the fixture has no advice in it and the mock serves the empty state, which is
+// what a machine with nothing to act on genuinely looks like.
+//
+// Mutation is static scaffolding - an applied item moves lists - so the busy,
+// applied and undo states can be designed. No figure is ever computed here.
 // ---------------------------------------------------------------------------
 
-function initialSweepItems(): SweepItem[] {
-  return [
-    {
-      idx: 1,
-      stableId: "mcp|playwright|/Users/you/code/app",
-      kind: "mcp",
-      id: "playwright",
-      source: "/Users/you/code/app",
-      used: 0,
-      usedScope: "window",
-      estTokens: 2100,
-      estimated: true,
-      recommendDisable: true,
-      reason: "no tool calls in the look-back window",
-    },
-    {
-      idx: 2,
-      stableId: "mcp|supabase|/Users/you/code/api",
-      kind: "mcp",
-      id: "supabase",
-      source: "/Users/you/code/api",
-      used: 0,
-      usedScope: "window",
-      estTokens: 1300,
-      estimated: true,
-      recommendDisable: true,
-      reason: "no tool calls in the look-back window",
-    },
-    {
-      idx: 3,
-      stableId: "skill|legacy-migrator|/Users/you/.claude/skills/legacy-migrator",
-      kind: "skill",
-      id: "legacy-migrator",
-      source: "/Users/you/.claude/skills/legacy-migrator",
-      used: 0,
-      usedScope: "lifetime",
-      estTokens: 900,
-      estimated: true,
-      recommendDisable: true,
-      reason: "installed but never invoked (lifetime)",
-    },
-    {
-      idx: 4,
-      stableId: "plugin|formatter@marketplace|",
-      kind: "plugin",
-      id: "formatter@marketplace",
-      source: null,
-      used: 12,
-      usedScope: "lifetime",
-      estTokens: 800,
-      estimated: true,
-      recommendDisable: false,
-      reason: "used 12 time(s) (lifetime)",
-    },
-    {
-      idx: 5,
-      stableId: "hook|PreToolUse#1|PreToolUse",
-      kind: "hook",
-      id: "PreToolUse#1",
-      source: "PreToolUse",
-      used: 0,
-      usedScope: "n/a",
-      estTokens: 0,
-      estimated: true,
-      recommendDisable: false,
-      reason: "hook - fires on events, not usage-measurable and costs no context tokens",
-    },
-  ];
+/** One candidate as `piggy advise --json` emits it. */
+interface SnapCandidate {
+  id: string;
+  kind: AdviceKind;
+  group: string;
+  target: string;
+  title: string;
+  status: string;
+  riskTier: number;
+  estTokensMonth: number;
+  blocked: boolean;
+  prerequisites: { id: string; note: string }[];
+  evidence: { label: string; value: string; basis: string }[];
+  diff?: AdviceDiff;
 }
 
-let sweepItems: SweepItem[] = EMPTY ? [] : initialSweepItems();
+const snap = snapshot as unknown as {
+  advice?: { candidates: SnapCandidate[] };
+  probe?: { servers: ProbeServer[] };
+};
 
-function reindexSweep(): void {
-  sweepItems = sweepItems.map((it, i) => ({ ...it, idx: i + 1 }));
+function initialAdvice(): SnapCandidate[] {
+  if (EMPTY) return [];
+  return (snap.advice?.candidates ?? []).filter((c) => c.status === "open");
 }
 
-function sweepReport(): SweepReport {
-  const recoverable = sweepItems
-    .filter((i) => i.recommendDisable)
-    .reduce((a, i) => a + i.estTokens, 0);
+let adviceOpen: SnapCandidate[] = initialAdvice();
+let adviceApplied: SnapCandidate[] = [];
+
+/** The engine's own note for a prerequisite, as a sentence. Wording, not a
+ *  number: the backend does the same thing to the same string. */
+function prereqSentence(note: string): string {
+  const one = note.charAt(0).toUpperCase() + note.slice(1);
+  return one.endsWith(".") ? one : `${one}.`;
+}
+
+function adviceItem(c: SnapCandidate, applied: boolean): AdviceItem {
   return {
-    sessionsConsidered: EMPTY ? 0 : 50,
-    estRecoverableTokens: recoverable,
-    estimated: true,
-    items: sweepItems.map((i) => ({ ...i })),
+    id: c.id,
+    kind: c.kind,
+    group: c.group,
+    target: c.target,
+    title: c.title,
+    evidence: c.evidence,
+    estTokensMonth: c.estTokensMonth,
+    figureKind: c.kind === "claudemd-trim" ? "burden" : "saves",
+    riskTier: c.riskTier,
+    status: applied ? "applied" : "open",
+    hasDiff: c.diff != null,
+    applyable: !applied && !c.blocked,
+    blockedReason: c.blocked ? prereqSentence(c.prerequisites[0]?.note ?? "") : null,
+    appliedAt: applied ? new Date().toISOString() : null,
+  };
+}
+
+function adviceReport(): AdviceReport {
+  const items = adviceOpen.map((c) => adviceItem(c, false));
+  const sum = (kind: "saves" | "burden") =>
+    items.filter((a) => a.figureKind === kind).reduce((n, a) => n + a.estTokensMonth, 0);
+  return {
+    items,
+    applied: adviceApplied.map((c) => adviceItem(c, true)),
+    estTokensMonth: sum("saves"),
+    estTokensMonthBurden: sum("burden"),
+    generatedAt: new Date().toISOString(),
+    advisorRanked: false,
+  };
+}
+
+function adviceDiff(id: string): AdviceDiff {
+  const hit = [...adviceOpen, ...adviceApplied].find((c) => c.id === id)?.diff;
+  if (!hit) {
+    throw {
+      title: "Not available here",
+      detail:
+        "This fixture carries no diff for that suggestion. Re-run `npm run snapshot` against a build with `piggy advise --json --diff`, or run the app.",
+      rolledBack: false,
+    };
+  }
+  return hit;
+}
+
+function probeReport(): ProbeReport {
+  const servers = EMPTY ? [] : (snap.probe?.servers ?? []);
+  return {
+    servers,
+    measured: servers.filter((s) => s.measurement === "measured").length,
+    deferred: servers.filter((s) => s.measurement === "deferred").length,
   };
 }
 
@@ -713,8 +731,21 @@ function advisorAnnotations(): Annotation[] {
 
 // ---------------------------------------------------------------------------
 
+/** Commands whose real counterparts take a visible moment. Delayed here so the
+ *  busy states get designed rather than assumed. */
+const SLOW_COMMANDS = new Set([
+  "saver_toggle",
+  "master_toggle",
+  "advice_apply",
+  "advice_undo",
+  "probe_measure",
+]);
+
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const a = args ?? {};
+  // Mimic real IPC latency, before the work rather than after it, so a command
+  // that ends in a refusal shows its busy state too.
+  if (SLOW_COMMANDS.has(cmd)) await new Promise((r) => setTimeout(r, 700));
   const out = ((): unknown => {
     switch (cmd) {
       case "environment":
@@ -781,18 +812,41 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         ].filter(Boolean);
         return saversState(parts.length > 0 ? parts.join(" ") : undefined);
       }
-      case "sweep_report":
-        return sweepReport();
-      case "sweep_apply": {
-        const ids = new Set((a.itemIds as string[]) ?? []);
-        sweepItems = sweepItems.filter((i) => !(ids.has(i.stableId) && i.kind !== "hook"));
-        reindexSweep();
-        return sweepReport();
+      case "advice_report":
+        return adviceReport();
+      case "advice_diff":
+        return adviceDiff(a.id as string);
+      case "advice_apply": {
+        const ids = new Set((a.ids as string[]) ?? []);
+        adviceApplied = [...adviceApplied, ...adviceOpen.filter((c) => ids.has(c.id))];
+        adviceOpen = adviceOpen.filter((c) => !ids.has(c.id));
+        return {
+          report: adviceReport(),
+          applied: [...ids],
+          failures: [],
+          warnings: [],
+        };
       }
-      case "sweep_restore": {
-        sweepItems = EMPTY ? [] : initialSweepItems();
-        return { report: sweepReport(), failures: [] };
+      case "advice_undo": {
+        const id = a.id as string;
+        adviceOpen = [...adviceOpen, ...adviceApplied.filter((c) => c.id === id)];
+        adviceApplied = adviceApplied.filter((c) => c.id !== id);
+        return { report: adviceReport(), restored: 1, failures: [], message: "put back" };
       }
+      case "advice_dismiss":
+        adviceOpen = adviceOpen.filter((c) => c.id !== (a.id as string));
+        return adviceReport();
+      case "probe_report":
+        return probeReport();
+      // Measuring means starting a real process, which a browser cannot do.
+      // Saying so beats serving a number nothing measured.
+      case "probe_measure":
+        throw {
+          title: "Not available here",
+          detail:
+            "Measuring starts a real MCP server, which the browser mock cannot do. Run the app.",
+          rolledBack: false,
+        };
       case "discovered_list":
       case "refresh_discovered":
         return discover();
@@ -830,7 +884,8 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         return [];
       case "restore_defaults":
         savers = EMPTY ? emptySavers() : populatedSavers();
-        sweepItems = EMPTY ? [] : initialSweepItems();
+        adviceOpen = initialAdvice();
+        adviceApplied = [];
         return {
           byteRestored: true,
           saversRemoved: 2,
@@ -871,9 +926,5 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         throw { title: "Unknown command", detail: cmd, rolledBack: false };
     }
   })();
-  // Mimic real IPC latency so busy/progress states are visible in mock mode.
-  if (cmd === "saver_toggle" || cmd === "master_toggle") {
-    await new Promise((r) => setTimeout(r, 700));
-  }
   return out as T;
 }

@@ -6,6 +6,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AdviceApplyResult,
+  AdviceDiff,
+  AdviceReport,
+  AdviceUndoResult,
   AdvisorProgress,
   AdvisorStatus,
   Annotation,
@@ -16,6 +20,7 @@ import type {
   Insight,
   LedgerOverview,
   Period,
+  ProbeReport,
   ReindexResult,
   RestoreResult,
   SaversState,
@@ -23,8 +28,6 @@ import type {
   ShareCardData,
   SourcesOverview,
   StatsOverview,
-  SweepReport,
-  SweepRestoreResult,
   SystemInfo,
   TaskTable,
   UpdateInfo,
@@ -74,10 +77,24 @@ export const api = {
   saverToggle: (id: string, on: boolean) => call<SaversState>("saver_toggle", { id, on }),
   saverUnpin: (id: string) => call<SaversState>("saver_unpin", { id }),
   masterToggle: (on: boolean) => call<SaversState>("master_toggle", { on }),
-  sweepReport: () => call<SweepReport>("sweep_report"),
-  sweepApply: (itemIds: string[]) => call<SweepReport>("sweep_apply", { itemIds }),
-  /** Restores every swept item (no per-item restore in piggy-core). */
-  sweepRestore: () => call<SweepRestoreResult>("sweep_restore"),
+  /** Regenerates from scratch every call: this IS the refresh. Pull only, never
+   *  on the watcher debounce - it re-scans every CLAUDE.md and every MCP config.
+   *
+   *  The sweep commands are still registered on the Rust side (the CLI and
+   *  Restore Defaults exercise the same core paths) but have no wrapper here:
+   *  the advice engine is the one door the frontend has onto them. */
+  adviceReport: () => call<AdviceReport>("advice_report"),
+  adviceDiff: (id: string) => call<AdviceDiff>("advice_diff", { id }),
+  /** Applies a bundle. Per-item failures ride in the result; one bad item never
+   *  fails the rest. */
+  adviceApply: (ids: string[]) => call<AdviceApplyResult>("advice_apply", { ids }),
+  adviceUndo: (id: string) => call<AdviceUndoResult>("advice_undo", { id }),
+  adviceDismiss: (id: string) => call<AdviceReport>("advice_dismiss", { id }),
+  probeReport: () => call<ProbeReport>("probe_report"),
+  /** Starts one configured server, reads its tool list, stops it. Only ever from
+   *  an explicit click: nothing automatic may reach this. */
+  probeMeasure: (serverKey: string, scope: string) =>
+    call<ProbeReport>("probe_measure", { serverKey, scope }),
   discoveredList: () => call<DiscoverDto>("discovered_list"),
   refreshDiscovered: () => call<DiscoverDto>("refresh_discovered"),
   shareCardData: (period: Period) => call<ShareCardData>("share_card_data", { period }),

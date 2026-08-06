@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { api } from "./ipc";
 import { errorBanner, infoBanner, toApiError, type Banner } from "./lib/errors";
 import type {
+  AdviceApplyResult,
+  AdviceReport,
+  AdviceUndoResult,
   Annotation,
   Environment,
   Insight,
@@ -78,6 +81,16 @@ interface AppState {
    *  table beside this week's header, and a period switch clears both. */
   tasksPeriod: Period | null;
   savers: SaversState | null;
+  /** The advice list. `null` means "not asked yet" and renders a skeleton, not
+   *  an empty state: "Piggy has nothing to suggest" is a claim, and a loading
+   *  list must not make it.
+   *
+   *  It lives here rather than in screen-local state because both entry points
+   *  - Spend's section and the Savers hint - have to show the same list. */
+  advice: AdviceReport | null;
+  /** A generate, apply, undo or dismiss is in flight. The sheet disables its
+   *  controls while it is. */
+  adviceBusy: boolean;
   banner: Banner | null;
   booting: boolean;
   /** A period switch is in flight. The screens keep the old slice on screen and
@@ -96,6 +109,14 @@ interface AppState {
   loadAnnotations: () => Promise<void>;
   loadSaverNotes: () => Promise<void>;
   loadSavers: () => Promise<void>;
+  /** Ask the engine what to do next. Pull, never push: this is deliberately NOT
+   *  part of `refresh()`, because a generate re-scans every CLAUDE.md and every
+   *  MCP config and the watcher fires every couple of seconds while Claude is
+   *  running. Asked once per app run; `force` re-asks. */
+  loadAdvice: (force?: boolean) => Promise<void>;
+  applyAdvice: (ids: string[]) => Promise<AdviceApplyResult>;
+  undoAdvice: (id: string) => Promise<AdviceUndoResult>;
+  dismissAdvice: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
   toggleSaver: (id: string, on: boolean) => Promise<void>;
   unpinSaver: (id: string) => Promise<void>;
@@ -115,6 +136,12 @@ export const useStore = create<AppState>((set, get) => {
   let refreshInFlight = false;
   let refreshQueued = false;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // One generate at a time, whoever asks. `advice::generate` is expensive - it
+  // re-scans every CLAUDE.md and every MCP config - and it also WRITES: new rows
+  // land open, vanished ones go stale, spent dismissals retire. Two screens
+  // mounting at once must produce one pass, not two reconciling the same table.
+  let adviceInFlight: Promise<void> | null = null;
 
   const refreshNow = async () => {
     if (refreshInFlight) {
@@ -148,6 +175,8 @@ export const useStore = create<AppState>((set, get) => {
   tasks: null,
   tasksPeriod: null,
   savers: null,
+  advice: null,
+  adviceBusy: false,
   banner: null,
   booting: true,
   periodBusy: false,
@@ -307,6 +336,70 @@ export const useStore = create<AppState>((set, get) => {
       set({ savers });
     } catch (e) {
       get().showError(e);
+    }
+  },
+
+  loadAdvice: async (force = false) => {
+    if (adviceInFlight) return adviceInFlight;
+    if (get().advice !== null && !force) return;
+    const ask = async () => {
+      try {
+        set({ advice: await api.adviceReport() });
+      } catch {
+        // Silent, and re-armed by the `finally` below. Spend is complete and
+        // correct without a suggestion list, so a `Store::open` hiccup must not
+        // raise the global banner over a working ledger. Matches
+        // `loadAnnotations`.
+      }
+    };
+    const pass = ask().finally(() => {
+      adviceInFlight = null;
+    });
+    adviceInFlight = pass;
+    return pass;
+  },
+
+  /** Apply a bundle. Per-item failures come back in the result rather than as a
+   *  throw; a throw here is the whole call failing, and the sheet banners it. */
+  applyAdvice: async (ids) => {
+    set({ adviceBusy: true });
+    // Which kinds are going, read BEFORE the call: the response replaces the
+    // list, and a saver toggle moves that saver's switch and badge on the
+    // Savers screen. Not `refresh()` - that is the debounced watcher path.
+    const touchesSavers = (get().advice?.items ?? []).some(
+      (a) => ids.includes(a.id) && a.kind === "saver-mix",
+    );
+    try {
+      const res = await api.adviceApply(ids);
+      set({ advice: res.report });
+      if (touchesSavers) await get().loadSavers();
+      return res;
+    } finally {
+      set({ adviceBusy: false });
+    }
+  },
+
+  undoAdvice: async (id) => {
+    set({ adviceBusy: true });
+    const touchesSavers = (get().advice?.applied ?? []).some(
+      (a) => a.id === id && a.kind === "saver-mix",
+    );
+    try {
+      const res = await api.adviceUndo(id);
+      set({ advice: res.report });
+      if (touchesSavers) await get().loadSavers();
+      return res;
+    } finally {
+      set({ adviceBusy: false });
+    }
+  },
+
+  dismissAdvice: async (id) => {
+    set({ adviceBusy: true });
+    try {
+      set({ advice: await api.adviceDismiss(id) });
+    } finally {
+      set({ adviceBusy: false });
     }
   },
 
