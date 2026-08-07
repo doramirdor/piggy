@@ -38,8 +38,38 @@ function piggyJson(cmd) {
   }
 }
 
+/** `advise`, `probe` and `claudemd` take no --since: they describe what is
+ *  configured right now, not a window. */
+function piggyPlain(cmd, args = []) {
+  try {
+    return JSON.parse(
+      execFileSync(piggy, [cmd, ...args, "--json"], { maxBuffer: 64 << 20 }),
+    );
+  } catch (e) {
+    console.error(`\n${piggy} ${cmd} failed. Build it first:\n  cargo build --release --bin piggy\n`);
+    throw e;
+  }
+}
+
 const ledger = piggyJson("ledger");
 const insights = piggyJson("insights");
+
+// The advice engine, with the exact edit each CLAUDE.md suggestion would make.
+//
+// `--diff` prints lines OF YOUR OWN CLAUDE.md files: the ones the deterministic
+// cleanup removes, plus a few lines of context around each. Never a drafted
+// rewrite. It is here because the diff view cannot be designed against an
+// invented file and the no-hand-authored-fixtures rule forbids inventing one -
+// but it does mean this fixture carries a little of your prose, so read it
+// before committing it.
+const advice = piggyPlain("advise", ["--diff"]);
+
+// Listing only. `piggy probe` with neither --server nor --all builds an empty
+// target set and launches nothing: NEVER add --all here, or every one of your
+// MCP servers starts on every `npm run snapshot`.
+const probe = piggyPlain("probe");
+
+const claudemd = piggyPlain("claudemd");
 
 // `piggy stats` takes --period, not --since; and the source grid has no CLI
 // command at all, so it comes straight out of the DB. Both are real: the point
@@ -95,6 +125,15 @@ const unknown = grid.filter((g) => !CELLS.some(([s, i]) => s === g[0] && i === g
 
 const leaf = (p) => p.split("/").filter(Boolean).pop() ?? p;
 
+/** `$HOME` back to `~`, on a whole-component match, so the fixture does not
+ *  carry the account name. Mirrors `commands::tildify`. */
+const tilde = (p) => {
+  const home = process.env.HOME ?? "";
+  if (!home) return p;
+  if (p === home) return "~";
+  return p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+};
+
 // One CLI stream stat onto the GUI's wire shape. The CLI reports a
 // positive-is-a-saving percent; the GUI's convention is a negative fraction
 // (same as `Badge.delta`). Convert once, here.
@@ -143,6 +182,29 @@ const snapshot = {
     empty: ledger.total_tokens === 0,
   },
   insights,
+  advice,
+  probe: {
+    servers: probe.servers.map((s) => ({
+      key: s.server,
+      scope: s.scope,
+      // The app's own label, computed the way `backend::probe_dto` computes it.
+      // `store::SCOPE_USER` is the empty string.
+      scopeLabel: s.scope === "" ? "Every project" : tilde(s.scope),
+      transport: s.transport,
+      measurement: s.status,
+      toolCount: s.toolCount ?? null,
+      schemaBytes: s.schemaBytes ?? null,
+      schemaTokens: s.schemaTokens ?? null,
+      tokenizer: s.status === "measured" ? (s.tokenizer ?? null) : null,
+      // The schema BYTES are measured either way; this says the token count is
+      // not. Only meaningful on a measured row.
+      tokensEstimated: s.status === "measured" && s.estimated === true,
+      measuredAt: s.measuredAt ? s.measuredAt.split("T")[0] : null,
+      error: s.error ?? null,
+      probeable: s.transport === "stdio",
+    })),
+  },
+  claudemd,
   tasks: {
     periodLabel: "Last 7 days",
     rows: tasks.projects.map((p) => ({
@@ -179,7 +241,7 @@ const snapshot = {
     sessions: stats.sessions,
     costUsdEst: stats.cost_usd_est,
     costEstimated: stats.cost_estimated,
-    // False whenever any model is missing from the pricing table — today
+    // False whenever any model is missing from the pricing table - today
     // `claude-opus-5` is, and it is most of the volume.
     fullyPriced: (stats.unpriced_tokens ?? 0) === 0,
     unpricedTokens: stats.unpriced_tokens ?? 0,
@@ -243,5 +305,8 @@ console.log(
     `${snapshot.ledger.totalTokens.toLocaleString()} cache-write tokens · ` +
     `headroom ${snapshot.ledger.headroom?.toFixed(2) ?? "n/a"}x · ${insights.length} insights\n` +
     `  stats: ${snapshot.stats.totalTokens.toLocaleString()} tokens, ${snapshot.stats.sessions.toLocaleString()} sessions, ` +
-    `$${snapshot.stats.costUsdEst.toFixed(2)} (${snapshot.stats.unpricedTokens.toLocaleString()} tokens unpriced)`,
+    `$${snapshot.stats.costUsdEst.toFixed(2)} (${snapshot.stats.unpricedTokens.toLocaleString()} tokens unpriced)\n` +
+    `  advice: ${advice.candidates.length} candidates (${advice.candidates.filter((c) => c.diff).length} with a diff), ` +
+    `~${advice.estTokensMonth.toLocaleString()} tokens/month of savings\n` +
+    `  probe: ${probe.servers.length} MCP server(s) · claudemd: ${claudemd.files?.length ?? 0} file(s)`,
 );

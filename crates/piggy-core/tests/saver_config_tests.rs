@@ -1,6 +1,6 @@
 //! Per-saver configuration tests (catalog `configOptions` + `json_field`
 //! apply). Env-mutating, so every test takes the global lock and sandboxes
-//! `PIGGY_XDG_CONFIG` / `PIGGY_HOME` at a tempdir, the same discipline as the
+//! `PIGGY_XDG_CONFIG` / `PIGGY_HOME` at a tempdir - the same discipline as the
 //! M2 engine tests: nothing ever touches the real `~/.config` or `~/.piggy`.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};

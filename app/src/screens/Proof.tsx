@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useStore } from "../store";
+import { saverNotesKey, useStore } from "../store";
 import { StatusChip } from "../components/StatusChip";
 import { PiggyMark } from "../components/PiggyMark";
 import { badgeView } from "../lib/badge";
@@ -268,11 +268,18 @@ export function Proof() {
   const [shareOpen, setShareOpen] = useState(false);
 
   const rows = savers?.savers ?? [];
-  // The local model, once, and only from this screen: it is the only place the
+  // The local model, and only from this screen: it is the only place the
   // per-saver prose is shown, and a load is ~3GB resident.
+  //
+  // Keyed on the reading rather than on the row count, because the rows keep
+  // their identity while the measurement under them moves. A saver that settles
+  // from "still measuring" to a delta, or from one delta to another, needs its
+  // note written again; the key changes only when something the reader can see
+  // changes, and `loadSaverNotes` no-ops for a key it already has.
+  const notesKey = useStore((s) => saverNotesKey(s.savers));
   useEffect(() => {
-    if (rows.length > 0) void loadSaverNotes();
-  }, [rows.length, loadSaverNotes]);
+    if (notesKey) void loadSaverNotes();
+  }, [notesKey, loadSaverNotes]);
   const noteFor = (id: string) => saverNotes.find((n) => n.insightId === `saver:${id}`);
   const view = proofView(stats?.headline ?? null, rows);
   // THE STAMP. Keyed by the identity of the claim, not by mount: the verdict
@@ -308,6 +315,29 @@ export function Proof() {
             experiment needs {view?.arms[0]?.target ?? 10} sessions on each side, so it is not
             sliced by date.
           </div>
+          {/* The one-time lesson, as a disclosure rather than onboarding: a new
+              user meets "Not proven yet" before anyone has told them the
+              holdout exists, and this is the screen where that question is
+              asked. Native details, so it costs nothing when closed. */}
+          <details className="how-proof">
+            <summary>How proof works</summary>
+            <p>
+              Piggy never takes a saver's word for it. A small share of your sessions runs with
+              every saver off (the holdout, sized in Settings), so your own work keeps producing
+              a with-and-without comparison.
+            </p>
+            <p>
+              A verdict needs enough sessions on each side, and the with side only counts
+              sessions Piggy chose the setup for: a setup you switched on by hand can hide the
+              reason it looks good. When the gap between the sides is too consistent to be
+              chance, the verdict here says Proven.
+            </p>
+            <p>
+              Until then the screen shows the honest in-between: an estimate when the streams
+              support one, and otherwise exactly what is missing, with a card naming anything
+              that waiting will not fix.
+            </p>
+          </details>
         </div>
         <button className="btn primary" onClick={() => setShareOpen(true)}>
           Share

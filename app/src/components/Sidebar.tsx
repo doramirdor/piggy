@@ -74,6 +74,10 @@ export function Sidebar({ tab, onTab }: { tab: Tab; onTab: (t: Tab) => void }) {
             className={`nav-item ${tab === t ? "active" : ""}`}
             onClick={() => onTab(t)}
             aria-current={tab === t ? "page" : undefined}
+            // The visible label disappears below 720px (index.css hides
+            // .ni-label), which would leave a screen reader an unnamed
+            // icon-only button; the aria-label survives the collapse.
+            aria-label={LABELS[t]}
           >
             {ICONS[t]}
             <span className="ni-label">{LABELS[t]}</span>

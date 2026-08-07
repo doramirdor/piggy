@@ -9,7 +9,7 @@
 //! Steps are kept as raw JSON objects rather than a closed enum so the catalog
 //! can carry step-specific fields the engine reads ad hoc, and so an *unknown*
 //! step kind produces a clean, actionable error ("catalog newer than app")
-//! instead of a serde failure. Unknown top-level fields are ignored; the
+//! instead of a serde failure. Unknown top-level fields are ignored - the
 //! catalog is expected to grow.
 
 use std::collections::BTreeMap;
@@ -198,8 +198,8 @@ pub fn check_kind(v: &Value) -> &str {
 }
 
 impl Catalog {
-    /// Parse the embedded catalog. Panics only if the embedded JSON is malformed
-    /// (a build-time invariant covered by [`crate::registry`] tests).
+    /// Parse the embedded catalog. Panics only if the embedded JSON is
+    /// malformed, a build-time invariant covered by [`crate::registry`] tests.
     pub fn embedded() -> Self {
         serde_json::from_str(EMBEDDED).expect("embedded catalog.json must be valid")
     }
@@ -240,7 +240,7 @@ impl Entry {
             }
             if !KNOWN_STEP_KINDS.contains(&kind.as_str()) {
                 return Err(format!(
-                    "unknown step kind `{kind}`: this catalog is newer than Piggy; update the app"
+                    "unknown step kind `{kind}` - this catalog is newer than Piggy; update the app"
                 ));
             }
         }
@@ -266,7 +266,7 @@ impl Entry {
     }
 
     /// The `SKILL.md` a `claude_skill` saver installs (the `dest` of its
-    /// `download_file` step, unexpanded). `None` for every other install type;
+    /// `download_file` step, unexpanded). `None` for every other install type -
     /// the engine keys its file-rename enable/disable on exactly this.
     pub fn skill_file(&self) -> Option<&str> {
         if self.install_type != "claude_skill" {

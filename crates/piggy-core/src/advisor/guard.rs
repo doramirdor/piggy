@@ -98,7 +98,7 @@ impl Allowlist {
         numbers_in(text)
             .into_iter()
             .filter(|n| !self.0.contains(&key(*n)))
-            .map(|n| key(n))
+            .map(key)
             .collect()
     }
 
@@ -111,6 +111,19 @@ impl Allowlist {
     }
 }
 
+/// Every number reachable in the facts payload, including the ones inside
+/// strings.
+///
+/// Walking strings is deliberate: a finding's prose carries figures the model is
+/// entitled to restate. It does mean **candidate ids widen the list slightly**,
+/// since an id is hex and `numbers_in` cannot tell a digit run inside
+/// `claudemd-fix-7cf5750d2efcbe74` from a figure. Seen and judged rather than
+/// missed: the runs an id contributes are short integers, and short integers are
+/// already admitted wholesale by tool counts, session counts and risk tiers, so
+/// the widening buys a fabricator nothing it did not already have. The figures
+/// that matter (token counts, percentages, multipliers) are not reachable this
+/// way. If ids ever stop being hex, or the allow-list ever stops admitting small
+/// integers from elsewhere, revisit this.
 fn walk(v: &Value, set: &mut BTreeSet<String>) {
     match v {
         Value::Number(n) => {
@@ -130,7 +143,7 @@ fn walk(v: &Value, set: &mut BTreeSet<String>) {
 }
 
 /// Canonical text for a number, so `35`, `35.0` and `35.00` are one entry.
-fn key(v: f64) -> String {
+pub(super) fn key(v: f64) -> String {
     let r = (v * 1000.0).round() / 1000.0;
     let mut s = format!("{r:.3}");
     while s.contains('.') && (s.ends_with('0') || s.ends_with('.')) {
@@ -152,7 +165,7 @@ fn key(v: f64) -> String {
 ///
 /// Hand-rolled rather than a regex because the crate has no regex dependency and
 /// this is not worth adding one for.
-fn numbers_in(text: &str) -> Vec<f64> {
+pub(super) fn numbers_in(text: &str) -> Vec<f64> {
     let b: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -413,6 +426,362 @@ fn accept_with(
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Guard v2: the advice sheet
+// ---------------------------------------------------------------------------
+
+/// What survived the rank pass.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Suggestion {
+    /// Order **is** the ranking. There is no rank field: an integer invites
+    /// duplicates and gaps, and both would need a tiebreak the model has no
+    /// basis for.
+    pub picks: Vec<Pick>,
+    pub bundles: Vec<Bundle>,
+}
+
+/// One ranked candidate and the sentence that goes on its card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    /// A candidate id from [`Facts::candidate_ids`].
+    pub id: String,
+    /// One or two sentences, already truncated and already checked.
+    pub rationale: String,
+}
+
+/// Two or more picks about the same project, offered as one apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bundle {
+    /// A project basename that appears in the sheet's `projects` block.
+    pub project: String,
+    /// Accepted pick ids, in the order the model gave them.
+    pub ids: Vec<String>,
+}
+
+/// Characters a rationale may occupy on a card (docs/m5-spec.md).
+pub const MAX_RATIONALE: usize = 280;
+/// Picks past this are ignored. The sheet shows a handful; a model returning
+/// twenty has ranked nothing.
+pub const MAX_PICKS: usize = 8;
+pub const MAX_BUNDLES: usize = 4;
+pub const MAX_BUNDLE_IDS: usize = 8;
+
+/// Parse the rank pass and keep only what survives every check.
+///
+/// `Err` means the response was not a JSON object at all, which is the only
+/// condition [`super::llama::Advisor::suggest`] retries on. Everything else
+/// fails at the level of one pick: a bad third pick must not cost the first two.
+///
+/// An empty [`Suggestion`] is a normal outcome. The caller renders the
+/// deterministic order with house copy, which is the fallback the spec requires.
+pub fn accept_suggestion(raw: &str, facts: &Facts) -> Result<Suggestion> {
+    let allow = Allowlist::from_facts(facts);
+    let example = suggest_example();
+    let parsed: Value = serde_json::from_str(&extract_json_object(raw))
+        .context("the model did not return the requested JSON object")?;
+    if !parsed.is_object() {
+        bail!("the model returned {} rather than an object", kind_of(&parsed));
+    }
+    let Some(items) = parsed.get("picks").and_then(|v| v.as_array()) else {
+        bail!("the model's answer has no `picks` array");
+    };
+
+    let mut picks: Vec<Pick> = Vec::new();
+    for item in items {
+        if picks.len() >= MAX_PICKS {
+            break;
+        }
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::trim) else {
+            continue;
+        };
+        // The model ranks candidates. It does not get to name a new one.
+        if id.is_empty() || !facts.candidate_ids.iter().any(|k| k == id) {
+            continue;
+        }
+        // One pick per candidate: a second is the model repeating itself, and
+        // the first is the one it ranked highest.
+        if picks.iter().any(|p| p.id == id) {
+            continue;
+        }
+        let Some(why) = item.get("why").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // Truncation runs BEFORE the allow-list, never after: cutting a
+        // sentence can leave a number the model never wrote.
+        let rationale = truncate_rationale(why);
+        if rationale.is_empty() {
+            continue;
+        }
+        if !allow.offenders(&rationale).is_empty() {
+            continue;
+        }
+        let lower = rationale.to_lowercase();
+        if hedges(&rationale) || unsupported(&lower) {
+            continue;
+        }
+        // The worked example, pasted back with a real id on it. Cheap for a 4B
+        // to do and impossible to tell from an answer.
+        if restates(&example, &lower) {
+            continue;
+        }
+        let entry = candidate_entry(facts, id);
+        if let Some(title) = entry.and_then(|c| c.get("title")).and_then(|v| v.as_str()) {
+            if restates(&title.to_lowercase(), &lower) {
+                continue;
+            }
+        }
+        // A rationale that names none of the things the candidate is about is
+        // about nothing in particular. `guard.rs`'s ledger pass records what
+        // shipping without this check looks like.
+        if !anchors_of(facts, entry).iter().any(|a| lower.contains(a)) {
+            continue;
+        }
+        picks.push(Pick {
+            id: id.to_string(),
+            rationale,
+        });
+    }
+
+    let bundles = accept_bundles(&parsed, facts, &picks);
+    Ok(Suggestion { picks, bundles })
+}
+
+/// Bundles, after every pick is settled so membership can be tested.
+///
+/// Nothing here can resurrect a dropped pick: a bundle is a way of applying
+/// picks together, not a second route onto the sheet.
+fn accept_bundles(parsed: &Value, facts: &Facts, picks: &[Pick]) -> Vec<Bundle> {
+    let Some(items) = parsed.get("bundles").and_then(|v| v.as_array()) else {
+        // Optional by design (docs/m5-spec.md: "optional per-project bundles").
+        return Vec::new();
+    };
+    let projects = project_names(facts);
+    let mut out: Vec<Bundle> = Vec::new();
+    let mut bundled: BTreeSet<String> = BTreeSet::new();
+    for item in items {
+        if out.len() >= MAX_BUNDLES {
+            break;
+        }
+        let Some(project) = item.get("project").and_then(|v| v.as_str()).map(str::trim) else {
+            continue;
+        };
+        if !projects.iter().any(|p| p == project) {
+            continue;
+        }
+        // One bundle per project: two bundles of the same project are one
+        // bundle the model wrote twice.
+        if out.iter().any(|b| b.project == project) {
+            continue;
+        }
+        let Some(ids) = item.get("ids").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let mut kept: Vec<String> = Vec::new();
+        for id in ids.iter().filter_map(|v| v.as_str()).map(str::trim) {
+            if kept.len() >= MAX_BUNDLE_IDS {
+                break;
+            }
+            if !picks.iter().any(|p| p.id == id) || bundled.contains(id) {
+                continue;
+            }
+            kept.push(id.to_string());
+        }
+        // A bundle of one is a pick with extra chrome.
+        if kept.len() < 2 {
+            continue;
+        }
+        bundled.extend(kept.iter().cloned());
+        out.push(Bundle {
+            project: project.to_string(),
+            ids: kept,
+        });
+    }
+    out
+}
+
+/// Truncate a rationale to [`MAX_RATIONALE`] characters at a whitespace
+/// boundary, then mark the cut.
+///
+/// The boundary is the point. A naive cut can split `1,234,567` into `1,234`,
+/// which is a number the model never wrote: the allow-list would either admit it
+/// by coincidence or reject the pick for a fabrication its author did not
+/// commit. So this runs before the allow-list and cuts only where a space
+/// already was.
+///
+/// The result is at most `MAX_RATIONALE + 3` characters, because the ellipsis is
+/// added after the cut. Do not "fix" that to 280: shortening the text to make
+/// room would move the boundary the whole function exists to respect.
+///
+/// An empty return is the caller's signal to drop the pick.
+fn truncate_rationale(s: &str) -> String {
+    let s = s.trim();
+    if s.chars().count() <= MAX_RATIONALE {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(MAX_RATIONALE).collect();
+    let Some(i) = cut.rfind(char::is_whitespace) else {
+        // One 280-character word. Nothing to salvage sensibly.
+        return String::new();
+    };
+    let head = cut[..i].trim_end_matches([',', '.', ';', ':', ' ']);
+    if head.is_empty() {
+        return String::new();
+    }
+    format!("{head}...")
+}
+
+/// The candidate block entry for `id`.
+fn candidate_entry<'a>(facts: &'a Facts, id: &str) -> Option<&'a Value> {
+    facts
+        .value
+        .get("candidates")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(id))
+}
+
+/// The names a rationale about this candidate could reasonably use, lowercased.
+///
+/// The direct analogue of [`config_names`] and [`saver_names`]: the sheet says
+/// what each candidate is about in its `about` array, this adds the bare form of
+/// a `plugin@marketplace` name (which is how a model refers to it half the
+/// time), and for a saver it adds the display name, because "Honey" is what the
+/// reader sees on the row and `honey-for-devs` is not.
+fn anchors_of(facts: &Facts, entry: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(entry) = entry else {
+        return out;
+    };
+    let savers = saver_names(facts);
+    let names = entry.get("about").and_then(|v| v.as_array());
+    for name in names.into_iter().flatten().filter_map(|v| v.as_str()) {
+        out.push(name.to_lowercase());
+        if let Some(bare) = name.split('@').next().filter(|b| !b.is_empty() && *b != name) {
+            out.push(bare.to_lowercase());
+        }
+        out.extend(
+            savers
+                .iter()
+                .filter(|(id, _)| id == name)
+                .map(|(_, saver)| saver.clone()),
+        );
+    }
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// Project names the sheet offered, which are the only projects a bundle may
+/// name.
+fn project_names(facts: &Facts) -> Vec<String> {
+    let Some(items) = facts.value.get("projects").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|p| Some(p.get("project")?.as_str()?.to_string()))
+        .collect()
+}
+
+/// The rejected example in the rank prompt, in the shape the anti-paste check
+/// compares against: the two constants joined and lowercased.
+fn suggest_example() -> String {
+    format!(
+        "{} {}",
+        super::prompts::SUGGEST_EXAMPLE_ID,
+        super::prompts::SUGGEST_EXAMPLE_WHY
+    )
+    .to_lowercase()
+}
+
+/// Slice out a JSON **object**, tolerating a code fence, a preamble and a
+/// truncated tail, exactly as [`extract_json`] does for arrays.
+///
+/// Same discipline: this is a **parsing** repair and never a content one.
+/// Everything salvaged still goes through every check in
+/// [`accept_suggestion`], so nothing here decides what is true.
+fn extract_json_object(raw: &str) -> String {
+    let Some(s) = raw.find('{') else {
+        return raw.trim().to_string();
+    };
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    // Byte index just past the last `}` that returned the scan to depth 2, which
+    // is the close of a complete pick or bundle inside its array.
+    let mut last_item_end: Option<usize> = None;
+
+    for (i, c) in raw[s..].char_indices() {
+        let at = s + i;
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => depth += 1,
+            ']' | '}' => {
+                depth -= 1;
+                // Back to depth 2 means an item just closed inside `picks` or
+                // `bundles`, which sit one level down from the root object.
+                if c == '}' && depth == 2 {
+                    last_item_end = Some(at + c.len_utf8());
+                }
+                // Depth 0 is the root object's own close: a complete response.
+                if depth == 0 {
+                    return raw[s..=at].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Unterminated. Keep whole items and close what is still open, innermost
+    // first.
+    let Some(end) = last_item_end else {
+        // Not one complete item survived, so there is nothing to salvage and a
+        // failed parse is the correct outcome.
+        return raw[s..].to_string();
+    };
+    let mut out = raw[s..end].to_string();
+    for c in stack_at(&raw[s..end]).iter().rev() {
+        out.push(if *c == '[' { ']' } else { '}' });
+    }
+    out
+}
+
+/// The containers still open at the end of `s`, string- and escape-aware.
+fn stack_at(s: &str) -> Vec<char> {
+    let mut stack = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in s.chars() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => stack.push(c),
+            ']' | '}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack
 }
 
 /// Every configuration item the fact sheet offered, plus the bare form of a

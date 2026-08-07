@@ -4,8 +4,8 @@
 //! `token-optimization` / `claude-code` topics, merges and dedups the hits,
 //! drops anything already curated in the catalog, and caches the result at
 //! `~/.piggy/discovered.json`. The cache refreshes at most once a day
-//! (a `--refresh` flag forces it). Catalog entries flagged `listed_only` (known
-//! tools Piggy deliberately will not install) are always shown here with their
+//! (a `--refresh` flag forces it). Catalog entries flagged `listed_only` - known
+//! tools Piggy deliberately will not install - are always shown here with their
 //! `exclusionReason`.
 //!
 //! The network layer is thin and isolated; the parse/merge logic is pure and
@@ -282,13 +282,29 @@ fn fetch_all() -> Result<Vec<Vec<DiscoveredRepo>>> {
     Ok(batches)
 }
 
+/// The cache as it stands, without touching the network: the fresh cache, the
+/// stale cache marked as such, else the catalog-only view. Savers mounts the
+/// Discover section, and rendering a primary tab must not phone GitHub; the
+/// live search runs only behind the user's explicit refresh.
+pub fn discover_cached() -> DiscoveryCache {
+    if let Some(mut c) = load_cache() {
+        c.stale = !is_fresh(&c.refreshed_at);
+        return c;
+    }
+    DiscoveryCache {
+        refreshed_at: chrono::Utc::now().to_rfc3339(),
+        repos: merge_and_filter(Vec::new(), &Catalog::embedded()),
+        stale: true,
+    }
+}
+
 /// Get discovery results, refreshing from GitHub at most once a day.
 ///
 /// * If a fresh cache exists and `force` is false → return it.
 /// * Otherwise attempt a live refresh; on success, cache and return it.
 /// * On network failure / rate-limit → return the existing cache marked `stale`
 ///   if there is one, else a minimal result built from the catalog's
-///   `listed_only` entries only (never an error; discovery is best-effort).
+///   `listed_only` entries only (never an error - discovery is best-effort).
 pub fn discover(force: bool) -> Result<DiscoveryCache> {
     let cached = load_cache();
     if !force {

@@ -3,7 +3,7 @@ import { analyzeUsage, shortDay } from "../lib/usage";
 import { formatTokens } from "../lib/format";
 
 // Same four-stream palette as StreamBars, so a day's bar reads the same as the
-// hero's stacked totals. cacheRead is the neutral gray — the cheap, reused
+// hero's stacked totals. cacheRead is the neutral gray, the cheap and reused
 // portion the analysis highlights.
 const COLORS = {
   input: "var(--cat-1)",
@@ -36,7 +36,7 @@ export function UsageChart({ series }: { series: UsageSeries }) {
   const slot = 100 / Math.max(1, n);
   const barW = Math.min(slot * 0.68, 6);
 
-  // Sparse x labels: first, middle, last active/edge days — enough to orient
+  // Sparse x labels: first, middle, last active/edge days, enough to orient
   // without crowding a 30- or 120-day window.
   const labelIdx = new Set([0, Math.floor((n - 1) / 2), n - 1].filter((i) => i >= 0));
 

@@ -1,10 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { Switch } from "../components/Switch";
 import { StatusChip } from "../components/StatusChip";
 import { SaverIcon } from "../components/SaverIcon";
 import { SaverConfigPanel } from "../components/SaverConfig";
 import { CopyCmd } from "../components/CopyCmd";
+import { formatTokens } from "../lib/format";
+import { savingsTokens } from "../lib/advice";
+import { DiscoverSection } from "./Discover";
+import { AdviceSheet } from "./AdviceSheet";
 import type { SaverRow } from "../types";
 
 function WarnTri({ text }: { text: string | null }) {
@@ -158,6 +162,24 @@ export function Savers() {
   const masterBusy = useStore((s) => s.masterBusy);
   const toggleMaster = useStore((s) => s.toggleMaster);
 
+  // Add-on advice lives here, not on its own screen: turning off an add-on you
+  // never use is the same act as turning on a saver, and this is the tab that
+  // acts. It is the same list Spend shows, from the same store, so both entry
+  // points open the same sheet on the same numbers. No re-read when the sheet
+  // closes: every apply and undo replaces the list from its own response.
+  const advice = useStore((s) => s.advice);
+  const loadAdvice = useStore((s) => s.loadAdvice);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  useEffect(() => {
+    void loadAdvice();
+  }, [loadAdvice]);
+  const addons = (advice?.items ?? []).filter(
+    (a) => a.group === "Add-ons" && a.status === "open",
+  );
+  // Through the same helper the sheet uses, so an add-on kind that ever
+  // reports a burden rather than a saving cannot land in a "costing" sentence.
+  const addonTokens = savingsTokens(addons);
+
   // While the switch is in flight, savers.masterOn still holds the *old* value,
   // so the direction of travel is simply the opposite of the current state.
   const turningOn = masterBusy && !masterOn;
@@ -235,6 +257,25 @@ export function Savers() {
         />
       </div>
 
+      {/* The one thing to act on here that is not a saver: add-ons loaded into
+          every request and never called. The figure is a MONTH, not a request -
+          the advice engine costs an add-on by how many sessions load it - and
+          the wording says so. Everything behind Review is reversible. */}
+      {addons.length > 0 && (
+        <div className="hint">
+          <div className="t">
+            <b>
+              {addons.length} add-on{addons.length === 1 ? "" : "s"} you never use
+            </b>{" "}
+            {addons.length === 1 ? "is" : "are"} costing ~{formatTokens(addonTokens)} tokens a
+            month. <small>estimated</small>
+          </div>
+          <button className="btn" onClick={() => setSheetOpen(true)}>
+            Review
+          </button>
+        </div>
+      )}
+
       <div className="sect-head">
         <h2>All savers</h2>
         <span className="helper">Fine-tune how Claude works to save tokens.</span>
@@ -272,6 +313,8 @@ export function Savers() {
         )}
       </div>
 
+      <DiscoverSection />
+
       <div className="safe-note">
         <span className="shield">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -283,6 +326,8 @@ export function Savers() {
           <b>Safe by design.</b> You're in control. Turn on what you want, anytime.
         </span>
       </div>
+
+      {sheetOpen && <AdviceSheet group="Add-ons" onClose={() => setSheetOpen(false)} />}
     </>
   );
 }

@@ -251,27 +251,6 @@ export interface SaversState {
   notice?: string | null;
 }
 
-export interface SweepItem {
-  idx: number;
-  stableId: string;
-  kind: string;
-  id: string;
-  source: string | null;
-  used: number;
-  usedScope: string;
-  estTokens: number;
-  estimated: boolean;
-  recommendDisable: boolean;
-  reason: string;
-}
-
-export interface SweepReport {
-  sessionsConsidered: number;
-  estRecoverableTokens: number;
-  estimated: boolean;
-  items: SweepItem[];
-}
-
 export interface DiscoverEntry {
   id: string;
   name: string;
@@ -512,4 +491,165 @@ export interface AdvisorProgress {
   total: number;
   done: boolean;
   error: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// advice
+//
+// The engine computes every figure together with the label that says how it was
+// arrived at, and hands both across. Nothing on this side re-derives an evidence
+// number, and nothing maps a basis string to a different word.
+// ---------------------------------------------------------------------------
+
+/** The five candidate families. Kebab-case: this is `ActionKind::as_str`, not a
+ *  camelCase invention. */
+export type AdviceKind =
+  | "server-disable"
+  | "server-scope"
+  | "claudemd-fix"
+  | "claudemd-trim"
+  | "saver-mix";
+
+/** `store::advice_status`. */
+export type AdviceStatus = "open" | "applied" | "dismissed" | "stale";
+
+/** Where a drafted rewrite has got to (`advisor::DraftState`).
+ *
+ *  Four states because one sentence cannot be true in all of them: a user who
+ *  has the advisor on, and whose draft the guard refused, must not be told to
+ *  turn the advisor on. `lib/advice.ts` holds the sentence for each. */
+export type DraftState = "unavailable" | "pending" | "refused" | "ready";
+
+/** `probe::MeasurementStatus::tag`. */
+export type MeasurementState = "measured" | "stale" | "failed" | "never" | "deferred";
+
+export interface AdviceEvidence {
+  label: string;
+  /** Already formatted by the engine, `~` and thousands separators included.
+   *  Render it verbatim: re-deriving an evidence figure here is how a number and
+   *  its basis label drift apart. */
+  value: string;
+  /** `piggy_core::advice::basis`, verbatim. The app colours it and prints it
+   *  uppercased; it never substitutes a different word, and a basis it does not
+   *  recognise reads as an estimate rather than as a measurement. */
+  basis: string;
+}
+
+export interface AdviceItem {
+  id: string;
+  kind: AdviceKind;
+  /** "Add-ons" | "CLAUDE.md" | "Savers". */
+  group: string;
+  target: string;
+  title: string;
+  evidence: AdviceEvidence[];
+  estTokensMonth: number;
+  /** "saves" everywhere but a trim, where the figure is what the file COSTS and
+   *  a rewrite could at best recover part of it. */
+  figureKind: "saves" | "burden";
+  /** 1 toggle, 2 config move, 3 content edit. */
+  riskTier: number;
+  status: AdviceStatus;
+  hasDiff: boolean;
+  applyable: boolean;
+  /** One plain sentence when `applyable` is false. */
+  blockedReason: string | null;
+  /** Where this card's rewrite has got to, or null for a kind that never needs
+   *  one. The app writes the card's sentence from this, the way it writes the
+   *  figure line from `figureKind`. */
+  draftState: DraftState | null;
+  appliedAt: string | null;
+}
+
+export interface AdviceReport {
+  items: AdviceItem[];
+  /** Applied rows, newest first, read from the table rather than from `items`:
+   *  applying is what stops a candidate regenerating. */
+  applied: AdviceItem[];
+  /** What the open list is worth a month. Savings only. */
+  estTokensMonth: number;
+  /** What the open items whose figure is a burden cost today. Its own field
+   *  because a burden added to a saving is a claim Piggy has not measured. */
+  estTokensMonthBurden: number;
+  generatedAt: string;
+  /** False in v1: the order is estimated tokens a month, not a model's. */
+  advisorRanked: boolean;
+}
+
+export interface AdviceFailure {
+  id: string;
+  reason: string;
+}
+
+export interface AdviceApplyResult {
+  report: AdviceReport;
+  applied: string[];
+  failures: AdviceFailure[];
+  warnings: string[];
+}
+
+export interface AdviceUndoResult {
+  report: AdviceReport;
+  restored: number;
+  failures: AdviceFailure[];
+  message: string;
+}
+
+export type DiffOp = "ctx" | "add" | "del";
+
+export interface DiffLine {
+  op: DiffOp;
+  text: string;
+  oldNo: number | null;
+  newNo: number | null;
+}
+
+export interface DiffHunk {
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface AdviceDiff {
+  id: string;
+  /** `~`-abbreviated, so a screenshot does not carry the account name. */
+  displayPath: string;
+  hunks: DiffHunk[];
+  added: number;
+  removed: number;
+  /** Real byte counts of the two versions: observed. */
+  beforeBytes: number;
+  afterBytes: number;
+  /** bytes / 3.5. Estimated, and labelled so. */
+  beforeEstTokens: number;
+  afterEstTokens: number;
+  /** True when the view was cut short. Apply still writes the whole file. */
+  truncated: boolean;
+}
+
+export interface ProbeServer {
+  key: string;
+  /** Identity, not display: what `probeMeasure` matches on. */
+  scope: string;
+  /** "Every project" at user scope, else the `~`-abbreviated project path. */
+  scopeLabel: string;
+  transport: string;
+  measurement: MeasurementState;
+  /** Sent only on a `measured` row. A stale row's stored numbers describe a
+   *  command that is not what runs today. */
+  toolCount: number | null;
+  schemaBytes: number | null;
+  schemaTokens: number | null;
+  tokenizer: string | null;
+  /** The schema BYTES are measured; this says the token count is not. */
+  tokensEstimated: boolean;
+  measuredAt: string | null;
+  /** Already redacted by the probe; never re-wrap it. */
+  error: string | null;
+  probeable: boolean;
+}
+
+export interface ProbeReport {
+  servers: ProbeServer[];
+  measured: number;
+  deferred: number;
 }

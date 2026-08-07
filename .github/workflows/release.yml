@@ -1,0 +1,229 @@
+# Release pipeline: automates docs/releasing.md steps 2-5.
+#
+# Push a tag `vX.Y.Z` and this builds the signed, notarized universal .dmg,
+# the updater .app.tar.gz + .sig, latest.json and checksums.txt, and stages
+# them all on a DRAFT GitHub release. Publishing the draft stays a manual,
+# deliberate step: the updater endpoint reads releases/latest/download, so
+# publishing is the moment users start receiving the build.
+#
+# `workflow_dispatch` runs the same build with no release, as a dry run for
+# the signing setup; artifacts land on the workflow run instead. Dispatching
+# ON a tag ref is still a dry run: only a pushed tag releases.
+#
+# Repo secrets (Settings -> Secrets and variables -> Actions):
+#   APPLE_CERTIFICATE               base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD      the .p12 password
+#   APPLE_SIGNING_IDENTITY          e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID                        Apple ID email for notarization
+#   APPLE_PASSWORD                  app-specific password for that Apple ID
+#   APPLE_TEAM_ID                   the 10-character team id
+#   TAURI_SIGNING_PRIVATE_KEY       contents of ~/.tauri/piggy.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its passphrase ("" while the key has none)
+#
+# Unset Apple secrets degrade to an unsigned build: silently on dry runs, with
+# a loud warning on tag builds (the draft gate is what keeps an unsigned .dmg
+# from reaching users). A missing updater key fails the build, because
+# createUpdaterArtifacts is on and an unsignable update would strand the
+# updater.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # docs/releasing.md step 1: every version stamp must agree with the tag.
+  # Cheapest check first, on the cheapest runner, so a typo costs seconds and
+  # not a full macOS build. The job itself always runs (a skipped need would
+  # skip its dependents); the step no-ops on dry runs.
+  guard:
+    name: versions agree with the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: check every version stamp
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          fail=0
+          check() {
+            if [ "$2" != "$tag" ]; then
+              echo "::error::$1 is at '$2' but the tag says '$tag'"
+              fail=1
+            fi
+          }
+          check app/src-tauri/tauri.conf.json "$(jq -r .version app/src-tauri/tauri.conf.json)"
+          check app/package.json "$(jq -r .version app/package.json)"
+          check installer/package.json "$(jq -r .version installer/package.json)"
+          check "Cargo.toml [workspace.package]" \
+            "$(sed -n '/\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p')"
+          check "Settings.tsx APP_VERSION" \
+            "$(sed -n 's/^export const APP_VERSION = "\(.*\)";$/\1/p' app/src/screens/Settings.tsx)"
+          exit $fail
+
+  test:
+    name: test gate
+    needs: guard
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # Before any cargo step: tauri-build's build script copies the
+      # `binaries/piggy` sidecar and hard-fails when it is absent, and the
+      # gitignored sidecar only exists after build:sidecar. `npm run build`
+      # stages it and exercises the real production build (tsc + vite),
+      # which docs/releasing.md step 3 gates on.
+      - name: frontend build (stages the sidecar cargo needs)
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+      - name: cargo test
+        run: cargo test --locked
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      # The shipped bundle turns the local advisor on, and nothing above
+      # compiles that half of the cfg: `local-llm` is off by default precisely
+      # so the lines above stay llama-free. Check the feature graph here, on the
+      # gate, rather than discovering it inside the signed release build an hour
+      # later. `check`, not `build`: this links llama.cpp, and the release job
+      # pays for the real one.
+      - name: cargo check (advisor feature, as shipped)
+        run: cargo check --locked -p piggy-app --features local-llm
+      - name: frontend tests
+        working-directory: app
+        run: npx vitest run
+
+  release:
+    name: build, sign, draft release
+    needs: [guard, test]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: npm ci
+        working-directory: app
+        run: npm ci
+
+      # Secrets land in the env only when set, because the Tauri bundler treats
+      # a PRESENT-but-empty APPLE_SIGNING_IDENTITY (or APPLE_CERTIFICATE) as
+      # "sign with this" and fails, and a dry run before Apple enrollment
+      # should build unsigned instead. The heredoc form keeps the multiline
+      # updater key intact. Verified against tauri-macos-sign: the keychain
+      # import fires on env presence, not non-emptiness.
+      - name: stage signing env
+        env:
+          IS_RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+          S_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          S_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          S_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          S_APPLE_ID: ${{ secrets.APPLE_ID }}
+          S_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          S_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          S_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          put() {
+            [ -n "$2" ] || return 0
+            {
+              echo "$1<<__PIGGY_ENV_EOF__"
+              printf '%s\n' "$2"
+              echo "__PIGGY_ENV_EOF__"
+            } >> "$GITHUB_ENV"
+          }
+          put APPLE_CERTIFICATE "$S_APPLE_CERTIFICATE"
+          if [ -n "$S_APPLE_CERTIFICATE" ]; then
+            # The password rides along whenever the cert does, even empty: the
+            # keychain import needs the pair, and a cert without its password
+            # fails later with a misleading "identity not found".
+            echo "APPLE_CERTIFICATE_PASSWORD=$S_APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          fi
+          put APPLE_SIGNING_IDENTITY "$S_APPLE_SIGNING_IDENTITY"
+          put APPLE_ID "$S_APPLE_ID"
+          put APPLE_PASSWORD "$S_APPLE_PASSWORD"
+          put APPLE_TEAM_ID "$S_APPLE_TEAM_ID"
+          put TAURI_SIGNING_PRIVATE_KEY "$S_TAURI_SIGNING_PRIVATE_KEY"
+          # The passphrase is legitimately "" while the key has none, so it is
+          # staged unconditionally rather than through put().
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$S_TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >> "$GITHUB_ENV"
+          if [ "$IS_RELEASE_TAG" = "true" ] && [ -z "$S_APPLE_SIGNING_IDENTITY" ]; then
+            echo "::warning title=unsigned release build::No Apple signing secrets are set, so this tagged build is UNSIGNED and Gatekeeper will quarantine it. The release is only a draft; publish it knowingly or add the APPLE_* secrets and re-run."
+          fi
+
+      # Pinned to v0.6.2, not the moving v0: on the action's dev branch
+      # `includeUpdaterJson` is already renamed, and unknown inputs only warn.
+      - name: build (and draft the release on tag pushes)
+        uses: tauri-apps/tauri-action@v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          # `--features local-llm` is the M5 advisor flip: the shipped .dmg
+          # contains the inference code, and the model itself stays an opt-in
+          # download in Settings. It links llama.cpp (cmake is preinstalled on
+          # the macOS runner image) and grows the bundle; docs/releasing.md's
+          # manual build passes the same flag so a hand-built release matches.
+          args: --target universal-apple-darwin --features local-llm
+          # Empty tagName: build only, no release (dry runs, including a
+          # dispatch pointed at a tag ref).
+          tagName: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && github.ref_name || '' }}
+          releaseName: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) && format('Piggy {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          # This string is copied verbatim into latest.json's `notes` at build
+          # time and cannot be fixed by editing the release afterwards, so it
+          # stays neutral. Real notes go on the release body before publishing.
+          releaseBody: ${{ format('Piggy {0}', github.ref_name) }}
+          includeUpdaterJson: true
+
+      # The npx installer refuses any release without checksums.txt, so this
+      # step is load-bearing, not cosmetic (installer/cli.js). The bundle
+      # lands in the WORKSPACE root target dir: app/src-tauri is a workspace
+      # member, so there is no app/src-tauri/target.
+      - name: checksums.txt for the npx installer
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd target/universal-apple-darwin/release/bundle/dmg
+          shasum -a 256 *.dmg > checksums.txt
+          cat checksums.txt
+          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: dry-run artifacts
+        if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: piggy-universal-dry-run
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error

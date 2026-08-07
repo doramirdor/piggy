@@ -3,20 +3,20 @@
 //! Everything here follows `docs/measurement.md` to the letter:
 //!
 //! * All comparisons are **normalized per-turn rates** (tokens per deduplicated
-//!   assistant message), never raw totals: task size, model, and session length
+//!   assistant message), never raw totals - task size, model, and session length
 //!   confound totals.
 //! * Per saver X we compare the ON group (X enabled) against the OFF group
 //!   (X disabled). Per stream the delta is `1 - median(rate_on)/median(rate_off)`.
 //!   The OFF group is split by randomization: rotation single-off + holdout are
 //!   randomized (measured-eligible); pre-install / manual sessions are
 //!   observational. Observational rows are **never pooled into a measured
-//!   badge**: leaning on them (only when randomized data is short) caps the
+//!   badge** - leaning on them (only when randomized data is short) caps the
 //!   figure at `estimated`, so pre/post-install drift can't masquerade as a
 //!   randomized effect.
 //! * The uncertainty is a **bootstrap 90% confidence interval** (1000 resamples)
 //!   built with the crate's deterministic [`crate::rng`] PRNG. A finding is only
 //!   badged `measured`/`estimated` when the CI excludes zero **with positive
-//!   width** **and** both groups have at least [`MIN_GROUP`] sessions. Otherwise
+//!   width** **and** both groups have at least [`MIN_GROUP`] sessions - otherwise
 //!   it is `measuring` (never a point claim below the bar).
 //! * Subagent sub-session files (`…/subagents/…`) are excluded from the groups:
 //!   they inherit the parent's saver set but their per-turn rates are not
@@ -47,7 +47,7 @@ pub const CI_ALPHA: f64 = 0.10;
 /// turns a rounding difference into a headline percentage. Real profile: with
 /// every prompt served from cache the input stream medians at ~2 tokens/turn,
 /// and a 400-token/turn ON median printed `-20071%`. Guarding only `== 0.0` is
-/// not enough: the failure is continuous, not a special case at zero.
+/// not enough - the failure is continuous, not a special case at zero.
 ///
 /// A stream this quiet has no percentage worth showing: 10 tokens/turn is under
 /// a thousandth of the streams that actually carry traffic here (3k-100k), and
@@ -87,13 +87,21 @@ pub const MIN_TURNS_DENOM: f64 = 2.0;
 /// shown to one decimal ("1.4× longer"), so a saver that could only ever have
 /// moved a stream by a twentieth cannot move the digit the user reads.
 pub const NULL_BAND: f64 = 0.05;
-/// Number of per-stream badges shown together for one saver/headline. The badge
-/// gate is Bonferroni-corrected across this family so the *family-wise* chance a
+/// Number of badges shown together for one saver/headline. The badge gate is
+/// Bonferroni-corrected across this family so the *family-wise* chance a
 /// truly-null saver lights up any green badge stays near the ~10% a reader infers
-/// from a single 90% CI, rather than the ~1-0.9^4 ≈ 34% of four naive gates. The
+/// from a single 90% CI, rather than the ~1-0.9^5 ≈ 41% of five naive gates. The
 /// displayed CI is still the spec-mandated 90%; the correction only ever
 /// *withholds* a badge, never invents one.
-pub const STREAM_FAMILY: usize = Stream::ALL.len();
+///
+/// The `+ 1` is the turns arm. It is deliberately outside [`Stream::ALL`] (it is
+/// the denominator the four streams divide by, not a fifth stream), but it runs
+/// the same `stream_stat` gate and is displayed right beside them, in the
+/// per-saver table ([`SaverAttribution::arms`], [`SaverAttribution::summary`])
+/// and in the headline ([`Headline::turns`]). Five gates corrected for four is a
+/// family-wise rate above what the doc above promises, so the family has to be
+/// the number of badges actually shown, not the length of one list of them.
+pub const STREAM_FAMILY: usize = Stream::ALL.len() + 1;
 
 /// The four token streams a saver can move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +165,7 @@ impl Stream {
 #[derive(Debug, Clone)]
 pub struct SessionRates {
     pub session_id: String,
-    /// Deduplicated assistant turns, the per-turn normalizer.
+    /// Deduplicated assistant turns - the per-turn normalizer.
     pub turns: u64,
     pub input: u64,
     pub output: u64,
@@ -207,7 +215,7 @@ pub enum SessionGroup {
     /// at all) was never actually observed, so it can only back an `estimated`
     /// figure.
     HoldoutContaminated,
-    /// Predates Piggy: observational baseline (all off).
+    /// Predates Piggy - observational baseline (all off).
     PreInstall,
     /// Some on, some off (single-off rotation slots).
     Mixed,
@@ -222,9 +230,9 @@ pub enum Badge {
     Measured,
     /// Same math, but the OFF/baseline group is the **observational**
     /// pre-install baseline (non-randomized) rather than a live holdout. Shown
-    /// with a number but labelled `estimated`, never conflated with measured.
+    /// with a number but labelled `estimated` - never conflated with measured.
     Estimated,
-    /// Below the bar: show "not enough data yet · n", never a point estimate.
+    /// Below the bar - show "not enough data yet · n", never a point estimate.
     Measuring,
 }
 
@@ -251,7 +259,7 @@ pub struct StreamStat {
 }
 
 impl StreamStat {
-    /// The point percentage a badge is allowed to show: `Some` for both
+    /// The point percentage a badge is allowed to show - `Some` for both
     /// `measured` and `estimated`, `None` while still `measuring` (so the caller
     /// shows the neutral "not enough data yet" state, never a point estimate).
     pub fn shown_pct(&self) -> Option<f64> {
@@ -262,7 +270,7 @@ impl StreamStat {
     }
 
     /// A percentage figure only when the claim is a **measured** (randomized)
-    /// one, never for an observational `estimated` figure.
+    /// one - never for an observational `estimated` figure.
     pub fn measured_pct(&self) -> Option<f64> {
         match (self.badge, self.delta) {
             (Badge::Measured, Some(d)) => Some(d * 100.0),
@@ -315,13 +323,29 @@ impl StreamStat {
                     sessions(on)
                 ),
             }),
-            Reading::Quiet => Some(match self.stream {
-                Stream::Turns => "too few turns per session to compare".to_string(),
-                _ => format!(
-                    "under {} tokens a turn on both sides, too small to compare",
-                    MIN_RATE_DENOM as u64
-                ),
-            }),
+            // `Quiet` is decided by the OFF median alone (`delta_of` never looks
+            // at the ON side), so only the "both sides" wording may claim both.
+            // The asymmetric case is real and is the one the floor was written
+            // for: ~2 tokens a turn served from cache with the saver off against
+            // ~400 with it on. Telling that reader both sides are too small is
+            // false about the arm that is 40x the floor.
+            Reading::Quiet => {
+                let on_quiet = self.median_on < self.stream.min_denom();
+                Some(match (self.stream, on_quiet) {
+                    (Stream::Turns, true) => "too few turns per session to compare".to_string(),
+                    (Stream::Turns, false) => {
+                        "too few turns per session with it off to compare against".to_string()
+                    }
+                    (_, true) => format!(
+                        "under {} tokens a turn on both sides, too small to compare",
+                        MIN_RATE_DENOM as u64
+                    ),
+                    (_, false) => format!(
+                        "under {} tokens a turn with it off, too small to take a ratio against",
+                        MIN_RATE_DENOM as u64
+                    ),
+                })
+            }
             // Rounded AWAY from zero, so the sentence claims less than the
             // interval supports rather than more.
             Reading::NoChange { bound } => Some(format!(
@@ -349,7 +373,7 @@ fn sessions(n: usize) -> &'static str {
 /// [`Badge::Measuring`] covers three situations the UI used to render with one
 /// word, and they call for opposite things from the reader. "Not enough
 /// sessions yet" is a wait. "Both sides are too small to divide" is a
-/// permanent no. "We compared and found nothing bigger than 1%" is a **result**:
+/// permanent no. "We compared and found nothing bigger than 1%" is a **result**,
 /// the most common honest outcome in the catalogue, and the one that reads as
 /// a broken progress bar when it is labelled the same as the other two.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -388,6 +412,13 @@ pub struct SaverAttribution {
     pub saver_id: String,
     pub n_on: usize,
     pub n_off: usize,
+    /// Breakdown of the ON group by source (`rotation`/`holdout`/`manual`/…).
+    /// The symmetric partner of [`Self::off_by_source`]: `n_on` alone cannot say
+    /// whether the ON side was randomized, because [`pick_group`] pools
+    /// observational rows in when the randomized ones are thin. A caller that
+    /// needs "how many *randomized* sessions per side" - [`crate::advice`]'s
+    /// SaverMix gate - has to read it here.
+    pub on_by_source: BTreeMap<String, usize>,
     /// Breakdown of the OFF group by source (`rotation`/`holdout`/`pre_install`),
     /// so the report can flag the pre-install baseline separately.
     pub off_by_source: BTreeMap<String, usize>,
@@ -410,6 +441,23 @@ impl SaverAttribution {
     /// asking "what did this saver do" is owed it in the same breath.
     pub fn arms(&self) -> impl Iterator<Item = &StreamStat> {
         self.streams.iter().chain(std::iter::once(&self.turns))
+    }
+
+    /// Sessions on each side that Piggy's own scheduler placed there
+    /// (`rotation` or `holdout`), as `(on, off)`.
+    ///
+    /// Not `n_on`/`n_off`: those are the sizes of the groups actually compared,
+    /// which [`pick_group`] may have padded with observational sessions. A rule
+    /// that says "after N randomized sessions per side" has to count the
+    /// randomized ones or it is not the rule it claims to be.
+    pub fn randomized_counts(&self) -> (usize, usize) {
+        let count = |m: &BTreeMap<String, usize>| {
+            m.iter()
+                .filter(|(src, _)| is_randomized(src))
+                .map(|(_, n)| *n)
+                .sum()
+        };
+        (count(&self.on_by_source), count(&self.off_by_source))
     }
 
     /// The one-line learning: what this saver's comparison has shown, in the
@@ -546,7 +594,7 @@ impl SaverAttribution {
     }
 }
 
-/// "a", "a and b", "a, b and c": the list voice the summaries are written in.
+/// "a", "a and b", "a, b and c" - the list voice the summaries are written in.
 fn join(parts: &[String]) -> String {
     match parts {
         [] => String::new(),
@@ -557,7 +605,7 @@ fn join(parts: &[String]) -> String {
 
 impl SaverAttribution {
 
-    /// Whether this saver has been **shown to do nothing worth measuring**,
+    /// Whether this saver has been **shown to do nothing worth measuring** -
     /// as opposed to merely not having been shown to do something.
     ///
     /// The distinction is the entire safety argument for folding one saver set's
@@ -618,7 +666,7 @@ impl SaverAttribution {
 pub enum HeadlineBaseline {
     /// Live holdout sessions (the honest default).
     Holdout,
-    /// Pre-install history: observational, labelled as such.
+    /// Pre-install history - observational, labelled as such.
     PreInstall,
     /// No baseline available yet.
     None,
@@ -692,7 +740,7 @@ pub enum MultiplierState {
 /// machine left idle for a week does not report a pace that silently decayed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pace {
-    /// RFC3339 timestamp of the arm's first session, when this count started.
+    /// RFC3339 timestamp of the arm's first session - when this count started.
     pub since: String,
     /// Sessions per day across the arm's span. `None` when the arm spans no
     /// measurable time (one session, or several inside the same instant): a
@@ -703,7 +751,7 @@ pub struct Pace {
 impl Pace {
     /// Days still to run before this arm reaches `target`, at the pace observed
     /// so far. `None` when the target is already met or there is no pace to
-    /// extrapolate from. The caller then says "not yet" without inventing a
+    /// extrapolate from - the caller then says "not yet" without inventing a
     /// date.
     pub fn days_to(&self, have: usize, target: usize) -> Option<f64> {
         let per_day = self.per_day?;
@@ -759,7 +807,7 @@ pub struct Waiting {
     pub have: usize,
     pub need: usize,
     /// When this arm's count started. For [`WaitingArm::On`] that is the moment
-    /// the current saver set came together, the restart the user never sees.
+    /// the current saver set came together - the restart the user never sees.
     pub since: Option<String>,
     /// Days left at the pace observed so far, `None` when there is no pace to
     /// extrapolate from (a single session, or a fixed pre-install baseline).
@@ -793,7 +841,7 @@ pub struct Headline {
     /// very different situations it is in, and they want opposite words. Zero
     /// means nothing is rotating and waiting fixes nothing. Non-zero but under
     /// [`MIN_GROUP`] means rotation IS running and this is the count that is
-    /// still filling: the only honest progress figure for that case, since
+    /// still filling - the only honest progress figure for that case, since
     /// `n_full_on` is the pooled total and can sit in the thousands while the
     /// arm that decides the badge holds five.
     pub n_full_on_randomized: usize,
@@ -801,7 +849,7 @@ pub struct Headline {
     /// holdouts available had a pinned saver running through them, so the
     /// "no savers at all" counterfactual was never actually observed.
     pub baseline_clean: bool,
-    /// `median(baseline spend rate) / median(full_on spend rate)`, "lasts N.N×
+    /// `median(baseline spend rate) / median(full_on spend rate)` - "lasts N.N×
     /// longer". Price-weighted, hence `estimated`. `None` if not computable.
     pub multiplier: Option<f64>,
     /// Why `multiplier` is `None`, when it is (`Shown` when it is `Some`). Lets a
@@ -841,7 +889,7 @@ impl Headline {
     ///
     /// Reports the arm that needs the most sessions, ties going to the baseline:
     /// that is the one the user cannot hurry, so it is the honest thing to quote
-    /// a wait against. `None` once both arms are full, at which point the
+    /// a wait against. `None` once both arms are full - at which point the
     /// headline is held up by something other than sample size, and saying
     /// "still gathering" would be a lie the caller must not tell.
     pub fn waiting(&self) -> Option<Waiting> {
@@ -954,7 +1002,7 @@ impl Store {
     /// exception [`Store::classified_sessions`] already makes for
     /// `any_scheduler_disabled` applies here: `rotation::controlled_savers` drops
     /// a hand-toggled saver from rotation, so it is off in every session of that
-    /// era: X's ON arm and X's OFF arm alike. Holding it against isolation
+    /// era - X's ON arm and X's OFF arm alike. Holding it against isolation
     /// doesn't protect the contrast, it deletes it: one saver pinned off by hand
     /// made `others_on` false for every session and every saver's group went
     /// empty, so the per-saver table read "not enough data yet" forever at any
@@ -1293,7 +1341,8 @@ fn ci_is_significant(ci: (f64, f64)) -> bool {
 ///
 /// The **displayed** interval is the spec's 90% CI, but the badge *gate* uses a
 /// Bonferroni-corrected interval (alpha `CI_ALPHA / STREAM_FAMILY`) so showing
-/// four per-stream badges doesn't inflate the family-wise false-positive rate.
+/// the whole family of badges together (four streams and the turns arm) doesn't
+/// inflate the family-wise false-positive rate.
 fn stream_stat(stream: Stream, on: &[f64], off: &[f64], ceiling: Badge, seed: u64) -> StreamStat {
     debug_assert!(
         ceiling.shows_number(),
@@ -1444,7 +1493,7 @@ fn pick_baseline(
 /// tests; time-seed it in production).
 ///
 /// The OFF group is split by randomization. Non-randomized pre-install /
-/// observational sessions are **never pooled into a measured badge**: that
+/// observational sessions are **never pooled into a measured badge** - that
 /// would let pre/post-install drift masquerade as a randomized effect. When
 /// there is enough randomized OFF data, the comparison is measured off that
 /// alone. Only when randomized OFF is short do we fall back to the observational
@@ -1515,11 +1564,15 @@ pub fn attribute_with_map(
         .collect();
     // Counted over the rows this saver's number could actually rest on, so the
     // footnote cannot advertise sessions the comparison excluded.
+    let mut on_by_source: BTreeMap<String, usize> = BTreeMap::new();
     let mut off_by_source: BTreeMap<String, usize> = BTreeMap::new();
     for r in rows.iter().filter(|r| r.others_on) {
-        if !r.enabled {
-            *off_by_source.entry(r.source.clone()).or_insert(0) += 1;
-        }
+        let side = if r.enabled {
+            &mut on_by_source
+        } else {
+            &mut off_by_source
+        };
+        *side.entry(r.source.clone()).or_insert(0) += 1;
     }
 
     // Prefer the randomized rows on each side (measured-eligible). Only lean on
@@ -1577,6 +1630,7 @@ pub fn attribute_with_map(
         saver_id: saver_id.to_string(),
         n_on: on.len(),
         n_off: off_used.len(),
+        on_by_source,
         off_by_source,
         streams,
         turns,

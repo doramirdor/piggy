@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { api } from "./ipc";
 import { errorBanner, infoBanner, toApiError, type Banner } from "./lib/errors";
 import type {
+  AdviceApplyResult,
+  AdviceReport,
+  AdviceUndoResult,
   Annotation,
   Environment,
   Insight,
@@ -17,9 +20,36 @@ import type {
 // Four destinations, one per question a user actually arrives with: where did
 // my tokens go, what do I turn on, did it work, and how do I control Piggy.
 // Dashboard and Reports were folded into Spend (they answered the same
-// question in different cuts) and Discovery became a section of Savers, which
-// is the tab that installs things.
+// question in different cuts), and Discovery and Sweep became sections of
+// Savers, which is the tab that installs things.
 export type Tab = "spend" | "savers" | "proof" | "settings" | "about";
+
+/**
+ * The identity of the measurement per-saver advice is written against.
+ *
+ * The prose sits directly beside the row's own finding and caveat, and those
+ * refresh on every `refresh()`. Pinning the prose to the reading it explains is
+ * what stops a note written about "still measuring" surviving into a settled
+ * delta, or a note about one delta surviving into another.
+ *
+ * Coarse on purpose. Re-asking means loading a ~3GB model, so the key must not
+ * move with every indexed session: the delta enters it at the precision the row
+ * actually prints (whole percent, `pctMagnitude`), and the medians behind it do
+ * not enter at all. What does move it is what the reader can see move: a saver
+ * appearing, being switched on or off, settling, or changing its printed number.
+ *
+ * `null` when there is no saver to advise on, which is also what keeps the
+ * fetch from firing at all.
+ */
+export function saverNotesKey(savers: SaversState | null): string | null {
+  const rows = savers?.savers ?? [];
+  if (rows.length === 0) return null;
+  const rowKeys = rows.map((s) => {
+    const pct = s.badge.delta == null ? "-" : Math.round(s.badge.delta * 100);
+    return `${s.id}:${s.enabled ? 1 : 0}:${s.badge.kind}:${pct}`;
+  });
+  return `${savers?.masterOn ? "on" : "off"}|${rowKeys.join("|")}`;
+}
 
 interface AppState {
   tab: Tab;
@@ -38,9 +68,10 @@ interface AppState {
   /** Per-saver advice from the same local model, keyed by `saver:<id>`. Not
    *  period-scoped: the comparison behind it counts every session ever run. */
   saverNotes: Annotation[];
-  /** Whether the saver pass has already been asked this session. One load is
-   *  ~3GB resident, so Proof asks once and never on a refresh. */
-  saverNotesAsked: boolean;
+  /** The reading `saverNotes` was written against (see `saverNotesKey`), or
+   *  `null` for "not asked yet". One load is ~3GB resident, so Proof asks once
+   *  per reading and never on a refresh. */
+  saverNotesFor: string | null;
   sources: SourcesOverview | null;
   series: UsageSeries | null;
   /** The task table, fetched only when the Tasks view is opened. `null` means
@@ -50,6 +81,16 @@ interface AppState {
    *  table beside this week's header, and a period switch clears both. */
   tasksPeriod: Period | null;
   savers: SaversState | null;
+  /** The advice list. `null` means "not asked yet" and renders a skeleton, not
+   *  an empty state: "Piggy has nothing to suggest" is a claim, and a loading
+   *  list must not make it.
+   *
+   *  It lives here rather than in screen-local state because both entry points
+   *  - Spend's section and the Savers hint - have to show the same list. */
+  advice: AdviceReport | null;
+  /** A generate, apply, undo or dismiss is in flight. The sheet disables its
+   *  controls while it is. */
+  adviceBusy: boolean;
   banner: Banner | null;
   booting: boolean;
   /** A period switch is in flight. The screens keep the old slice on screen and
@@ -68,6 +109,14 @@ interface AppState {
   loadAnnotations: () => Promise<void>;
   loadSaverNotes: () => Promise<void>;
   loadSavers: () => Promise<void>;
+  /** Ask the engine what to do next. Pull, never push: this is deliberately NOT
+   *  part of `refresh()`, because a generate re-scans every CLAUDE.md and every
+   *  MCP config and the watcher fires every couple of seconds while Claude is
+   *  running. Asked once per app run; `force` re-asks. */
+  loadAdvice: (force?: boolean) => Promise<void>;
+  applyAdvice: (ids: string[]) => Promise<AdviceApplyResult>;
+  undoAdvice: (id: string) => Promise<AdviceUndoResult>;
+  dismissAdvice: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
   toggleSaver: (id: string, on: boolean) => Promise<void>;
   unpinSaver: (id: string) => Promise<void>;
@@ -87,6 +136,12 @@ export const useStore = create<AppState>((set, get) => {
   let refreshInFlight = false;
   let refreshQueued = false;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // One generate at a time, whoever asks. `advice::generate` is expensive - it
+  // re-scans every CLAUDE.md and every MCP config - and it also WRITES: new rows
+  // land open, vanished ones go stale, spent dismissals retire. Two screens
+  // mounting at once must produce one pass, not two reconciling the same table.
+  let adviceInFlight: Promise<void> | null = null;
 
   const refreshNow = async () => {
     if (refreshInFlight) {
@@ -113,13 +168,15 @@ export const useStore = create<AppState>((set, get) => {
   insights: [],
   annotations: [],
   saverNotes: [],
-  saverNotesAsked: false,
+  saverNotesFor: null,
   annotatedPeriod: null,
   sources: null,
   series: null,
   tasks: null,
   tasksPeriod: null,
   savers: null,
+  advice: null,
+  adviceBusy: false,
   banner: null,
   booting: true,
   periodBusy: false,
@@ -186,19 +243,31 @@ export const useStore = create<AppState>((set, get) => {
     }
   },
 
-  /** Ask the local model for per-saver advice. Called by Proof, once.
+  /** Ask the local model for per-saver advice. Called by Proof, once per
+   *  reading.
    *
-   *  Deliberately not part of `refresh`: without the guard of `saverNotesAsked`
-   *  a 4B would load on every session-log write, whichever tab is open. */
+   *  Deliberately not part of `refresh`: without the guard of `saverNotesFor` a
+   *  4B would load on every session-log write, whichever tab is open. But
+   *  "asked once, ever" was the other error: the row's finding and caveat move
+   *  under the note on every refresh, and in a menu bar app left open for days
+   *  the prose ends up describing a reading the row no longer shows. The key is
+   *  what makes once mean once per reading. */
   loadSaverNotes: async () => {
-    if (get().saverNotesAsked) return;
-    set({ saverNotesAsked: true });
+    const key = saverNotesKey(get().savers);
+    if (key === null || get().saverNotesFor === key) return;
+    // Claim the reading BEFORE awaiting, so two visits cannot start two models
+    // at once. Each load is ~3GB resident. The previous prose goes with the
+    // claim: it was written about a reading that has since moved, which is the
+    // mismatch `setPeriod` discards annotations to avoid.
+    set({ saverNotesFor: key, saverNotes: [] });
     try {
-      set({ saverNotes: await api.advisorSavers() });
+      const saverNotes = await api.advisorSavers();
+      // The reading may have moved while the model was thinking.
+      if (get().saverNotesFor === key) set({ saverNotes });
     } catch {
       // Silent: the deterministic summary on each row is the product, and it is
       // already rendered. Re-arm so a later visit can retry.
-      set({ saverNotesAsked: false });
+      if (get().saverNotesFor === key) set({ saverNotesFor: null });
     }
   },
 
@@ -267,6 +336,70 @@ export const useStore = create<AppState>((set, get) => {
       set({ savers });
     } catch (e) {
       get().showError(e);
+    }
+  },
+
+  loadAdvice: async (force = false) => {
+    if (adviceInFlight) return adviceInFlight;
+    if (get().advice !== null && !force) return;
+    const ask = async () => {
+      try {
+        set({ advice: await api.adviceReport() });
+      } catch {
+        // Silent, and re-armed by the `finally` below. Spend is complete and
+        // correct without a suggestion list, so a `Store::open` hiccup must not
+        // raise the global banner over a working ledger. Matches
+        // `loadAnnotations`.
+      }
+    };
+    const pass = ask().finally(() => {
+      adviceInFlight = null;
+    });
+    adviceInFlight = pass;
+    return pass;
+  },
+
+  /** Apply a bundle. Per-item failures come back in the result rather than as a
+   *  throw; a throw here is the whole call failing, and the sheet banners it. */
+  applyAdvice: async (ids) => {
+    set({ adviceBusy: true });
+    // Which kinds are going, read BEFORE the call: the response replaces the
+    // list, and a saver toggle moves that saver's switch and badge on the
+    // Savers screen. Not `refresh()` - that is the debounced watcher path.
+    const touchesSavers = (get().advice?.items ?? []).some(
+      (a) => ids.includes(a.id) && a.kind === "saver-mix",
+    );
+    try {
+      const res = await api.adviceApply(ids);
+      set({ advice: res.report });
+      if (touchesSavers) await get().loadSavers();
+      return res;
+    } finally {
+      set({ adviceBusy: false });
+    }
+  },
+
+  undoAdvice: async (id) => {
+    set({ adviceBusy: true });
+    const touchesSavers = (get().advice?.applied ?? []).some(
+      (a) => a.id === id && a.kind === "saver-mix",
+    );
+    try {
+      const res = await api.adviceUndo(id);
+      set({ advice: res.report });
+      if (touchesSavers) await get().loadSavers();
+      return res;
+    } finally {
+      set({ adviceBusy: false });
+    }
+  },
+
+  dismissAdvice: async (id) => {
+    set({ adviceBusy: true });
+    try {
+      set({ advice: await api.adviceDismiss(id) });
+    } finally {
+      set({ adviceBusy: false });
     }
   },
 

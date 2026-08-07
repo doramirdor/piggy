@@ -1537,6 +1537,37 @@ button {
 /* "Why this still says measuring". Neutral, not amber: a running experiment is
    not a warning, and painting it like the blocker card next to it would make an
    ordinary warm-up look like something the user broke. */
+/* The Proof screen's one-time lesson. A text disclosure, not a card: it sits
+   under the header sub and should read as a footnote until opened. */
+.how-proof {
+  margin-top: 7px;
+  font-size: 12.5px;
+}
+.how-proof summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--hairline);
+}
+.how-proof summary:hover {
+  color: var(--text);
+}
+.how-proof summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.how-proof[open] summary {
+  color: var(--text);
+}
+.how-proof p {
+  margin: 8px 0 0;
+  max-width: 62ch;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
 .waitbox {
   margin-top: 14px;
   padding: 13px 15px;
@@ -3655,4 +3686,201 @@ button {
   margin-left: auto;
   color: var(--text-3);
   flex-shrink: 0;
+}
+
+/* ==========================================================================
+   M5: advice
+   Every colour here is an existing token, so dark mode flips through the one
+   `:root` re-declaration under `prefers-color-scheme` rather than through a
+   second set of rules. Shapes follow the house: --radius is 0, no shadow,
+   hairlines at 0.5px. Build target is safari15.
+   ========================================================================== */
+
+/* Evidence basis. `.meas` and `.rec` above are the Ledger's two; advice needs
+   the engine's full vocabulary, and a basis nobody recognises colours as an
+   estimate rather than as a measurement. */
+.lins-tag.obs { color: var(--ink-2); }
+.lins-tag.msr { color: var(--measured); }
+.lins-tag.est { color: var(--estimated); }
+.lins-tag.wait { color: var(--wait); }
+
+/* Advice sits above the view controls on Spend, so it needs the gap the other
+   sections get from the next `.sect` heading's own top margin. */
+.advice-attr {
+  margin-bottom: 20px;
+}
+
+/* `.sheet` has no max-height and no internal scroller, and the backdrop
+   centres with 24px of padding, so a sheet taller than about 612px clips at
+   both ends with the buttons out of reach. This one scrolls its middle and
+   pins the title and the actions. Not applied to `.sheet` globally: ShareSheet
+   has its own arrangement, and caps its preview at 42vh for the same reason. */
+.advice-sheet {
+  max-width: 620px;
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+.advice-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* `.sheet .ssub` caps at 46ch for the 440px sheets. This one is 620px wide and
+   its summary is two clauses, so the cap only forces an early wrap. */
+.advice-sheet .ssub {
+  max-width: none;
+}
+.advice-body > div:first-child > .sect:first-child {
+  margin-top: 0;
+}
+
+.acard {
+  padding: 14px 0;
+}
+.acard + .acard {
+  border-top: 0.5px solid var(--hairline);
+}
+.ahead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.atitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+/* Label, value, basis. The basis sits in the same row as the number it
+   describes, never in a legend somewhere else.
+
+   The value column is capped rather than left on `auto`: one evidence row is a
+   comma list of dead file references, and at its natural width it took the row
+   and left the labels wrapping three words to a line. */
+.aev {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 5px 10px;
+  margin-top: 9px;
+}
+.aev-label {
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.4;
+}
+.aev-value {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-exact);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  max-width: 26ch;
+  overflow-wrap: anywhere;
+}
+.aev .lins-tag {
+  margin-right: 0;
+}
+
+.ablocked,
+.acard-actions {
+  margin-top: 9px;
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.45;
+}
+
+/* The disclosure a diff lives in. `.attr summary.arow` is scoped to `.attr`
+   and a card is not one, so this carries its own affordance. */
+.acard .adet {
+  margin-top: 9px;
+}
+.dsum {
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+/* --- unified diff ---------------------------------------------------------
+   Selectable (the global `user-select: none` would otherwise leave the reader
+   unable to copy the very lines they are being asked to approve), scrolling on
+   its own axis so the sheet never scrolls sideways, and marking add and del
+   with a character as well as a wash so the meaning survives greyscale. */
+.dwrap {
+  margin-top: 4px;
+  max-height: 34vh;
+  overflow: auto;
+  background: var(--sheet-2);
+  border: 0.5px solid var(--hairline);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.dhead {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+  padding: 5px 8px;
+  border-bottom: 0.5px solid var(--hairline);
+}
+.dhunk + .dhunk .dhead {
+  border-top: 0.5px solid var(--hairline);
+}
+.dline {
+  display: grid;
+  grid-template-columns: 34px 34px 12px 1fr;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  min-width: 520px;
+  white-space: pre;
+}
+.dno {
+  color: var(--ink-3);
+  text-align: right;
+  padding-right: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.dmark {
+  text-align: center;
+}
+.dtext {
+  padding-right: 8px;
+}
+.dline.add {
+  background: var(--green-dim);
+}
+.dline.add .dmark {
+  color: var(--measured);
+}
+.dline.del {
+  background: var(--red-dim);
+}
+.dline.del .dmark {
+  color: var(--refuse);
+}
+
+/* --- probe rows in Settings ---------------------------------------------- */
+ /* Not uppercased, unlike the other mono labels in this app: a path is
+   case-sensitive, and `~/DOCUMENTS/CODE` is a directory that does not exist. */
+.probe-scope {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+  margin-left: 8px;
+  word-break: break-all;
+}
+.probe-figs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--ink-exact);
+  font-variant-numeric: tabular-nums;
 }

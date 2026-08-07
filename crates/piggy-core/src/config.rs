@@ -2,7 +2,7 @@
 //!
 //! Everything is overridable by environment variable so tests never touch a
 //! real `~/.piggy` or `~/.claude`. The M2 install engine mutates real files, so
-//! the override discipline here is a hard safety boundary; see the crate tests,
+//! the override discipline here is a hard safety boundary - see the crate tests,
 //! which point every one of these at a `tempfile::tempdir()`.
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ pub fn piggy_bin_dir() -> PathBuf {
 /// [`piggy_bin_dir`] resolve by *bare name*.
 ///
 /// This is required by savers whose runtime self-invokes by bare name rather
-/// than an absolute path, notably `rtk`, whose `PreToolUse` hook rewrites a
+/// than an absolute path - notably `rtk`, whose `PreToolUse` hook rewrites a
 /// matched command to `rtk <cmd>` (no path). The hook itself is injected with an
 /// absolute path, but that rewrite is not, so `<piggy_bin_dir>` must be on
 /// `PATH` for the rewritten command to run.
@@ -89,9 +89,9 @@ pub fn claude_dir() -> PathBuf {
 
 /// The `claude` CLI executable used for plugin/marketplace steps.
 ///
-/// Resolution order (per docs/m2-spec.md, "locate binary: `which claude`,
+/// Resolution order (per docs/m2-spec.md - "locate binary: `which claude`,
 /// fallback known paths"):
-/// 1. `PIGGY_CLAUDE_BIN` env var (an absolute path to a real or fake shim; tests
+/// 1. `PIGGY_CLAUDE_BIN` env var (an absolute path to a real or fake shim - tests
 ///    point this at a recording shim so no real `claude` is ever invoked);
 /// 2. the first `claude` found on `$PATH` (a `which claude` equivalent);
 /// 3. a set of well-known install locations, for a GUI-launched process whose
@@ -183,7 +183,7 @@ pub fn claude_projects_dir() -> PathBuf {
 /// Codex's home directory (default `~/.codex`).
 ///
 /// Resolution order: `PIGGY_CODEX_DIR` env var, else `~/.codex`. Only ever
-/// read; Piggy never writes under Codex's home.
+/// read - Piggy never writes under Codex's home.
 pub fn codex_dir() -> PathBuf {
     if let Ok(v) = std::env::var("PIGGY_CODEX_DIR") {
         return PathBuf::from(v);
@@ -203,7 +203,7 @@ pub fn codex_sessions_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The XDG-style user config root (default `~/.config`), where some savers
+/// The XDG-style user config root (default `~/.config`) - where some savers
 /// keep their own user configuration (e.g. Caveman's
 /// `~/.config/caveman/config.json`).
 ///
@@ -229,7 +229,7 @@ pub fn claude_settings_path() -> PathBuf {
 }
 
 /// Path to Claude Code's top-level `~/.claude.json` (holds `projects.*` MCP
-/// server configs, a Sweep data source).
+/// server configs - a Sweep data source).
 ///
 /// Resolution order: `PIGGY_CLAUDE_JSON` env var, else `~/.claude.json`. Note
 /// this file is a *sibling* of `claude_dir`, not inside it, so it has its own
@@ -246,7 +246,7 @@ pub fn installed_plugins_path() -> PathBuf {
     claude_dir().join("plugins").join("installed_plugins.json")
 }
 
-/// Directory of standalone user skills (`<claude_dir>/skills`), a Sweep source.
+/// Directory of standalone user skills (`<claude_dir>/skills`) - a Sweep source.
 pub fn claude_skills_dir() -> PathBuf {
     claude_dir().join("skills")
 }

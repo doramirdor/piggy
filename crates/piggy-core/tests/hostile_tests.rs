@@ -9,7 +9,7 @@
 //!
 //! Two flavours of test:
 //!   * pure `Value`-level (load / serialize / merge_hooks / remove_hooks on an
-//!     explicit temp path, no process env), and
+//!     explicit temp path - no process env), and
 //!   * commit-path (the real backup → mutate → atomic-write pipeline), which
 //!     needs `PIGGY_HOME` pointed at a tempdir. Those grab a per-binary env
 //!     lock so they serialise among themselves.
@@ -104,7 +104,7 @@ fn any_file_has_bytes(dir: &Path, needle: &[u8]) -> bool {
 }
 
 // ===========================================================================
-// GROUP A: pure Value-level round-trip attacks (no env)
+// GROUP A - pure Value-level round-trip attacks (no env)
 // ===========================================================================
 
 /// A hostile settings.json whose top level is a JSON *array*, not an object.
@@ -161,7 +161,7 @@ fn a04_huge_integer_survives_round_trip() {
     );
 }
 
-/// A high-precision decimal. Same class as a04: the shortest-round-trip float
+/// A high-precision decimal. Same class as a04 - the shortest-round-trip float
 /// formatter may or may not preserve the exact literal.
 #[test]
 fn a05_high_precision_decimal_survives_round_trip() {
@@ -176,8 +176,8 @@ fn a05_high_precision_decimal_survives_round_trip() {
 }
 
 /// `hooks` present but not an object (an array). load() only checks the *root*
-/// is an object, so this parses; merge_hooks then *replaces* the array wholesale,
-/// silently discarding the user's data. A safe engine preserves it.
+/// is an object, so this parses; merge_hooks then *replaces* the array
+/// wholesale, silently discarding the user's data. A safe engine preserves it.
 #[test]
 fn a06_hooks_as_array_is_not_clobbered_by_merge() {
     let mut v: Value = serde_json::from_str(r#"{"hooks":[{"userData":"keepme"}]}"#).unwrap();
@@ -195,7 +195,7 @@ fn a06_hooks_as_array_is_not_clobbered_by_merge() {
 
 /// A `hooks` object whose event slot is a *string* (malformed). merge_hooks
 /// silently no-ops (the `if let Value::Array` guard fails), so Piggy's hook is
-/// never injected: an install would appear to succeed but do nothing.
+/// never injected - an install would appear to succeed but do nothing.
 #[test]
 fn a07_hook_event_as_string_still_injects_or_reports() {
     let mut v: Value = serde_json::from_str(r#"{"hooks":{"PreToolUse":"oops-a-string"}}"#).unwrap();
@@ -252,7 +252,7 @@ fn a09_matcher_regex_forms_round_trip() {
 
 /// The user already hand-installed rtk with a hook BYTE-IDENTICAL to what Piggy
 /// injects (same absolute path). merge appends a duplicate; remove must take
-/// exactly one and leave the user with a working (identical) hook, never zero,
+/// exactly one and leave the user with a working (identical) hook - never zero,
 /// never both removed.
 #[test]
 fn a10_preexisting_identical_rtk_hook_no_over_removal() {
@@ -313,7 +313,7 @@ fn a12_ten_megabyte_settings_round_trips() {
 }
 
 // ===========================================================================
-// GROUP B: commit-path attacks (real backup → atomic-write pipeline)
+// GROUP B - commit-path attacks (real backup → atomic-write pipeline)
 // ===========================================================================
 
 /// CRLF line endings. A "low diff noise" merge must not rewrite every line's
@@ -337,7 +337,7 @@ fn b01_crlf_line_endings_preserved_on_commit() {
     );
 }
 
-/// BOM + CRLF combined. The BOM must be stripped (good: it corrupts Claude
+/// BOM + CRLF combined. The BOM must be stripped (good - it corrupts Claude
 /// Code), the JSON must parse, and content must survive. (Pairs with b01 on the
 /// CRLF question.)
 #[test]
@@ -405,7 +405,7 @@ fn b03_symlinked_settings_is_written_through_not_replaced() {
 }
 
 /// A read-only (0444) settings.json. The commit should either fail cleanly
-/// (leaving content intact) or succeed, but must never leave a truncated /
+/// (leaving content intact) or succeed - but must never leave a truncated /
 /// corrupt file. Verify the file still parses afterwards.
 #[test]
 #[cfg(unix)]
@@ -434,7 +434,7 @@ fn b04_readonly_settings_not_corrupted() {
 /// TOCTOU: a concurrent writer lands an edit AFTER Piggy has read the file but
 /// BEFORE it writes. The mutate closure runs in exactly that window, so we use
 /// it to simulate the racing write. Piggy's backup captured the *pre-race*
-/// bytes, and its atomic write overwrites the race, so the concurrent content
+/// bytes, and its atomic write overwrites the race - so the concurrent content
 /// exists in neither settings.json nor any backup. The builder's report claims
 /// such an edit is "carried forward, never lost".
 #[test]
@@ -462,7 +462,7 @@ fn b05_concurrent_write_during_commit_is_not_silently_lost() {
     let backed_up = any_file_has_bytes(&sb.backups_dir(), &racing_bytes[..]);
     assert!(
         disk_has_it || backed_up,
-        "the concurrent write ('precious') was lost: not on disk and not in any backup (unrecoverable)"
+        "the concurrent write ('precious') was lost: not on disk and not in any backup - unrecoverable"
     );
 }
 

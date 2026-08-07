@@ -3,7 +3,7 @@
 //! These exercise the parts that read Piggy's path env vars (`PIGGY_HOME`,
 //! `PIGGY_CLAUDE_DIR`, `PIGGY_CLAUDE_JSON`, `PIGGY_CLAUDE_BIN`,
 //! `PIGGY_ASSET_CACHE_DIR`). Because env is process-global, every test here takes
-//! a global lock and points those vars at a fresh tempdir, so nothing ever
+//! a global lock and points those vars at a fresh tempdir - so nothing ever
 //! touches the real `~/.claude` or `~/.piggy`, and the tests are serialized among
 //! themselves while the pure/parser/store test binaries still run in parallel.
 //!
@@ -226,7 +226,7 @@ fn commit_detects_external_change_and_preserves_the_edit() {
 #[test]
 fn backup_only_does_not_rewrite_or_bom_strip_the_file() {
     let sb = Sandbox::new();
-    // BOM'd, compact (non-2-space) settings.json: the pure-plugin case.
+    // BOM'd, compact (non-2-space) settings.json - the pure-plugin case.
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(b"{\"enabledPlugins\":{\"x@y\":true}}");
     sb.seed_settings_bytes(&bytes);
@@ -439,7 +439,7 @@ fn ponytail_install_uninstall_runs_full_step_set() {
     assert_eq!(disk["enabledPlugins"]["ponytail@ponytail"], true);
 
     // Uninstall: run_plugin_script (ignoreFailure) + uninstall + marketplace
-    // remove (ignoreFailure) + verify_no_setting: none should hard-fail.
+    // remove (ignoreFailure) + verify_no_setting - none should hard-fail.
     let un = engine::uninstall(&catalog, "ponytail").unwrap();
     let disk: Value = serde_json::from_slice(&sb.read_settings()).unwrap();
     assert!(disk["enabledPlugins"].get("ponytail@ponytail").is_none());
@@ -485,7 +485,7 @@ fn conflicting_saver_is_auto_disabled_on_install() {
         !state.savers["caveman"].enabled,
         "caveman auto-disabled by the conflicting install"
     );
-    // The plugin stays installed (only disabled): auto-disable is a toggle-off,
+    // The plugin stays installed (only disabled) - auto-disable is a toggle-off,
     // not an uninstall.
     assert!(state.is_installed("caveman"));
 
@@ -531,7 +531,7 @@ fn headroom_installs_venv_and_launcher_then_uninstalls_clean() {
     assert!(venv.join("bin/headroom").exists(), "venv headroom present");
     assert!(launcher.exists(), "launcher written");
 
-    // The launcher execs the venv headroom binary with `wrap claude`, no global
+    // The launcher execs the venv headroom binary with `wrap claude` - no global
     // ANTHROPIC_BASE_URL, no daemon: compression is scoped to this command.
     let script = std::fs::read_to_string(&launcher).unwrap();
     assert!(script.contains("venvs/headroom/bin/headroom"));
@@ -597,7 +597,7 @@ fn headroom_auto_disables_rtk_and_shares_the_path_line() {
     assert!(!state.savers["rtk"].enabled, "rtk auto-disabled");
     assert!(state.is_installed("rtk"), "rtk kept installed (just off)");
 
-    // Uninstalling headroom KEEPS the shared PATH line: rtk still needs it.
+    // Uninstalling headroom KEEPS the shared PATH line - rtk still needs it.
     engine::uninstall(&catalog, "headroom").unwrap();
     let profile = std::fs::read_to_string(sb.root().join("zshrc")).unwrap();
     assert!(
@@ -746,8 +746,8 @@ fn toggle_on_heals_ledger_when_plugin_already_enabled_in_settings() {
     );
 }
 
-/// A genuine `claude plugin disable` failure (one that leaves reality NOT
-/// matching the request) must still propagate as an error, and must not falsely
+/// A genuine `claude plugin disable` failure - one that leaves reality NOT
+/// matching the request - must still propagate as an error, and must not falsely
 /// heal Piggy's ledger to disabled.
 #[test]
 fn genuine_plugin_disable_failure_propagates_and_keeps_ledger() {
@@ -760,7 +760,7 @@ fn genuine_plugin_disable_failure_propagates_and_keeps_ledger() {
     assert!(PiggyState::load().unwrap().savers["caveman"].enabled);
 
     // Settings still show the plugin enabled (normal state), so the drift-tolerant
-    // helper actually runs the CLI, which we force to fail with no side effects.
+    // helper actually runs the CLI - which we force to fail with no side effects.
     std::env::set_var("PIGGY_SHIM_FAIL", "plugin disable caveman@caveman");
     let res = engine::set_enabled(&catalog, "caveman", false);
     std::env::remove_var("PIGGY_SHIM_FAIL");
@@ -832,7 +832,7 @@ fn restore_defaults_returns_settings_to_pre_piggy() {
     assert!(PiggyState::load().unwrap().savers.is_empty());
 }
 
-/// Restore Defaults overwrites settings.json with the pre-Piggy snapshot, but a
+/// Restore Defaults overwrites settings.json with the pre-Piggy snapshot - but a
 /// user edit made *after* Piggy's last write must be backed up first, never
 /// silently destroyed (the panic button is not allowed to be the one thing that
 /// loses data).
@@ -866,7 +866,7 @@ fn restore_defaults_backs_up_a_post_install_user_edit() {
     // The destroyed edit is recoverable from a backup.
     assert!(
         any_backup_contains(&piggy_core::config::backups_dir(), b"precious"),
-        "the post-install user edit was overwritten with no backup: unrecoverable"
+        "the post-install user edit was overwritten with no backup - unrecoverable"
     );
 }
 
@@ -907,7 +907,7 @@ fn prune_keeps_an_installed_savers_pre_install_backup() {
 }
 
 /// Turning a saver ON via the fast toggle must honour `conflictsWith` the same
-/// way a fresh install does (auto-disabling the conflicting saver), otherwise
+/// way a fresh install does - auto-disabling the conflicting saver - otherwise
 /// `off A → install B → on A` leaves two mutually-exclusive savers enabled.
 #[test]
 fn toggle_on_auto_disables_a_conflicting_saver() {
@@ -919,7 +919,7 @@ fn toggle_on_auto_disables_a_conflicting_saver() {
     // caveman conflictsWith ponytail (and vice versa).
     engine::install(&catalog, "caveman").unwrap();
     engine::set_enabled(&catalog, "caveman", false).unwrap(); // off, still installed
-    engine::install(&catalog, "ponytail").unwrap(); // caveman already off, no conflict
+    engine::install(&catalog, "ponytail").unwrap(); // caveman already off - no conflict
 
     // Now `on caveman` auto-disables ponytail (it is on and conflicts).
     let report = engine::set_enabled(&catalog, "caveman", true).unwrap();
@@ -1083,10 +1083,9 @@ fn sweep_flags_unused_mcp_server_and_apply_restore_round_trips() {
 
     // Restore everything.
     let mut state = PiggyState::load().unwrap();
-    let restored = sweep::restore_all(&mut state).unwrap();
+    let restored = sweep::restore_all(&mut state).unwrap().restored;
     state.save().unwrap();
-    assert_eq!(restored.restored, 1);
-    assert!(restored.failures.is_empty());
+    assert_eq!(restored, 1);
     let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
     assert_eq!(
         cj["projects"]["/proj"]["mcpServers"]["unusedserver"]["args"],
@@ -1186,6 +1185,64 @@ fn sweep_separates_global_from_single_project_user_scope_servers() {
     assert_eq!(cj["mcpServers"]["deadserver"]["args"], json!(["dead"]));
 }
 
+/// A "scope to <project>" row is advice about where an in-use server lives, not
+/// a removal, so `--apply` on it must refuse rather than delete a server the
+/// user calls all day. Applying the row its own suggestion column labels "scope
+/// to /a" and getting "disabled" back is the failure this guards.
+#[test]
+fn sweep_apply_refuses_to_remove_a_server_that_only_needs_rescoping() {
+    let sb = Sandbox::new();
+    let claude_json = json!({
+        "mcpServers": {
+            "onlyhere": { "command": "npx", "args": ["only"] }
+        },
+        "projects": {},
+        "pluginUsage": {},
+        "skillUsage": {}
+    });
+    std::fs::write(
+        sb.claude_json(),
+        format!("{}\n", serde_json::to_string_pretty(&claude_json).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(sb.settings_path(), "{}\n").unwrap();
+
+    let home = piggy_core::config::piggy_home();
+    let mut store = Store::open(&home).unwrap();
+    seed_session_in_project(
+        &mut store,
+        "s1",
+        "/a",
+        "2026-07-12T10:00:00.000Z",
+        &[("mcp__onlyhere__x", 6)],
+    );
+
+    let report = sweep::scan(&store, 50).unwrap();
+    let only = report.items.iter().find(|i| i.id == "onlyhere").unwrap();
+    assert_eq!(only.scope_to.as_deref(), Some("/a"), "the row says re-scope");
+    assert!(!only.recommend_disable);
+
+    let mut state = PiggyState::load().unwrap();
+    let err = sweep::apply(&store, &mut state, only.idx, 50).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("/a") && msg.contains("re-scoping"),
+        "the refusal names the project to re-add it in: {msg}"
+    );
+
+    // The server is still there to be called, and nothing was recorded as swept.
+    let cj: Value = serde_json::from_slice(&std::fs::read(sb.claude_json()).unwrap()).unwrap();
+    assert_eq!(
+        cj["mcpServers"]["onlyhere"]["args"],
+        json!(["only"]),
+        "an in-use server survives an apply aimed at it"
+    );
+    assert!(
+        PiggyState::load().unwrap().sweep_disabled.is_empty(),
+        "a refused apply records no restore entry"
+    );
+}
+
 /// The snapshot in `state.json` is the only copy of a swept server's config, so a
 /// restore that cannot find the map to write it back into must report failure and
 /// keep the record. Reporting success there would tell the user the server is
@@ -1233,6 +1290,11 @@ fn sweep_restore_fails_when_the_target_map_is_gone() {
     );
     assert_eq!(outcome.failures.len(), 1, "the failure is reported");
     assert_eq!(outcome.failures[0].id, "deadserver");
+    assert!(
+        outcome.failures[0].reason.contains("mcpServers"),
+        "the reason names the missing key: {}",
+        outcome.failures[0].reason
+    );
     state.save().unwrap();
 
     let kept = PiggyState::load().unwrap();
@@ -1277,7 +1339,7 @@ fn sweep_surfaces_user_hooks_as_informational() {
         .expect("the user's hook is surfaced by sweep");
     assert!(
         !hook.recommend_disable,
-        "hooks are informational, never auto-recommended for removal"
+        "hooks are informational - never auto-recommended for removal"
     );
     assert_eq!(
         hook.est_tokens, 0,
@@ -1371,7 +1433,7 @@ fn real_skill_bytes() -> Vec<u8> {
 }
 
 /// The whole saver is one file, so the lifecycle *is* that file: pinned bytes in,
-/// parked on off, back on on, gone on uninstall, and `settings.json` untouched
+/// parked on off, back on on, gone on uninstall - and `settings.json` untouched
 /// throughout (a skill saver has no hooks and no plugin ledger).
 #[test]
 fn nadir_route_installs_toggles_and_uninstalls_as_a_single_file() {
@@ -1399,7 +1461,7 @@ fn nadir_route_installs_toggles_and_uninstalls_as_a_single_file() {
     );
     assert!(engine::health_check(&catalog, "nadir-route").unwrap().ok());
 
-    // Off: the file is parked, so Claude Code stops loading the directory,
+    // Off: the file is parked, so Claude Code stops loading the directory -
     // and health reads not-armed, like a hook saver with its hooks removed.
     engine::set_enabled(&catalog, "nadir-route", false).unwrap();
     assert!(!skill.exists(), "SKILL.md parked while off");
@@ -1424,7 +1486,7 @@ fn nadir_route_installs_toggles_and_uninstalls_as_a_single_file() {
 }
 
 /// The skill is instructions Claude will follow, fetched from an unversioned
-/// URL, so the catalog hash is the only thing standing between an edited
+/// URL - so the catalog hash is the only thing standing between an edited
 /// upstream file and the user's `~/.claude`. A mismatch must abort.
 #[test]
 fn nadir_route_refuses_a_skill_whose_bytes_changed_upstream() {
@@ -1473,7 +1535,7 @@ fn uninstalling_a_skill_saver_keeps_a_users_own_file_in_the_directory() {
 
 /// Sweep parks unused skills. A skill a saver installed is managed by that
 /// saver's own on/off, so sweeping it would leave the two disagreeing about a
-/// file only one of them moved: it is skipped entirely.
+/// file only one of them moved - it is skipped entirely.
 #[test]
 fn sweep_leaves_a_piggy_installed_skill_alone() {
     let sb = Sandbox::new();

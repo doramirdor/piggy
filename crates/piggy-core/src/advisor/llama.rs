@@ -39,6 +39,33 @@
 //! returns prose instead of JSON now yields zero annotations instead of a
 //! SIGABRT, and zero annotations is a state the UI already handles.
 //!
+//! ### What changed upstream, and what did not (checked for M5.4)
+//!
+//! Half of the warning above is now out of date and half of it is still exactly
+//! right, which is why it stays. The pinned `llama-cpp-2 0.1.153` does expose
+//! the grammar API (`LlamaSampler::grammar`, `json_schema_to_grammar`, both
+//! under the `common` feature, which is on by default), and two of the three
+//! failure modes are fixed: a mid-generation rejection now **throws** instead of
+//! aborting (`llama-grammar.cpp:1503-1508`), and the sys crate catches it and
+//! surfaces it as `Err` from `LlamaSampler::try_accept`.
+//!
+//! The third is not fixed, and it cannot be worked around through the API this
+//! file uses. `llama_sampler_sample` (`llama.cpp/src/llama-sampler.cpp:870`)
+//! calls `llama_sampler_accept` **directly in C++**, inside the same function
+//! that picks the token, and that internal accept is not the try/catch-wrapped
+//! entry point the sys crate exposes. So with a grammar in the chain the token
+//! is accepted before Rust regains control, the end-of-generation check below is
+//! one frame too late to help, and `llama-grammar.cpp:1428-1435` is still a
+//! `GGML_ABORT` when an end-of-generation token is accepted into a grammar that
+//! is not in an accepting state. `GGML_ABORT` is not a C++ exception.
+//!
+//! Using a grammar safely would mean abandoning [`LlamaSampler::sample`] for a
+//! manual `token_data_array` plus `apply_sampler` plus greedy pick plus our own
+//! end-of-generation check plus `try_accept` loop: a rewrite of the single code
+//! path that must never crash, to gain a constraint on shape that
+//! [`super::guard`] already enforces on shape *and* on truth. The grammar text
+//! and that protocol are kept in [`super::prompts`] behind `GRAMMAR`, off.
+//!
 //! Every failure path returns `Err`, and every caller renders the deterministic
 //! findings regardless. The advisor is never load-bearing.
 
@@ -54,8 +81,10 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
+use super::draft;
 use super::facts::Facts;
-use super::guard::{self, Annotation};
+use super::guard::{self, Annotation, Suggestion};
+use super::prompts;
 use super::AdvisorModel;
 
 /// Hard ceiling on generated tokens.
@@ -69,10 +98,118 @@ const MAX_TOKENS: usize = 768;
 /// annotations, so generation is abandoned rather than awaited.
 const DEADLINE: Duration = Duration::from_secs(20);
 
+/// Which of a model's two windows a call runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Window {
+    /// [`AdvisorModel::ctx`]: the cheap window the popover passes answer in.
+    Popover,
+    /// [`AdvisorModel::advice_ctx`]: 16,384, which is what the advice sheet and
+    /// a whole CLAUDE.md need.
+    Advice,
+}
+
+/// How many cores a call may take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadShare {
+    /// Everything but two. Today's behaviour, and the popover passes keep it
+    /// exactly: someone is watching that spinner.
+    LeaveTwo,
+    /// Half the machine, capped. The advice pass runs in the background while
+    /// the user is working, and a background pass that fights their editor for
+    /// CPU is worse than one that takes twice as long.
+    Half,
+}
+
+impl ThreadShare {
+    fn count(self) -> i32 {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        match self {
+            ThreadShare::LeaveTwo => cores.saturating_sub(2).clamp(1, 8) as i32,
+            ThreadShare::Half => (cores / 2).clamp(1, 4) as i32,
+        }
+    }
+}
+
+/// What one call is allowed to spend.
+#[derive(Debug, Clone, Copy)]
+struct Budget {
+    window: Window,
+    max_tokens: usize,
+    deadline: Duration,
+    threads: ThreadShare,
+}
+
+/// The two M4 popover passes. Unchanged, deliberately: they answer while someone
+/// waits, and nothing in M5.4 is a reason to make them slower or greedier.
+const ANNOTATE: Budget = Budget {
+    window: Window::Popover,
+    max_tokens: MAX_TOKENS,
+    deadline: DEADLINE,
+    threads: ThreadShare::LeaveTwo,
+};
+
+/// The rank pass.
+///
+/// 1,024 generated tokens is the spec's figure and it is the right one here:
+/// eight picks at 280 characters plus the JSON around them is comfortably under
+/// it. The deadline is not a latency budget - this runs on a background worker
+/// whose result lands in a cache, so abandoning at 20 seconds would mean a
+/// machine that never once produces advice. It is a guard against a wedged
+/// generation, and 90 seconds is generous on purpose.
+const SUGGEST: Budget = Budget {
+    window: Window::Advice,
+    max_tokens: 1_024,
+    deadline: Duration::from_secs(90),
+    threads: ThreadShare::Half,
+};
+
+/// Input tokens one drafting call sends.
+///
+/// docs/m5-spec.md says 12,000, which predates the arithmetic: a rewrite is the
+/// same file again, so a 12,000-token input needs nearly 12,000 tokens of output
+/// and 24,000 does not fit a 16,384-token window at all. 6,000 is close to the
+/// largest cap that leaves room to write the answer back, and a file over it is
+/// split on its `##` headings, which is the mechanism the spec already provides
+/// for exactly this.
+pub const DRAFT_INPUT_CAP_TOKENS: usize = 6_000;
+
+/// The drafting pass. Same window, same deadline, same share as the rank pass;
+/// only the token ceiling differs, and it is computed per call from the length
+/// of the file being rewritten.
+const DRAFT: Budget = SUGGEST;
+
+/// The one line attempt two adds.
+const RETRY_NOTE: &str = "Your previous answer was not valid JSON. Return only \
+the JSON object, starting with { and ending with }, and nothing before or after \
+it.";
+
+/// When a generation stops, apart from end-of-generation, the token ceiling and
+/// the deadline.
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    /// The top-level bracket depth returned to zero: the JSON closed. Small
+    /// models happily keep writing commentary after it, and every token of that
+    /// is latency.
+    Json,
+    /// The emitted text contains this marker. The bracket tracker is useless for
+    /// a draft: a markdown file full of code fences would trip it on the first
+    /// one.
+    Sentinel(&'static str),
+}
+
+/// Slack over the source's own token count for one drafting call's ceiling.
+///
+/// A draft has to come out at least a tenth smaller than its source, so the
+/// source's length is the ceiling and this is only room for the closing marker
+/// and for the draft tokenizing slightly worse than the original did.
+const DRAFT_TOKEN_MARGIN: usize = 256;
+
 /// llama.cpp's backend is process-global and must be initialised exactly once.
 static BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = OnceLock::new();
 
-fn backend() -> Result<&'static LlamaBackend> {
+pub(crate) fn backend() -> Result<&'static LlamaBackend> {
     BACKEND
         .get_or_init(|| {
             // Quiet: llama.cpp logs load progress to stderr by default, which
@@ -82,6 +219,20 @@ fn backend() -> Result<&'static LlamaBackend> {
         })
         .as_ref()
         .map_err(|e| anyhow::anyhow!("could not start the local model backend: {e}"))
+}
+
+/// Whether a prompt of `prompt_tokens` leaves room to answer in a `ctx_size`
+/// window.
+///
+/// The reserve is generation's real ceiling, not a token or two of slack. The KV
+/// cache holds exactly `ctx_size` entries and [`Advisor::generate`] walks `pos`
+/// forward once per generated token, so a sheet that clears a smaller reserve
+/// passes the pre-flight and then dies inside the loop: `ctx.decode` runs out of
+/// slots, `generate` returns `Err`, and every annotation already written is
+/// discarded with it. Rejecting up front is what makes the bail report the real
+/// cause instead of "generating".
+fn fits_context(prompt_tokens: usize, ctx_size: u32, max_tokens: usize) -> bool {
+    prompt_tokens + max_tokens < ctx_size as usize
 }
 
 /// A loaded model, kept alive across queries.
@@ -139,7 +290,11 @@ impl Advisor {
     /// prose instead of JSON" are indistinguishable from an empty list. Never
     /// render this. It is the text that has not been checked yet.
     pub fn annotate_raw(&self, facts: &Facts) -> Result<String> {
-        self.generate(&self.prompt(facts, SYSTEM, USER_PREAMBLE)?)
+        self.generate(
+            &self.prompt(&facts.prompt_json(), SYSTEM, USER_PREAMBLE)?,
+            ANNOTATE,
+            Stop::Json,
+        )
     }
 
     /// Turn the per-saver measurements into advice.
@@ -160,7 +315,157 @@ impl Advisor {
     /// The saver pass's unfiltered output. Diagnostics only, exactly as
     /// [`Self::annotate_raw`]: never rendered.
     pub fn explain_savers_raw(&self, facts: &Facts) -> Result<String> {
-        self.generate(&self.prompt(facts, SAVER_SYSTEM, &saver_preamble())?)
+        self.generate(
+            &self.prompt(&facts.prompt_json(), SAVER_SYSTEM, &saver_preamble())?,
+            ANNOTATE,
+            Stop::Json,
+        )
+    }
+
+    /// Rank and explain the candidates in `facts`.
+    ///
+    /// Returns only what survived [`guard::accept_suggestion`]. An empty
+    /// [`Suggestion`] is a normal outcome and means the UI renders the
+    /// deterministic order with house copy, which is the fallback the spec
+    /// requires.
+    ///
+    /// One bounded retry, and only when the response did not parse as an object
+    /// at all. Never a retry because picks were dropped: a dropped pick is the
+    /// guard working, and asking again invites a second answer aimed at getting
+    /// past it.
+    pub fn suggest(&self, facts: &Facts) -> Result<Suggestion> {
+        if facts.candidate_ids.is_empty() {
+            return Ok(Suggestion::default());
+        }
+        let first = match guard::accept_suggestion(&self.suggest_raw(facts)?, facts) {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
+        eprintln!("piggy: the advisor's ranking did not parse, asking once more: {first}");
+
+        // Attempt two differs from attempt one by one line, which is the point:
+        // same sheet, same greedy sampler, one more instruction about the shape.
+        let preamble = format!("{}\n\n{RETRY_NOTE}", prompts::suggest_preamble());
+        let retry = self.prompt(&facts.prompt_json(), prompts::SUGGEST_SYSTEM, &preamble)?;
+        match guard::accept_suggestion(&self.generate(&retry, SUGGEST, Stop::Json)?, facts) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                // Two failures is not an error the user sees. The deterministic
+                // order with house copy is a complete product.
+                eprintln!("piggy: the advisor's ranking did not parse twice, using the deterministic order: {e}");
+                Ok(Suggestion::default())
+            }
+        }
+    }
+
+    /// The rank pass's unfiltered output. Diagnostics only, exactly as
+    /// [`Self::annotate_raw`]: never rendered.
+    pub fn suggest_raw(&self, facts: &Facts) -> Result<String> {
+        self.generate(
+            &self.prompt(&facts.prompt_json(), prompts::SUGGEST_SYSTEM, &prompts::suggest_preamble())?,
+            SUGGEST,
+            Stop::Json,
+        )
+    }
+
+    /// Draft a shorter replacement for one CLAUDE.md.
+    ///
+    /// `label` is the file's display name (`"Stacked's CLAUDE.md"`). It goes in
+    /// the prompt so the model knows what it is editing and is never trusted
+    /// back: nothing the model returns is read as a path.
+    ///
+    /// `original` is [`crate::claudemd::FileText::text`], BOM already stripped.
+    ///
+    /// `Ok(None)` means nothing survived [`draft::accept_draft`], which demotes
+    /// the candidate to deterministic presentation rather than failing the pass.
+    /// The reject is logged, because a silently absent draft and a rejected one
+    /// are indistinguishable from the outside.
+    pub fn draft(&self, label: &str, original: &str) -> Result<Option<String>> {
+        let joined = match self.draft_body(label, original)? {
+            Some(j) => j,
+            None => return Ok(None),
+        };
+        match draft::accept_joined(original, &joined) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) => {
+                eprintln!("piggy: the drafted rewrite of {label} was refused: {}", e.reason());
+                Ok(None)
+            }
+        }
+    }
+
+    /// The draft before the whole-file checks: one call, or one per section.
+    fn draft_body(&self, label: &str, original: &str) -> Result<Option<String>> {
+        let tokens = |s: &str| self.token_count(s);
+        if tokens(original) <= DRAFT_INPUT_CAP_TOKENS {
+            return Ok(Some(self.draft_once(label, original)?));
+        }
+
+        let sections = draft::split_sections(original, DRAFT_INPUT_CAP_TOKENS, &tokens);
+        // One section and it is over the cap: there is nothing to split on, so
+        // there is no draft to make.
+        if sections.len() < 2 {
+            eprintln!("piggy: {label} is over the drafting cap and has no `##` sections to split on");
+            return Ok(None);
+        }
+
+        let mut out = String::new();
+        for section in &sections {
+            // A section that is enormous on its own is passed through verbatim.
+            // Failing the whole file for it would throw away the shrink
+            // available everywhere else, and a pass-through shows in the diff as
+            // exactly what it is.
+            if section.too_large {
+                out.push_str(&section.text);
+                continue;
+            }
+            let named = match &section.heading {
+                Some(h) => format!("{label}, section: {h}"),
+                None => label.to_string(),
+            };
+            let raw = self.draft_once(&named, &section.text)?;
+            // A section that fails its own checks is replaced by its source, not
+            // dropped: the user's guidance is not ours to delete because a model
+            // wrote something we would not print.
+            match draft::check_draft_content(&section.text, &raw) {
+                Ok(text) => out.push_str(&text),
+                Err(e) => {
+                    eprintln!("piggy: a section of {label} was refused: {}", e.reason());
+                    out.push_str(&section.text);
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// One drafting call, returning the raw text between (and including) the
+    /// markers.
+    fn draft_once(&self, label: &str, source: &str) -> Result<String> {
+        let lines = source.lines().count();
+        let preamble = prompts::draft_preamble(label, lines, prompts::draft_target_lines(lines));
+        let prompt = self.prompt(source, prompts::DRAFT_SYSTEM, &preamble)?;
+        // The ceiling is the source's own length: a draft that has to come out
+        // smaller has no business being longer, and a fixed ceiling would either
+        // cut off a large file or reserve a window a small one never uses.
+        let budget = Budget {
+            max_tokens: self.token_count(source) + DRAFT_TOKEN_MARGIN,
+            ..DRAFT
+        };
+        self.generate(&prompt, budget, Stop::Sentinel(prompts::DRAFT_CLOSE))
+    }
+
+    /// The drafting call's unfiltered output. Diagnostics only.
+    pub fn draft_raw(&self, label: &str, source: &str) -> Result<String> {
+        self.draft_once(label, source)
+    }
+
+    /// How many tokens `text` is to this model. Falls back to a byte estimate
+    /// only for input `str_to_token` refuses, which serialized text never is.
+    fn token_count(&self, text: &str) -> usize {
+        self.model
+            .str_to_token(text, AddBos::Never)
+            .map(|t| t.len())
+            .unwrap_or_else(|_| text.len() / 3)
     }
 
     /// Build the prompt through the model's own chat template.
@@ -168,11 +473,11 @@ impl Advisor {
     /// Falling back to a bare concatenation is deliberate: a GGUF without an
     /// embedded template still produces usable output, and refusing to run would
     /// be a worse trade than a slightly off prompt format.
-    fn prompt(&self, facts: &Facts, system: &str, preamble: &str) -> Result<String> {
+    fn prompt(&self, data: &str, system: &str, preamble: &str) -> Result<String> {
         // Instructions AFTER the data. The fact sheet is a couple of thousand
         // tokens of dense JSON, and a small model that read the task first has
         // effectively forgotten it by the time it reaches the end.
-        let user = format!("{}\n\n{preamble}", facts.prompt_json());
+        let user = format!("{data}\n\n{preamble}");
         let plain = format!("{system}\n\n{user}\n\n");
 
         let Ok(tmpl) = self.model.chat_template(None) else {
@@ -189,17 +494,13 @@ impl Advisor {
     }
 
     /// Greedy generation with a token and time ceiling.
-    fn generate(&self, prompt: &str) -> Result<String> {
+    fn generate(&self, prompt: &str, budget: Budget, stop: Stop) -> Result<String> {
         let backend = backend()?;
-        let ctx_size = self.spec.ctx;
-
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            // Leave the machine responsive. This runs behind a menu bar popover,
-            // not on a batch box.
-            .saturating_sub(2)
-            .clamp(1, 8) as i32;
+        let ctx_size = match budget.window {
+            Window::Popover => self.spec.ctx,
+            Window::Advice => self.spec.advice_ctx,
+        };
+        let threads = budget.threads.count();
 
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(ctx_size))
@@ -220,10 +521,12 @@ impl Advisor {
             .model
             .str_to_token(prompt, AddBos::Always)
             .context("tokenizing the fact sheet")?;
-        if tokens.len() + 64 >= ctx_size as usize {
+        if !fits_context(tokens.len(), ctx_size, budget.max_tokens) {
             anyhow::bail!(
-                "the fact sheet is {} tokens, too large for this model's {ctx_size}-token window",
-                tokens.len()
+                "the prompt is {} tokens and the answer needs {}, too large for \
+                 this model's {ctx_size}-token window",
+                tokens.len(),
+                budget.max_tokens
             );
         }
 
@@ -253,46 +556,65 @@ impl Advisor {
         let mut in_string = false;
         let mut escaped = false;
 
-        for _ in 0..MAX_TOKENS {
-            if started.elapsed() > DEADLINE {
-                anyhow::bail!("the local model did not finish within {DEADLINE:?}");
+        for _ in 0..budget.max_tokens {
+            if started.elapsed() > budget.deadline {
+                let d = budget.deadline;
+                anyhow::bail!("the local model did not finish within {d:?}");
             }
             let token = sampler.sample(&ctx, -1);
 
-            // EOG before accept. Harmless for a greedy sampler, but kept as the
-            // correct order: it is what a stateful sampler requires, and the
-            // module docs record what accepting EOG into one cost us.
+            // End-of-generation before anything else. `sample()` has already
+            // accepted this token inside C++ (llama-sampler.cpp:870), which is
+            // harmless for a greedy sampler and is exactly why a grammar cannot
+            // be driven through it: see the module doc.
             if self.model.is_eog_token(token) {
                 break;
             }
-            sampler.accept(token);
             let piece = self.model.token_to_piece(token, &mut decoder, false, None)?;
             out.push_str(&piece);
 
-            // Track depth outside string literals, so a bracket inside a
-            // headline cannot end generation early.
-            for c in piece.chars() {
-                if in_string {
-                    match c {
-                        _ if escaped => escaped = false,
-                        '\\' => escaped = true,
-                        '"' => in_string = false,
-                        _ => {}
+            match stop {
+                Stop::Json => {
+                    // Track depth outside string literals, so a bracket inside a
+                    // headline cannot end generation early.
+                    for c in piece.chars() {
+                        if in_string {
+                            match c {
+                                _ if escaped => escaped = false,
+                                '\\' => escaped = true,
+                                '"' => in_string = false,
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        match c {
+                            '"' => in_string = true,
+                            '[' | '{' => {
+                                depth += 1;
+                                opened = true;
+                            }
+                            ']' | '}' => depth -= 1,
+                            _ => {}
+                        }
                     }
-                    continue;
-                }
-                match c {
-                    '"' => in_string = true,
-                    '[' | '{' => {
-                        depth += 1;
-                        opened = true;
+                    if opened && depth <= 0 {
+                        break;
                     }
-                    ']' | '}' => depth -= 1,
-                    _ => {}
                 }
-            }
-            if opened && depth <= 0 {
-                break;
+                // A marker can straddle a token boundary, so the test is on the
+                // whole emitted text and not on the piece.
+                Stop::Sentinel(marker) => {
+                    // Only the tail can hold a marker that just completed, and
+                    // `out` grows to the size of a whole file: rescanning all of
+                    // it once per token is quadratic for nothing.
+                    let mut at = out.len().saturating_sub(marker.len() + piece.len());
+                    while at > 0 && !out.is_char_boundary(at) {
+                        at -= 1;
+                    }
+                    if out[at..].contains(marker) {
+                        break;
+                    }
+                }
             }
 
             batch.clear();
@@ -466,6 +788,49 @@ mod tests {
         assert!(
             prompt.contains(guard::EXAMPLE_WHY),
             "guard's needle `why` is not in the prompt: {prompt}"
+        );
+    }
+
+    /// The pre-flight has to reserve what generation actually spends.
+    ///
+    /// A sheet that fits the window but not the answer used to clear a 64-token
+    /// reserve and then die at `ctx.decode` a few dozen tokens in, throwing away
+    /// the annotations written up to that point and reporting "generating" in
+    /// place of the size that caused it. Asserted here rather than in `tests/`
+    /// because reaching the check through [`Advisor::generate`] needs weights.
+    #[test]
+    fn the_preflight_reserves_the_whole_generation_budget() {
+        // The catalog's smallest window, at the popover budget.
+        let ctx = 4096u32;
+        // What the old 64-token reserve let through.
+        assert!(!fits_context(ctx as usize - 65, ctx, MAX_TOKENS));
+        assert!(!fits_context(ctx as usize - MAX_TOKENS, ctx, MAX_TOKENS));
+        assert!(fits_context(ctx as usize - MAX_TOKENS - 1, ctx, MAX_TOKENS));
+
+        // And the advice window at its own ceiling, so both budgets are pinned
+        // and neither can drift into the other's reserve.
+        let ctx = super::super::ADVICE_CTX;
+        let max = SUGGEST.max_tokens;
+        assert!(!fits_context(ctx as usize - max, ctx, max));
+        assert!(fits_context(ctx as usize - max - 1, ctx, max));
+    }
+
+    /// A drafting call has to be able to write the file back.
+    ///
+    /// The cap and the window are two halves of one arithmetic: a rewrite is the
+    /// same file again, so the call spends its input twice. This is the check
+    /// that catches someone raising the cap to the spec's 12,000 without raising
+    /// the window, which would make every draft over ~4k tokens unrunnable.
+    #[test]
+    fn a_draft_of_a_capped_file_fits_the_advice_window() {
+        let ctx = super::super::ADVICE_CTX;
+        let cap = DRAFT_INPUT_CAP_TOKENS;
+        // Room for the system prompt and the preamble on top of the file.
+        let prompt = cap + 512;
+        let answer = cap + DRAFT_TOKEN_MARGIN;
+        assert!(
+            fits_context(prompt, ctx, answer),
+            "a {cap}-token file needs {prompt} in and {answer} out, over the {ctx} window"
         );
     }
 }

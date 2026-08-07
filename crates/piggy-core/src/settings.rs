@@ -1,4 +1,4 @@
-//! The `settings.json` merge engine, Piggy's single write path into Claude
+//! The `settings.json` merge engine - Piggy's single write path into Claude
 //! Code's configuration.
 //!
 //! Design goals (from `docs/m2-spec.md`), in priority order:
@@ -15,14 +15,14 @@
 //!    user hooks (this machine's `openbar` hooks) are invisible to removal.
 //! 3. **Byte-identical restore.** After a structural removal, if the result is
 //!    value-equal to the pre-install backup, Piggy writes the backup's *exact
-//!    bytes*, so an install→uninstall round-trip leaves `settings.json`
+//!    bytes* - so an install→uninstall round-trip leaves `settings.json`
 //!    byte-for-byte as it started.
 //! 4. **Low diff noise.** 2-space indent (Claude Code's own format), preserved
 //!    trailing newline, preserved CRLF/LF line-ending style, preserved unknown
 //!    top-level keys and their order, and exact round-tripping of unknown numeric
 //!    config (via serde_json `arbitrary_precision`).
 //! 5. **Robust I/O.** Missing file (treated as `{}`), empty file, a UTF-8 BOM
-//!    (stripped with a warning: a real corruption seen from another optimizer),
+//!    (stripped with a warning - a real corruption seen from another optimizer),
 //!    atomic temp-file+rename with preserved permissions, and symlinked
 //!    `settings.json` (written *through* the link, keeping dotfiles setups intact).
 
@@ -85,7 +85,7 @@ impl LoadedSettings {
 ///
 /// A missing file yields `{}` with `existed=false` and a trailing newline (so a
 /// freshly created file matches Claude Code's own writer). A present but
-/// unparseable file is a hard error: Piggy refuses to overwrite data it cannot
+/// unparseable file is a hard error - Piggy refuses to overwrite data it cannot
 /// understand.
 pub fn load(path: &Path) -> Result<LoadedSettings> {
     if !path.exists() {
@@ -173,14 +173,14 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 ///
 /// Malformed-but-present input is never silently clobbered:
 /// * If `value["hooks"]` exists and is **not an object** (e.g. a user hand-wrote
-///   `"hooks": []`), it is the user's data. Piggy leaves it exactly as-is and
+///   `"hooks": []`), it is the user's data - Piggy leaves it exactly as-is and
 ///   injects nothing. The post-install `hook_present` health check then fails and
 ///   the install rolls back cleanly, rather than Piggy destroying the value.
 /// * If a specific event slot (`hooks[event]`) is present but not an array, it is
 ///   malformed for Claude Code; Piggy replaces it with a fresh array so its hook
 ///   is actually installed (never a silent no-op that reports success).
 ///
-/// Returns the exact objects actually inserted, per event: the caller records
+/// Returns the exact objects actually inserted, per event - the caller records
 /// **this** (not the requested set) so state can never claim a hook was injected
 /// when it was not.
 pub fn merge_hooks(value: &mut Value, hooks: &Map<String, Value>) -> Map<String, Value> {
@@ -203,7 +203,7 @@ pub fn merge_hooks(value: &mut Value, hooks: &Map<String, Value>) -> Map<String,
         let slot = hooks_map
             .entry(event.clone())
             .or_insert_with(|| Value::Array(Vec::new()));
-        // A non-array event slot is malformed: replace it so the injection is
+        // A non-array event slot is malformed - replace it so the injection is
         // real rather than a silent no-op.
         if !slot.is_array() {
             *slot = Value::Array(Vec::new());
@@ -227,7 +227,7 @@ pub fn merge_hooks(value: &mut Value, hooks: &Map<String, Value>) -> Map<String,
 /// For each event, each injected group is matched by **value equality** against
 /// the current array and the first match is removed (object comparison is
 /// key-order-independent; user hooks with different content never match). Arrays
-/// emptied by removal (and a `hooks` object emptied of all events) are pruned,
+/// emptied by removal - and a `hooks` object emptied of all events - are pruned,
 /// leaving no Piggy residue.
 ///
 /// Returns the number of groups actually removed (for reporting; a mismatch
@@ -332,7 +332,7 @@ pub struct CommitOutcome {
 /// Apply `mutate` to the current on-disk `settings.json` and commit it.
 ///
 /// This is the single entry point for all Piggy writes. Steps:
-/// 1. Load current bytes (fresh, so external edits are preserved).
+/// 1. Load current bytes (fresh - so external edits are preserved).
 /// 2. Detect an external change vs `state.settings_hash` (warn only).
 /// 3. Back up current bytes (timestamped; seed `pre-piggy.json` once).
 /// 4. Run `mutate` on the freshly-loaded value.
@@ -380,8 +380,8 @@ where
     mutate(&mut new_value);
 
     // Concurrent-write guard (TOCTOU): if the on-disk bytes changed between our
-    // initial read and now (a racing editor or Claude Code save landing while we
-    // computed the new value), snapshot that raced content into a backup *before*
+    // initial read and now - a racing editor or Claude Code save landing while we
+    // computed the new value - snapshot that raced content into a backup *before*
     // our atomic write overwrites it. Without this the racing edit would be in
     // neither settings.json nor any backup. We cannot merge it (we already ran
     // `mutate`), but it is now always recoverable rather than silently lost.
@@ -428,7 +428,7 @@ where
 /// timestamped backup path (None if there is nothing on disk).
 pub fn backup_only(path: &Path, reason: &str, state: &mut PiggyState) -> Result<Option<PathBuf>> {
     if !path.exists() {
-        // Still (potentially) seeds nothing: there was no file before Piggy.
+        // Still (potentially) seeds nothing - there was no file before Piggy.
         return Ok(None);
     }
     let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -513,7 +513,7 @@ fn unique_backup_path(dir: &Path) -> PathBuf {
 /// Keep only the most recent [`MAX_TIMESTAMPED_BACKUPS`] `settings-*.json` files.
 /// `pre-piggy.json` is never counted or removed, and any timestamped backup that
 /// is a currently-installed saver's `pre_install_backup` (its byte-identical
-/// uninstall target) is protected. Otherwise a busy machine could prune it and
+/// uninstall target) is protected - otherwise a busy machine could prune it and
 /// silently downgrade that saver's later uninstall to a structural removal.
 fn prune_backups(dir: &Path, state: &mut PiggyState) -> Result<()> {
     let protected: std::collections::HashSet<String> = state
@@ -550,7 +550,7 @@ fn prune_backups(dir: &Path, state: &mut PiggyState) -> Result<()> {
 /// If `path` is a **symlink** (e.g. a dotfiles-managed `settings.json` from
 /// stow/chezmoi), the write is directed *through* it: the temp file is created
 /// next to the real target and renamed onto the target, so the symlink stays a
-/// symlink and the tracked dotfiles source is what actually changes, rather than
+/// symlink and the tracked dotfiles source is what actually changes - rather than
 /// the rename replacing the link with a regular file and leaving the source stale.
 fn atomic_write(path: &Path, bytes: &[u8], loaded: &LoadedSettings) -> Result<()> {
     let resolved = resolve_symlink_target(path);

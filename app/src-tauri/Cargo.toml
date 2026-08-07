@@ -3,7 +3,7 @@ name = "piggy-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Piggy — the token piggy bank for Claude Code (menu bar app)."
+description = "Piggy: the token piggy bank for Claude Code (menu bar app)."
 
 [lib]
 # The desktop/mobile entry point lives in the lib so `main.rs` is a thin shim.
@@ -29,6 +29,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.5"
+# One FFI call: `pthread_set_qos_class_self_np`, so the background advice pass
+# runs at the utility quality-of-service class instead of competing with the
+# user's editor. Already in Cargo.lock transitively, so this adds no compilation.
+libc = "0.2"
 
 # Autostart and the updater are desktop-only.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -38,8 +42,13 @@ tauri-plugin-updater = "2"
 [features]
 # This feature is used to produce the Tauri app bundle metadata.
 custom-protocol = ["tauri/custom-protocol"]
-# The local advisor. OFF by default, which is also the shipping default: Piggy's
-# findings are arithmetic and do not need a model. Turning this on links
-# llama.cpp, so it puts cmake and a C++ toolchain on the critical path of the
-# build and adds roughly ten megabytes to the bundle.
+# The local advisor. Off by default and ON in every shipped build: the release
+# workflow and the manual `tauri build` in docs/releasing.md both pass
+# `--features local-llm`, while `cargo test`, clippy and `tauri dev` stay
+# llama-free. A build flag rather than a default feature because it links
+# llama.cpp, which would otherwise put cmake and a C++ toolchain on the critical
+# path of every workspace build, test run and lint.
+#
+# Compiled in is not switched on: the user still opts into a model in Settings,
+# and until weights are downloaded the advisor does nothing (see src/advisor.rs).
 local-llm = ["piggy-core/local-llm", "piggy-core/metal"]

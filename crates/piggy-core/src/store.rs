@@ -19,7 +19,11 @@ use crate::pricing::Pricing;
 // first version anything READS: v6 shipped the table but not the re-index that
 // fills it, so every v6 database in the wild has session rows and no task rows.
 // Bumping past 6 is what gets those databases their one-time re-parse.
-const SCHEMA_VERSION: i64 = 7;
+// 8: M5's three advisor tables (`mcp_manifests`, `claudemd_files`, `advice`).
+// Purely additive - nothing existing is rewritten, and none of the three is
+// filled by the parser: they hold what the probe measured, what the CLAUDE.md
+// scanner inventoried, and the lifecycle of each suggestion.
+const SCHEMA_VERSION: i64 = 8;
 
 /// How a session's saver assignment came to be, stored in `session_savers.source`.
 /// `rotation`/`holdout` are Piggy's A/B scheduler; `manual` is a user toggle;
@@ -49,6 +53,85 @@ impl SaverTag {
     }
 }
 
+/// `mcp_manifests.scope` for a server configured at the top level of
+/// `~/.claude.json` (user scope, loaded by every session). A project-scoped
+/// server stores its project path instead, mirroring
+/// [`crate::sweep::SweepItem::source`] (whose `None` is this same case).
+pub const SCOPE_USER: &str = "";
+
+/// One measured MCP tool-schema manifest, as written by the probe.
+///
+/// `config_hash` is the fingerprint of the server's configured command, args
+/// and env at measurement time: a caller compares it against the current config
+/// and treats a mismatch as "not measured" rather than trusting the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpManifest {
+    /// Server name as it appears in `~/.claude.json`.
+    pub server_key: String,
+    /// The project path the server is configured under, or [`SCOPE_USER`].
+    pub scope: String,
+    pub config_hash: String,
+    pub tool_count: i64,
+    pub schema_bytes: i64,
+    pub schema_tokens: i64,
+    /// Which tokenizer produced `schema_tokens` (the advisor's, or the
+    /// bytes/3.5 fallback), so the UI can label a real count as measured and an
+    /// approximation as estimated.
+    pub tokenizer: String,
+    pub measured_at: String,
+    /// False when the probe could not measure this server; `error` says why.
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// One CLAUDE.md-family file in the inventory. Contents are never stored: only
+/// the size, the estimated token cost, and the hash/mtime that detect a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudemdFile {
+    pub path: String,
+    /// The project this file belongs to, or `None` for the global files under
+    /// `~/.claude`.
+    pub project: Option<String>,
+    pub bytes: i64,
+    pub est_tokens: i64,
+    pub hash: String,
+    pub mtime_ns: i64,
+    pub last_scanned: String,
+}
+
+/// Lifecycle values for [`AdviceRow::status`].
+pub mod advice_status {
+    /// Generated and awaiting the user.
+    pub const OPEN: &str = "open";
+    /// Applied, with `applied_at` and a `restore_ref` for one-click Undo.
+    pub const APPLIED: &str = "applied";
+    /// "Not for me": suppressed for this target until the evidence moves.
+    pub const DISMISSED: &str = "dismissed";
+    /// The evidence it was drafted against changed; never applyable.
+    pub const STALE: &str = "stale";
+}
+
+/// One candidate action and where it got to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdviceRow {
+    /// Stable hash of kind + target + evidence inputs.
+    pub id: String,
+    pub kind: String,
+    pub target: String,
+    pub created_at: String,
+    /// Hash of the facts this candidate was generated from.
+    pub facts_hash: Option<String>,
+    pub est_tokens_month: i64,
+    /// One of [`advice_status`].
+    pub status: String,
+    /// Kind-specific evidence and parameters, serialized by the advice engine.
+    pub payload_json: Option<String>,
+    pub applied_at: Option<String>,
+    /// How to undo the apply (a file-snapshot or sweep record handle).
+    pub restore_ref: Option<String>,
+    pub dismiss_note: Option<String>,
+}
+
 /// Handle to the Piggy SQLite database.
 pub struct Store {
     pub(crate) conn: Connection,
@@ -63,7 +146,7 @@ impl Store {
         conn.execute_batch(
             // busy_timeout lets a concurrent open wait for the background
             // indexer's write lock instead of failing instantly with
-            // SQLITE_BUSY. Otherwise a command-thread open during a heavy
+            // SQLITE_BUSY - otherwise a command-thread open during a heavy
             // reindex errors out and the UI misreads it as "no sessions yet".
             "PRAGMA busy_timeout=5000;
              PRAGMA journal_mode=WAL;
@@ -159,6 +242,54 @@ impl Store {
                 planned_next TEXT,
                 updated_at   TEXT
             );
+            -- One measured MCP tool-schema manifest per (server, scope). The
+            -- `config_hash` stamps what was measured, so a changed
+            -- command/args/env reads as unmeasured rather than quietly
+            -- reporting a stale figure; `ok = 0` rows record a failed probe
+            -- (with its `error`) so a server that cannot be measured is visible
+            -- instead of missing.
+            CREATE TABLE IF NOT EXISTS mcp_manifests (
+                server_key    TEXT NOT NULL,
+                scope         TEXT NOT NULL,
+                config_hash   TEXT NOT NULL,
+                tool_count    INTEGER NOT NULL DEFAULT 0,
+                schema_bytes  INTEGER NOT NULL DEFAULT 0,
+                schema_tokens INTEGER NOT NULL DEFAULT 0,
+                tokenizer     TEXT NOT NULL,
+                measured_at   TEXT NOT NULL,
+                ok            INTEGER NOT NULL DEFAULT 0,
+                error         TEXT,
+                PRIMARY KEY (server_key, scope)
+            );
+            -- Inventory of the CLAUDE.md files loaded into every session, one
+            -- row per file. Sizes and hashes only: contents are read at scan
+            -- time and never stored.
+            CREATE TABLE IF NOT EXISTS claudemd_files (
+                path         TEXT PRIMARY KEY,
+                project      TEXT,
+                bytes        INTEGER NOT NULL DEFAULT 0,
+                est_tokens   INTEGER NOT NULL DEFAULT 0,
+                hash         TEXT NOT NULL,
+                mtime_ns     INTEGER NOT NULL DEFAULT 0,
+                last_scanned TEXT NOT NULL
+            );
+            -- The suggestion ledger: one row per candidate action, carrying its
+            -- lifecycle (open -> applied | dismissed | stale). `id` is a stable
+            -- hash of kind + target + evidence, so regenerating the same
+            -- candidate finds its own row and inherits its history.
+            CREATE TABLE IF NOT EXISTS advice (
+                id               TEXT PRIMARY KEY,
+                kind             TEXT NOT NULL,
+                target           TEXT NOT NULL,
+                created_at       TEXT NOT NULL,
+                facts_hash       TEXT,
+                est_tokens_month INTEGER NOT NULL DEFAULT 0,
+                status           TEXT NOT NULL,
+                payload_json     TEXT,
+                applied_at       TEXT,
+                restore_ref      TEXT,
+                dismiss_note     TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at);
             CREATE INDEX IF NOT EXISTS idx_session_models_model ON session_models(model);
             CREATE INDEX IF NOT EXISTS idx_session_tools_name ON session_tools(tool_name);
@@ -168,7 +299,10 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_tasks_errors ON tasks(n_tool_errors);
             CREATE INDEX IF NOT EXISTS idx_session_savers_saver ON session_savers(saver_id);
             CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
-            CREATE INDEX IF NOT EXISTS idx_session_context_kind ON session_context(kind);",
+            CREATE INDEX IF NOT EXISTS idx_session_context_kind ON session_context(kind);
+            -- The advice surface reads one status at a time (open for the Spend
+            -- section, applied for Undo).
+            CREATE INDEX IF NOT EXISTS idx_advice_status ON advice(status);",
         )?;
         let stored = self.schema_version()?;
         // v3 → v4: sessions grew source/interface/client (multi-tool
@@ -433,7 +567,7 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------
-    // Session tagging (session_savers): M3 ground truth for A/B attribution
+    // Session tagging (session_savers) - M3 ground truth for A/B attribution
     // -----------------------------------------------------------------------
 
     /// Replace the saver-set snapshot for `session_id` with `tags`, atomically.
@@ -561,6 +695,227 @@ impl Store {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // M5 advisor tables (mcp_manifests / claudemd_files / advice)
+    // -----------------------------------------------------------------------
+
+    /// Record (or replace) the manifest measurement for one server+scope.
+    pub fn upsert_mcp_manifest(&mut self, m: &McpManifest) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO mcp_manifests
+               (server_key, scope, config_hash, tool_count, schema_bytes,
+                schema_tokens, tokenizer, measured_at, ok, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                m.server_key,
+                m.scope,
+                m.config_hash,
+                m.tool_count,
+                m.schema_bytes,
+                m.schema_tokens,
+                m.tokenizer,
+                m.measured_at,
+                m.ok as i64,
+                m.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The measurement recorded for `server_key` in `scope`, if any.
+    ///
+    /// Returns whatever was last measured, stale or not: only the caller knows
+    /// the server's *current* config hash, so freshness is its call to make
+    /// (compare [`McpManifest::config_hash`]).
+    pub fn mcp_manifest(&self, server_key: &str, scope: &str) -> Result<Option<McpManifest>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT server_key, scope, config_hash, tool_count, schema_bytes,
+                        schema_tokens, tokenizer, measured_at, ok, error
+                 FROM mcp_manifests WHERE server_key = ?1 AND scope = ?2",
+                params![server_key, scope],
+                mcp_manifest_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Every recorded manifest measurement, in stable (server, scope) order.
+    pub fn mcp_manifests(&self) -> Result<Vec<McpManifest>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT server_key, scope, config_hash, tool_count, schema_bytes,
+                    schema_tokens, tokenizer, measured_at, ok, error
+             FROM mcp_manifests ORDER BY server_key, scope",
+        )?;
+        let rows = stmt.query_map([], mcp_manifest_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Record (or replace) one CLAUDE.md inventory row.
+    pub fn upsert_claudemd_file(&mut self, f: &ClaudemdFile) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO claudemd_files
+               (path, project, bytes, est_tokens, hash, mtime_ns, last_scanned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                f.path,
+                f.project,
+                f.bytes,
+                f.est_tokens,
+                f.hash,
+                f.mtime_ns,
+                f.last_scanned,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The whole CLAUDE.md inventory, in path order.
+    pub fn claudemd_files(&self) -> Result<Vec<ClaudemdFile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, project, bytes, est_tokens, hash, mtime_ns, last_scanned
+             FROM claudemd_files ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], claudemd_file_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Drop one CLAUDE.md inventory row, returning whether it was there.
+    ///
+    /// The other half of the scan: a file deleted from disk has to leave the
+    /// table, or the inventory keeps charging for guidance nobody loads any
+    /// more. Returns false for a path the table never held, so a caller can
+    /// report a miss instead of assuming the delete landed
+    /// ([`Self::set_advice_status`]'s convention).
+    pub fn delete_claudemd_file(&mut self, path: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM claudemd_files WHERE path = ?1",
+            params![path],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Insert a freshly generated candidate, returning whether it was new.
+    ///
+    /// An id already in the table is left **exactly** as it is: the id is a hash
+    /// of the candidate's own evidence, so a regenerated candidate is the same
+    /// suggestion, and overwriting would resurrect a dismissed row as open or
+    /// drop an applied row's `restore_ref` (its only route back). Moving a row
+    /// on is [`Self::set_advice_status`]'s job.
+    pub fn insert_advice(&mut self, a: &AdviceRow) -> Result<bool> {
+        let n = self.conn.execute(
+            "INSERT OR IGNORE INTO advice
+               (id, kind, target, created_at, facts_hash, est_tokens_month,
+                status, payload_json, applied_at, restore_ref, dismiss_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                a.id,
+                a.kind,
+                a.target,
+                a.created_at,
+                a.facts_hash,
+                a.est_tokens_month,
+                a.status,
+                a.payload_json,
+                a.applied_at,
+                a.restore_ref,
+                a.dismiss_note,
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Stamp which fact sheet the advisor was shown when it ranked this
+    /// candidate, returning whether a row was updated.
+    ///
+    /// The one field the generator could not fill: it does not know what the
+    /// advisor saw. [`Self::insert_advice`] is `INSERT OR IGNORE` and never
+    /// overwrites, so the column stays NULL for every row written before a
+    /// ranking pass ran over it, which is the honest value for "no model has
+    /// looked at this".
+    pub fn set_advice_facts_hash(&mut self, id: &str, facts_hash: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE advice SET facts_hash = ?2 WHERE id = ?1",
+            params![id, facts_hash],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// One advice row by id.
+    pub fn advice(&self, id: &str) -> Result<Option<AdviceRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, kind, target, created_at, facts_hash, est_tokens_month,
+                        status, payload_json, applied_at, restore_ref, dismiss_note
+                 FROM advice WHERE id = ?1",
+                params![id],
+                advice_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Every advice row with `status`, biggest `est_tokens_month` first.
+    ///
+    /// Deliberately not described as "biggest saving first": a `claudemd-trim`
+    /// row's figure is what the file costs today, not what trimming it would
+    /// give back (`advice::ActionKind::est_is_burden`), so a caller that wants a
+    /// savings ranking has to filter first.
+    ///
+    /// Ties break on `id` so the same facts always produce the same list in the
+    /// same order: the UI takes the top few, and that slice must not shuffle
+    /// between reads.
+    pub fn advice_by_status(&self, status: &str) -> Result<Vec<AdviceRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, target, created_at, facts_hash, est_tokens_month,
+                    status, payload_json, applied_at, restore_ref, dismiss_note
+             FROM advice WHERE status = ?1
+             ORDER BY est_tokens_month DESC, id",
+        )?;
+        let rows = stmt.query_map(params![status], advice_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Move `id` to `status`, writing the three lifecycle stamps alongside it.
+    ///
+    /// All three are written as given rather than merged, because they belong to
+    /// the status: an apply passes `applied_at` + `restore_ref`, a dismissal
+    /// passes `dismiss_note`, and an Undo passing `open` with three `None`s
+    /// leaves no stamp from a state the row is no longer in.
+    ///
+    /// Returns false when no such row exists, so a caller can report a missing
+    /// id instead of assuming the write landed.
+    pub fn set_advice_status(
+        &mut self,
+        id: &str,
+        status: &str,
+        applied_at: Option<&str>,
+        restore_ref: Option<&str>,
+        dismiss_note: Option<&str>,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE advice
+             SET status = ?2, applied_at = ?3, restore_ref = ?4, dismiss_note = ?5
+             WHERE id = ?1",
+            params![id, status, applied_at, restore_ref, dismiss_note],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Verify the database is writable (used by `piggy doctor`).
     pub fn write_test(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -569,4 +924,50 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+// Row mappers for the M5 tables, shared by the by-key and list-all reads so the
+// column order is written down once per table.
+
+fn mcp_manifest_from_row(r: &rusqlite::Row) -> rusqlite::Result<McpManifest> {
+    Ok(McpManifest {
+        server_key: r.get(0)?,
+        scope: r.get(1)?,
+        config_hash: r.get(2)?,
+        tool_count: r.get(3)?,
+        schema_bytes: r.get(4)?,
+        schema_tokens: r.get(5)?,
+        tokenizer: r.get(6)?,
+        measured_at: r.get(7)?,
+        ok: r.get::<_, i64>(8)? != 0,
+        error: r.get(9)?,
+    })
+}
+
+fn claudemd_file_from_row(r: &rusqlite::Row) -> rusqlite::Result<ClaudemdFile> {
+    Ok(ClaudemdFile {
+        path: r.get(0)?,
+        project: r.get(1)?,
+        bytes: r.get(2)?,
+        est_tokens: r.get(3)?,
+        hash: r.get(4)?,
+        mtime_ns: r.get(5)?,
+        last_scanned: r.get(6)?,
+    })
+}
+
+fn advice_from_row(r: &rusqlite::Row) -> rusqlite::Result<AdviceRow> {
+    Ok(AdviceRow {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        target: r.get(2)?,
+        created_at: r.get(3)?,
+        facts_hash: r.get(4)?,
+        est_tokens_month: r.get(5)?,
+        status: r.get(6)?,
+        payload_json: r.get(7)?,
+        applied_at: r.get(8)?,
+        restore_ref: r.get(9)?,
+        dismiss_note: r.get(10)?,
+    })
 }

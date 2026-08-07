@@ -9,9 +9,11 @@
 //!   * `install` / `remove` - turn a saver on (install) or fully off (uninstall).
 //!   * `on` / `off` - fast toggle without uninstalling (the A/B path).
 //!   * `sweep`  - find unused add-ons that cost tokens; `--apply N` disables one.
+//!   * `probe`  - measure an MCP server's tool-schema cost by launching it once.
 //!   * `report` - measured savings: per-saver attribution table + honest headline.
 //!   * `ledger` - where context tokens come from; exact, needs no A/B.
 //!   * `insights` - ledger findings, each with the lever that acts on it.
+//!   * `claudemd` - the CLAUDE.md inventory every session loads, and its findings.
 //!   * `holdout` - view or change the share of sessions that run with savers off.
 //!   * `discover` - token-savers found on GitHub (cached; `--refresh` pulls).
 //!   * `watch`  - index and tag new sessions live, in the foreground.
@@ -24,8 +26,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use piggy_core::{
+    advice::{self, GenerateOptions},
     attribution::{self, Badge, HeadlineBaseline},
-    config, discovery, engine, parse_file,
+    claudemd, config, diff, discovery, engine, parse_file, probe, snapshots,
     stats::Totals,
     sweep, Catalog, Period, PiggyState, Pricing, SessionWatcher, Store,
 };
@@ -96,9 +99,27 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Measure what your MCP servers' tool schemas cost, by launching one once.
+    ///
+    /// With no arguments this only lists what is configured and what has been
+    /// measured; nothing is launched until you name a server or pass `--all`.
+    Probe {
+        /// Measure just this server (its key in `~/.claude.json`).
+        #[arg(long, value_name = "KEY", conflicts_with = "all")]
+        server: Option<String>,
+        /// Measure every configured stdio server (requires `--yes`).
+        #[arg(long)]
+        all: bool,
+        /// Confirm launching each configured server once.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Undo everything Piggy changed and restore settings.json to pre-Piggy.
     RestoreDefaults,
-    /// List the settings.json backups Piggy has taken.
+    /// List everything Piggy can put back: settings.json backups, files it
+    /// edited, and MCP servers it re-scoped.
     Backups,
     /// Measured savings: per-saver attribution table + honest headline.
     Report {
@@ -112,6 +133,29 @@ enum Cmd {
         since: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// The CLAUDE.md files every session loads: what they cost, and what is
+    /// wrong with them.
+    Claudemd {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Suggestions with the evidence behind each: what to switch off, move,
+    /// clean up or trim. Listing only - applying is done in the app.
+    Advise {
+        /// Look back over this many recent sessions for usage (default 50).
+        #[arg(long, value_name = "N")]
+        sessions: Option<usize>,
+        #[arg(long)]
+        json: bool,
+        /// With --json, include the proposed edit to each CLAUDE.md as diff
+        /// rows. This PRINTS LINES OF YOUR OWN CLAUDE.md files: only the ones
+        /// the deterministic cleanup removes, plus a few lines of context
+        /// around each. Never a drafted rewrite. Off by default, and there for
+        /// building the app's dev fixture from real data rather than an
+        /// invented one.
+        #[arg(long, requires = "json")]
+        diff: bool,
     },
     /// Where your context tokens come from: exact per-source ledger, no A/B needed.
     Ledger {
@@ -212,10 +256,22 @@ fn main() -> Result<()> {
             sessions,
             json,
         } => cmd_sweep(apply, sessions, json),
+        Cmd::Probe {
+            server,
+            all,
+            yes,
+            json,
+        } => cmd_probe(server.as_deref(), all, yes, json),
         Cmd::RestoreDefaults => cmd_restore_defaults(),
         Cmd::Backups => cmd_backups(),
         Cmd::Report { json } => cmd_report(json),
         Cmd::Insights { since, json } => cmd_insights(since.as_deref(), json),
+        Cmd::Claudemd { json } => cmd_claudemd(json),
+        Cmd::Advise {
+            sessions,
+            json,
+            diff,
+        } => cmd_advise(sessions, json, diff),
         Cmd::Ledger {
             since,
             projects,
@@ -444,7 +500,15 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                         _ => "lifetime",
                     },
                     "estTokens": i.est_tokens,
-                    "estimated": true,
+                    // Whether the *count* is an estimate, which is not the same
+                    // as where the bytes came from: the shipped tokenizer
+                    // divides bytes by 3.5, so a measured manifest still yields
+                    // an estimated token count. `piggy probe --json` says the
+                    // same thing about the same row.
+                    "estimated": i.tokens_estimated,
+                    // "rough estimate" (config-size heuristic) or "measured
+                    // manifest" (this server's schemas, as probed).
+                    "costBasis": i.cost_basis,
                     "recommendDisable": i.recommend_disable,
                     // The project a user-scope MCP server should move to,
                     // when its calls all come from one.
@@ -456,7 +520,8 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         let out = serde_json::json!({
             "sessionsConsidered": report.sessions_considered,
             "estRecoverableTokens": report.est_recoverable_tokens(),
-            "estimated": true,
+            // The total is only exact when every count behind it is.
+            "estimated": report.recommended().any(|i| i.tokens_estimated),
             "items": arr,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -471,7 +536,7 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         println!("  found no plugins, MCP servers, or skills to check.");
         return Ok(());
     }
-    let headers = ["#", "Kind", "Add-on", "Used", "Est. tokens", "Suggestion"];
+    let headers = ["#", "Kind", "Add-on", "Used", "Tokens/session", "Suggestion"];
     let rows: Vec<Vec<String>> = report
         .items
         .iter()
@@ -481,7 +546,18 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
                 i.kind.clone(),
                 i.id.clone(),
                 commafy(i.used),
-                format!("~{}", commafy(i.est_tokens)),
+                // The tilde is about the count, the trailing label is about
+                // where the bytes came from. A probed server measured with the
+                // bytes/3.5 tokenizer is honestly both: "~12,345 measured
+                // manifest".
+                {
+                    let tilde = if i.tokens_estimated { "~" } else { "" };
+                    if i.cost_basis == sweep::COST_BASIS_MEASURED {
+                        format!("{tilde}{} {}", commafy(i.est_tokens), i.cost_basis)
+                    } else {
+                        format!("{tilde}{}", commafy(i.est_tokens))
+                    }
+                },
                 if i.recommend_disable {
                     format!("turn off - {}", i.reason)
                 } else if let Some(project) = &i.scope_to {
@@ -496,8 +572,22 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     println!();
     let rec = report.recommended().count();
     if rec > 0 {
+        // The total mixes bases the moment one server has been probed, so say so
+        // rather than calling a measured figure a guess.
+        let basis = match (
+            report
+                .recommended()
+                .any(|i| i.cost_basis == sweep::COST_BASIS_MEASURED),
+            report
+                .recommended()
+                .any(|i| i.cost_basis != sweep::COST_BASIS_MEASURED),
+        ) {
+            (true, true) => "measured where probed, estimated elsewhere",
+            (true, false) => "measured manifests, estimated session impact",
+            _ => "estimated",
+        };
         println!(
-            "{rec} unused add-on(s), ~{} tokens/session (estimated). Turn one off: `piggy sweep --apply <#>`.",
+            "{rec} unused add-on(s), ~{} tokens/session ({basis}). Turn one off: `piggy sweep --apply <#>`.",
             commafy(report.est_recoverable_tokens())
         );
     } else {
@@ -506,10 +596,18 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
     let rescope = report.rescope().count();
     if rescope > 0 {
         println!(
-            "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. Re-add each from its own project to stop that; Piggy will not move config it did not write."
+            "{rescope} MCP server(s) are used in one project but configured at user scope, so every other session loads them for nothing. `piggy advise` lists the move with its evidence, and the app applies it with a one-click undo."
         );
     }
-    println!("token costs are estimates (config-size heuristic), not measured.");
+    if report
+        .items
+        .iter()
+        .any(|i| i.cost_basis == sweep::COST_BASIS_MEASURED)
+    {
+        println!("token costs are estimates (config-size heuristic) except the rows marked `measured manifest`, whose tool schemas `piggy probe` read from the server itself. A `~` on one of those means the schema bytes are real and only their conversion to tokens is an estimate.");
+    } else {
+        println!("token costs are estimates (config-size heuristic), not measured. `piggy probe` measures an MCP server's real tool schemas.");
+    }
     println!(
         "MCP usage is over the last {} session(s); plugin/skill usage is a lifetime total (Claude Code keeps no per-session count for those); hooks are informational.",
         report.sessions_considered
@@ -521,6 +619,198 @@ fn cmd_sweep(apply: Option<usize>, sessions: Option<usize>, json: bool) -> Resul
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// probe
+// ---------------------------------------------------------------------------
+
+fn cmd_probe(server: Option<&str>, all: bool, yes: bool, json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let servers = probe::configured_servers()?;
+
+    // Which servers this run will launch, if any. No arguments launches nothing:
+    // it is the listing.
+    let targets: Vec<probe::ConfiguredServer> = match (server, all) {
+        (Some(key), _) => {
+            let hits: Vec<_> = servers.iter().filter(|s| s.key == key).cloned().collect();
+            if hits.is_empty() {
+                bail!(
+                    "no MCP server named '{key}' in {} (run `piggy probe` to see the list)",
+                    config::claude_json_path().display()
+                );
+            }
+            hits
+        }
+        (None, true) => {
+            let stdio = servers
+                .iter()
+                .filter(|s| s.transport == probe::Transport::Stdio)
+                .count();
+            // The user already told Claude Code to run these every session, but
+            // Piggy does not execute anything on its own say-so.
+            if !yes {
+                bail!(
+                    "`piggy probe --all` starts each of your {stdio} stdio MCP server(s) once, \
+                     asks for its tool list, and stops it again. Nothing is installed, changed, \
+                     or left running. Re-run with `--yes` if that is what you want."
+                );
+            }
+            servers.clone()
+        }
+        (None, false) => Vec::new(),
+    };
+
+    // A failed probe is stored as a row like any other, so only a DB error stops
+    // the run part-way.
+    probe::probe_all(&mut store, &targets, &probe::ProbeOptions::default())?;
+
+    // Report from the stored rows, so one server's line reads the same whether
+    // it was just measured or measured last week.
+    let manifests = store.mcp_manifests()?;
+    let shown: Vec<&probe::ConfiguredServer> = if targets.is_empty() {
+        servers.iter().collect()
+    } else {
+        servers
+            .iter()
+            .filter(|s| targets.iter().any(|t| t.key == s.key && t.scope() == s.scope()))
+            .collect()
+    };
+
+    if json {
+        let arr: Vec<serde_json::Value> = shown
+            .iter()
+            .map(|s| server_json(s, &probe::status(&manifests, s)))
+            .collect();
+        let out = serde_json::json!({
+            "configPath": config::claude_json_path().display().to_string(),
+            "probed": !targets.is_empty(),
+            "servers": arr,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if servers.is_empty() {
+        println!(
+            "no MCP servers configured in {}.",
+            config::claude_json_path().display()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "MCP manifests - {} server(s) configured in {}",
+        servers.len(),
+        config::claude_json_path().display()
+    );
+    let headers = ["Server", "Scope", "Transport", "Tools", "Measurement"];
+    let rows: Vec<Vec<String>> = shown
+        .iter()
+        .map(|s| {
+            let status = probe::status(&manifests, s);
+            let tools = match &status {
+                probe::MeasurementStatus::Measured(m) => m.tool_count.to_string(),
+                _ => "-".to_string(),
+            };
+            vec![
+                s.key.clone(),
+                match &s.project {
+                    None => "user".to_string(),
+                    Some(p) => truncate_path(p, 32),
+                },
+                s.transport.label().to_string(),
+                tools,
+                measurement_cell(&status),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+    println!();
+    if servers
+        .iter()
+        .any(|s| s.transport == probe::Transport::Remote)
+    {
+        println!(
+            "http/sse servers are not probed in v1 (signing in as you is a different problem); sweep keeps its estimate for those."
+        );
+    }
+    if targets.is_empty() {
+        println!(
+            "measure one with `piggy probe --server <name>`, or all of them with `piggy probe --all --yes`."
+        );
+        println!(
+            "probing starts the server once and stops it: it is the only way to see the tool schemas it sends every session."
+        );
+    } else {
+        println!("token counts are {} (schema bytes are measured; how the client charges them is not).", probe::TOKENIZER_BYTES_ESTIMATE);
+    }
+    Ok(())
+}
+
+/// One server's measurement state as a table cell: measured and when, stale,
+/// never, or failed and why.
+fn measurement_cell(status: &probe::MeasurementStatus) -> String {
+    match status {
+        probe::MeasurementStatus::Deferred => "deferred - http/sse".to_string(),
+        probe::MeasurementStatus::Never => "never probed".to_string(),
+        probe::MeasurementStatus::Stale(m) => format!(
+            "stale - config changed since {}",
+            day(&m.measured_at)
+        ),
+        probe::MeasurementStatus::Measured(m) => format!(
+            "~{} tokens, {} bytes ({})",
+            commafy(m.schema_tokens.max(0) as u64),
+            commafy(m.schema_bytes.max(0) as u64),
+            day(&m.measured_at)
+        ),
+        probe::MeasurementStatus::Failed(m) => format!(
+            "failed {} - {}",
+            day(&m.measured_at),
+            truncate(m.error.as_deref().unwrap_or("no reason recorded"), 72)
+        ),
+    }
+}
+
+fn server_json(s: &probe::ConfiguredServer, status: &probe::MeasurementStatus) -> serde_json::Value {
+    let m = status.manifest();
+    // Numbers come from the status, not from the row's own `ok` flag. A row can
+    // be `ok` and still describe a configuration that no longer exists: a
+    // changed command/args/env makes it Stale, which is decided before `ok` is
+    // ever consulted. Quoting a previous configuration's tool count under this
+    // configuration's hash is how a machine surface tells a lie.
+    let measured = match status {
+        probe::MeasurementStatus::Measured(row) => Some(row),
+        _ => None,
+    };
+    serde_json::json!({
+        "server": s.key,
+        "scope": s.scope(),
+        "scopeLabel": s.project.as_deref().unwrap_or("user"),
+        "transport": s.transport.label(),
+        "configHash": s.config_hash(),
+        // The config the stored row measured. Equal to `configHash` exactly when
+        // the status is `measured` or `failed`, and different when it is
+        // `stale`, so the payload says which configuration it describes instead
+        // of leaving a consumer to infer it.
+        "measuredConfigHash": m.map(|m| m.config_hash.clone()),
+        "status": status.tag(),
+        "measuredAt": m.map(|m| m.measured_at.clone()),
+        "toolCount": measured.map(|m| m.tool_count),
+        "schemaBytes": measured.map(|m| m.schema_bytes),
+        "schemaTokens": measured.map(|m| m.schema_tokens),
+        "tokenizer": m.map(|m| m.tokenizer.clone()),
+        // Schema bytes are measured; the token count is only as good as the
+        // tokenizer that produced it.
+        "estimated": m.map(|m| m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE),
+        "error": m.and_then(|m| m.error.clone()),
+    })
+}
+
+/// The date half of an RFC3339 stamp, which is all a table cell has room for.
+fn day(ts: &str) -> &str {
+    ts.split('T').next().unwrap_or(ts)
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +874,80 @@ fn cmd_backups() -> Result<()> {
     if entries.len() > 20 {
         println!("  … and {} more", entries.len() - 20);
     }
+
+    // File snapshots: the other backup ledger. `settings.json` has one
+    // pre-Piggy target and a rolling timestamped history; the advice engine
+    // backs up whole files it did not write (a CLAUDE.md is prose, not config,
+    // so its restore target has to be the original bytes), one record per edit.
+    //
+    // Two lists, because state.json keeps two: `file_snapshots` is Piggy's edits,
+    // which Undo and Restore Defaults put back, and `file_backups` is what the
+    // user had on disk before a restore overwrote it, which nothing writes back.
+    // Printing them together bills somebody's own prose as an undoable Piggy edit.
+    let state = PiggyState::load()?;
+    println!();
+    println!(
+        "Files Piggy edited ({} restorable, under {}):",
+        state.file_snapshots.len(),
+        snapshots::files_backup_dir().display()
+    );
+    print_backup_rows(
+        &state
+            .file_snapshots
+            .iter()
+            .map(|r| (&r.path, &r.backup, &r.applied_at))
+            .collect::<Vec<_>>(),
+    );
+    if !state.file_backups.is_empty() {
+        println!();
+        println!(
+            "Your own content, copied before a restore put a file back ({} kept, nothing puts these back):",
+            state.file_backups.len()
+        );
+        print_backup_rows(
+            &state
+                .file_backups
+                .iter()
+                .map(|r| (&r.path, &r.backup, &r.taken_at))
+                .collect::<Vec<_>>(),
+        );
+    }
+    if !state.scope_moves.is_empty() {
+        println!();
+        println!(
+            "MCP servers Piggy re-scoped ({}, reversible from the app or `piggy restore-defaults`):",
+            state.scope_moves.len()
+        );
+        for record in state.scope_moves.iter().rev() {
+            println!(
+                "  {} → {}",
+                record.server,
+                record
+                    .before_projects
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     Ok(())
+}
+
+/// The newest 20 of a backup ledger as `(path, copy, when)`, each with the size
+/// of its copy on disk. Takes the three fields rather than either record type,
+/// since the two ledgers print the same and share no struct on purpose.
+fn print_backup_rows(rows: &[(&String, &String, &String)]) {
+    if rows.is_empty() {
+        println!("  (none yet)");
+    }
+    for (path, backup, when) in rows.iter().rev().take(20) {
+        let size = std::fs::metadata(backup).map(|m| m.len()).unwrap_or(0);
+        println!("  {}  ({} bytes, saved {})", path, commafy(size), when);
+    }
+    if rows.len() > 20 {
+        println!("  … and {} more", rows.len() - 20);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,7 +1387,7 @@ fn time_seed() -> u64 {
 // insights
 // ---------------------------------------------------------------------------
 
-/// Print ledger findings. Arithmetic on observed tokens only: no predictions,
+/// Print ledger findings. Arithmetic on observed tokens only - no predictions,
 /// and an empty list is a real answer, not a failure.
 fn cmd_insights(since: Option<&str>, json: bool) -> Result<()> {
     let home = config::piggy_home();
@@ -1066,6 +1429,383 @@ fn cmd_insights(since: Option<&str>, json: bool) -> Result<()> {
     println!("floor-component figures are bounded by content size; floor and");
     println!("conversation totals are exact.");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// claudemd
+// ---------------------------------------------------------------------------
+
+/// Inventory the CLAUDE.md files Claude Code loads into every session, then
+/// print what each costs and what the detectors found in it.
+///
+/// The scan writes the inventory (sizes and hashes) to the database; file
+/// contents are read here and dropped. Every token figure is an estimate
+/// (bytes / 3.5 x observed sessions) and is labelled as one.
+fn cmd_claudemd(json: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let report = claudemd::scan(&mut store)?;
+
+    if json {
+        let files: Vec<serde_json::Value> = report
+            .files
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.file.path,
+                    "scope": f.scope(),
+                    "project": f.file.project,
+                    "bytes": f.file.bytes,
+                    "estTokens": f.file.est_tokens,
+                    "sessions30d": f.sessions_30d,
+                    "estTokensMonth": f.est_tokens_month,
+                    "hash": f.file.hash,
+                    "mtimeNs": f.file.mtime_ns,
+                    "lastScanned": f.file.last_scanned,
+                    "findings": f.findings.iter().map(finding_json).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "files": files,
+            "estTokens": report.est_tokens(),
+            "estTokensMonth": report.est_tokens_month(),
+            "estimated": true,
+            "removed": report.removed,
+            "warnings": report.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if report.files.is_empty() {
+        println!("Piggy CLAUDE.md - no CLAUDE.md files found.");
+        println!();
+        println!("Piggy looks in ~/.claude (CLAUDE.md, rules/*.md) and in every project it");
+        println!("has indexed a session for. Run `piggy index` if this looks wrong.");
+        return Ok(());
+    }
+
+    println!(
+        "Piggy CLAUDE.md - {} file(s), ~{} tokens loaded, ~{} tokens/month (estimated)",
+        report.files.len(),
+        commafy(report.est_tokens().max(0) as u64),
+        commafy(report.est_tokens_month().max(0) as u64)
+    );
+    println!();
+    let headers = ["File", "Scope", "Bytes", "Est. tokens", "Sessions/30d", "Est. tokens/month"];
+    let rows: Vec<Vec<String>> = report
+        .files
+        .iter()
+        .map(|f| {
+            vec![
+                truncate_path(&f.file.path, 52),
+                f.scope().to_string(),
+                commafy(f.file.bytes.max(0) as u64),
+                format!("~{}", commafy(f.file.est_tokens.max(0) as u64)),
+                f.sessions_30d.to_string(),
+                format!("~{}", commafy(f.est_tokens_month.max(0) as u64)),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows);
+
+    let n_findings = report.findings().count();
+    if n_findings == 0 {
+        println!();
+        println!("No dead references, duplicate blocks, or oversized files. Nothing to fix.");
+    } else {
+        println!();
+        println!("Findings - {n_findings} across {} file(s)", report.files.iter().filter(|f| !f.findings.is_empty()).count());
+        for f in report.files.iter().filter(|f| !f.findings.is_empty()) {
+            println!();
+            println!("{}", f.file.path);
+            for finding in &f.findings {
+                println!("  [{}] {}", finding.kind.as_str(), finding.claim);
+                println!("    {}", finding.detail);
+                println!("    → {}", finding.action);
+            }
+        }
+    }
+
+    for w in &report.warnings {
+        println!();
+        println!("skipped: {w}");
+    }
+    if !report.removed.is_empty() {
+        println!();
+        println!(
+            "{} inventory row(s) dropped for files that are gone.",
+            report.removed.len()
+        );
+    }
+    println!();
+    println!("Token counts are estimates (bytes / 3.5); the monthly figure multiplies them");
+    println!("by sessions actually observed in the last 30 days. File contents stay on disk:");
+    println!("Piggy stores sizes and hashes only.");
+    Ok(())
+}
+
+/// One finding as JSON, with its kind-specific evidence flattened alongside the
+/// shared fields.
+fn finding_json(f: &piggy_core::Finding) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "id": f.id,
+        "kind": f.kind.as_str(),
+        "path": f.path,
+        "claim": f.claim,
+        "detail": f.detail,
+        "estTokens": f.est_tokens,
+        "estTokensMonth": f.est_tokens_month,
+        "estimated": true,
+        "action": f.action,
+    });
+    let obj = v.as_object_mut().expect("finding json is an object");
+    match &f.kind {
+        piggy_core::FindingKind::DeadRef {
+            reference,
+            resolved,
+            more,
+        } => {
+            obj.insert("reference".into(), reference.clone().into());
+            obj.insert("resolved".into(), resolved.clone().into());
+            obj.insert("more".into(), (*more).into());
+        }
+        piggy_core::FindingKind::DuplicateBlock {
+            others,
+            label,
+            bytes,
+        } => {
+            obj.insert("others".into(), others.clone().into());
+            obj.insert("label".into(), label.clone().into());
+            obj.insert("blockBytes".into(), (*bytes).into());
+        }
+        piggy_core::FindingKind::Oversize { threshold } => {
+            obj.insert("threshold".into(), (*threshold).into());
+        }
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------
+// advise
+// ---------------------------------------------------------------------------
+
+/// The candidate list: what Piggy would suggest, and the evidence behind each.
+///
+/// Listing only, on purpose. Applying an action writes to files this process was
+/// not asked to touch, and the spec puts every one of those writes behind the
+/// app's per-item consent (a diff for a content edit, a checkbox for the rest).
+/// A CLI flag would be a second, quieter door onto the same writes.
+///
+/// Ranking here is by estimated tokens a month, full stop. The advisor's
+/// re-ranking and its drafted CLAUDE.md rewrites are app-only in v1, and this
+/// says so rather than pretending the list is the model's.
+fn cmd_advise(sessions: Option<usize>, json: bool, with_diff: bool) -> Result<()> {
+    let home = config::piggy_home();
+    let mut store = Store::open(&home)?;
+    let catalog = Catalog::embedded();
+    let pricing = Pricing::load(&home);
+    let state = PiggyState::load()?;
+    let mut opts = GenerateOptions::new(&catalog, &pricing, &state);
+    if let Some(n) = sessions {
+        opts.n_sessions = n;
+    }
+    let candidates = advice::generate(&mut store, &opts)?;
+
+    if json {
+        let items: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|c| {
+                let mut v = candidate_json(c);
+                if with_diff {
+                    if let Some(d) = candidate_diff_json(c) {
+                        v["diff"] = d;
+                    }
+                }
+                v
+            })
+            .collect();
+        let out = serde_json::json!({
+            "candidates": items,
+            // Savings only. The oversized-file kind's figure is what the file
+            // costs today, not what trimming it would give back, so it is its
+            // own field and the two are never added up.
+            "estTokensMonth": advice::total_savings(&candidates),
+            "estTokensMonthBurden": advice::total_burden(&candidates),
+            "sessionsConsidered": opts.n_sessions,
+            // Model ranking and CLAUDE.md drafts are app-only in v1.
+            "ranking": "estimated-tokens-month",
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if candidates.is_empty() {
+        println!("Piggy advice - nothing to suggest.");
+        println!();
+        println!("Every add-on is in use, the CLAUDE.md stack is clean, and no saver's own");
+        println!("measurements argue for a different setting. Run `piggy index` if that looks");
+        println!("wrong, or `piggy probe --all --yes` to replace the schema estimates with");
+        println!("measurements.");
+        return Ok(());
+    }
+
+    // The headline is savings only. A `claudemd-trim` candidate's figure is the
+    // file's monthly *burden* - the ceiling on what a rewrite could save, since
+    // nobody knows how much it removes until it is drafted - and it is by far
+    // the biggest number here, so adding it in would overstate what applying
+    // this list is worth several times over, on the strength of the one kind v1
+    // cannot even apply yet.
+    let savings = advice::total_savings(&candidates);
+    let burden = advice::total_burden(&candidates);
+    let burdened = candidates.iter().filter(|c| c.kind.est_is_burden()).count();
+    if savings > 0 {
+        println!(
+            "Piggy advice - {} suggestion(s), ~{} tokens/month between them",
+            candidates.len(),
+            commafy(savings.max(0) as u64)
+        );
+    } else {
+        println!("Piggy advice - {} suggestion(s)", candidates.len());
+    }
+    if burden > 0 {
+        println!(
+            "Plus {burdened} oversized file(s) costing ~{} tokens/month as they stand. That is \
+             what they cost, not what trimming them would save, so it is not in the total above.",
+            commafy(burden.max(0) as u64)
+        );
+    }
+
+    // Grouped by family, and each family in the order its members were ranked.
+    // The groups themselves come out in the order they first appear in that
+    // ranking, so the biggest single opportunity still leads the page.
+    let mut groups: Vec<&str> = Vec::new();
+    for candidate in &candidates {
+        if !groups.contains(&candidate.kind.group_label()) {
+            groups.push(candidate.kind.group_label());
+        }
+    }
+    for group in groups {
+        println!();
+        println!("{group}");
+        for candidate in candidates.iter().filter(|c| c.kind.group_label() == group) {
+            println!();
+            println!("  {} [{}]", candidate.title, candidate.status);
+            println!(
+                "    id {} · {} · risk {} · {} ~{} tokens/month",
+                candidate.id,
+                candidate.kind.as_str(),
+                candidate.risk_tier,
+                // Which verb it is, is the whole point: the same column holds a
+                // saving for four kinds and a cost for the fifth.
+                if candidate.kind.est_is_burden() {
+                    "costs"
+                } else {
+                    "saves"
+                },
+                commafy(candidate.est_tokens_month.max(0) as u64)
+            );
+            for row in &candidate.evidence {
+                // The two literal spaces are the gap: a label longer than the
+                // column must not run into its own value.
+                println!("      {:<44}  {}  ({})", row.label, row.value, row.basis);
+            }
+            for prereq in &candidate.prerequisites {
+                println!("      needs: {}", prereq.note());
+            }
+        }
+    }
+
+    println!();
+    println!("Every figure carries how it was arrived at: `observed` was counted in your");
+    println!("session database, `measured manifest` is a real byte count of a server's tool");
+    println!("schemas, `measured` is a randomized A/B result, and `estimated` is arithmetic");
+    println!("over one of those. Apply any of these in the app - `piggy advise` only lists.");
+    Ok(())
+}
+
+/// One candidate as JSON. The transform result is deliberately absent: a
+/// rewritten CLAUDE.md is the user's prose, and it belongs in a diff view, not
+/// in a command's stdout.
+fn candidate_json(c: &piggy_core::Candidate) -> serde_json::Value {
+    serde_json::json!({
+        "id": c.id,
+        "kind": c.kind.as_str(),
+        "group": c.kind.group_label(),
+        "target": c.target,
+        "title": c.title,
+        "status": c.status,
+        "riskTier": c.risk_tier,
+        "estTokensMonth": c.est_tokens_month,
+        "fingerprint": c.fingerprint,
+        "blocked": c.blocked(),
+        "prerequisites": c.prerequisites.iter().map(|p| {
+            serde_json::json!({ "id": p.as_str(), "note": p.note() })
+        }).collect::<Vec<_>>(),
+        "evidence": c.evidence.iter().map(|e| {
+            serde_json::json!({ "label": e.label, "value": e.value, "basis": e.basis })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+/// The proposed edit to one CLAUDE.md, as the same diff rows the app renders.
+///
+/// `None` for every kind but [`ActionKind::ClaudemdFix`], and for a fix whose
+/// file will not read. The drafting kind is deliberately excluded even once it
+/// has a draft: a rewritten CLAUDE.md is the user's prose in the model's words,
+/// and that belongs in a diff view the user is looking at, not in a command's
+/// stdout.
+fn candidate_diff_json(c: &piggy_core::Candidate) -> Option<serde_json::Value> {
+    if c.kind != piggy_core::ActionKind::ClaudemdFix {
+        return None;
+    }
+    let advice::Params::Claudemd { path } = &c.params else {
+        return None;
+    };
+    let after = c.new_content.as_deref()?;
+    let before = std::fs::read_to_string(path).ok()?;
+    let d = diff::unified(&before, after);
+    let before_bytes = before.len() as i64;
+    let after_bytes = after.len() as i64;
+    Some(serde_json::json!({
+        "id": c.id,
+        "displayPath": tilde(path),
+        "hunks": d.hunks.iter().map(|h| serde_json::json!({
+            "header": h.header,
+            "lines": h.lines.iter().map(|l| serde_json::json!({
+                "op": l.op.as_str(),
+                "text": l.text,
+                "oldNo": l.old_no,
+                "newNo": l.new_no,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "added": d.added,
+        "removed": d.removed,
+        // Real byte counts of the two versions: observed. The token pair beside
+        // them is bytes/3.5 and is labelled estimated wherever it is shown.
+        "beforeBytes": before_bytes,
+        "afterBytes": after_bytes,
+        "beforeEstTokens": claudemd::est_tokens(before_bytes),
+        "afterEstTokens": claudemd::est_tokens(after_bytes),
+        "truncated": d.truncated,
+    }))
+}
+
+/// Abbreviate `$HOME` back to `~`, on a whole-component match only, so output
+/// pasted into an issue does not carry the account name.
+fn tilde(path: &str) -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return path.to_string();
+    };
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match std::path::Path::new(path).strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => std::path::Path::new("~").join(rest).to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,7 +1932,7 @@ fn cmd_ledger(since: Option<&str>, top_projects: usize, json: bool) -> Result<()
 /// Print the task table: per-project spend joined to the outcome signal.
 ///
 /// The ledger says what the tokens bought. This says which project bought it,
-/// how many prompts it took, and how often the tools failed, the one column
+/// how many prompts it took, and how often the tools failed - the one column
 /// that is an outcome rather than a cost.
 fn cmd_tasks(period: Period, top_projects: usize, json: bool) -> Result<()> {
     let home = config::piggy_home();
@@ -1867,5 +2607,89 @@ fn render_table(headers: &[&str], rows: &[Vec<String>]) {
     println!("{}", render_row(&sep));
     for row in rows {
         println!("{}", render_row(row));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use piggy_core::store::SCOPE_USER;
+    use piggy_core::McpManifest;
+    use serde_json::json;
+
+    /// One stored row for `atlas`, successful, measured against `config_hash`.
+    fn row(config_hash: &str) -> McpManifest {
+        McpManifest {
+            server_key: "atlas".to_string(),
+            scope: SCOPE_USER.to_string(),
+            config_hash: config_hash.to_string(),
+            tool_count: 24,
+            schema_bytes: 4_200,
+            schema_tokens: 1_200,
+            tokenizer: probe::TOKENIZER_BYTES_ESTIMATE.to_string(),
+            measured_at: "2026-08-01T10:00:00Z".to_string(),
+            ok: true,
+            error: None,
+        }
+    }
+
+    /// `ok` is the row's own success flag, not a statement about freshness. A row
+    /// that measured a previous command is still `ok = true`, and `status`
+    /// returns `Stale` for it before `ok` is ever consulted - so gating the
+    /// numbers on `ok` published a configuration the user has since changed,
+    /// under the *current* configuration's hash.
+    #[test]
+    fn a_stale_row_publishes_no_numbers_and_says_which_config_it_measured() {
+        let config = json!({
+            "mcpServers": { "atlas": { "command": "node", "args": ["atlas.mjs"] } }
+        });
+        let server = probe::servers_from_root(&config).remove(0);
+
+        let stale = vec![row("the-config-before-this-one")];
+        let v = server_json(&server, &probe::status(&stale, &server));
+        assert_eq!(v["status"], "stale");
+        for field in ["toolCount", "schemaBytes", "schemaTokens"] {
+            assert!(v[field].is_null(), "{field} came from a stale row: {v}");
+        }
+        // The row's own metadata still travels, and now says which configuration
+        // it belongs to.
+        assert_eq!(v["measuredAt"], "2026-08-01T10:00:00Z");
+        assert_eq!(v["tokenizer"], probe::TOKENIZER_BYTES_ESTIMATE);
+        assert_eq!(v["measuredConfigHash"], "the-config-before-this-one");
+        assert_ne!(v["measuredConfigHash"], v["configHash"]);
+
+        // The same row against the config it actually measured does publish.
+        let fresh = vec![row(&server.config_hash())];
+        let v = server_json(&server, &probe::status(&fresh, &server));
+        assert_eq!(v["status"], "measured");
+        assert_eq!(v["toolCount"], 24);
+        assert_eq!(v["schemaBytes"], 4_200);
+        assert_eq!(v["schemaTokens"], 1_200);
+        assert_eq!(v["measuredConfigHash"], v["configHash"]);
+    }
+
+    /// A failed probe of the *current* config is a row with numbers of zero and
+    /// a reason. It is not a measurement, so it publishes no numbers either.
+    #[test]
+    fn a_failed_row_publishes_no_numbers_but_keeps_its_reason() {
+        let config = json!({
+            "mcpServers": { "atlas": { "command": "node", "args": ["atlas.mjs"] } }
+        });
+        let server = probe::servers_from_root(&config).remove(0);
+        let mut failed = row(&server.config_hash());
+        failed.ok = false;
+        failed.error = Some("the server stopped before answering".to_string());
+
+        let v = server_json(&server, &probe::status(&[failed], &server));
+        assert_eq!(v["status"], "failed");
+        for field in ["toolCount", "schemaBytes", "schemaTokens"] {
+            assert!(v[field].is_null(), "{field} came from a failed row: {v}");
+        }
+        assert_eq!(v["error"], "the server stopped before answering");
+        assert_eq!(v["measuredConfigHash"], v["configHash"]);
     }
 }

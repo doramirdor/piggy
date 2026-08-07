@@ -1,5 +1,4 @@
 {
-  "$schema": "./catalog.schema.json",
   "registryVersion": 1,
   "updated": "2026-08-02",
   "minAppVersion": "0.1.0",
@@ -405,7 +404,7 @@
       "behaviorChanging": false,
       "claimedSavings": "83–87% of session-start tokens (author, tokenizer-estimated)",
       "risk": "low",
-      "notes": "v1.1: per-project operation doesn't fit the v1 global-toggle UX yet."
+      "notes": "v1.1: per-project operation doesn't fit the v1 global-toggle UX yet. Stays blocked, and M5 is why it is no longer waiting on a project picker: Piggy's own advice engine covers the need first-party. `piggy claudemd` inventories every CLAUDE.md a project loads with what it costs a month, the deterministic ClaudemdFix removes dead references and blocks already loaded from another file, and ClaudemdTrim reports an oversized file's burden with an optional locally-drafted rewrite behind a diff. All of it is one-click reversible through the same file-snapshot store, which an npx tool rewriting your prose is not."
     },
     {
       "id": "token-optimizer",

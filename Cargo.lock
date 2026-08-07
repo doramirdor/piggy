@@ -3132,10 +3132,11 @@ dependencies = [
 
 [[package]]
 name = "piggy-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "piggy-core",
  "serde",
  "serde_json",
@@ -3150,17 +3151,19 @@ dependencies = [
 
 [[package]]
 name = "piggy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "piggy-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
 name = "piggy-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

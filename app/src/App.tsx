@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useStore } from "./store";
-import { onStatsUpdated } from "./ipc";
+import { onAdviceUpdated, onStatsUpdated } from "./ipc";
 import { Sidebar } from "./components/Sidebar";
 import { Banner } from "./components/Banner";
 import { Ledger } from "./screens/Ledger";
@@ -19,6 +19,7 @@ export default function App() {
   const setTab = useStore((s) => s.setTab);
   const boot = useStore((s) => s.boot);
   const refresh = useStore((s) => s.refresh);
+  const loadAdvice = useStore((s) => s.loadAdvice);
   // Hoisted above the early returns below: hooks must run in the same order on
   // every render, and this component bails out for the booting, no-tool and
   // first-run states before it reaches the JSX.
@@ -32,7 +33,16 @@ export default function App() {
   // Re-query on the background index event and whenever the window regains focus.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenAdvice: (() => void) | undefined;
     onStatsUpdated(() => void refresh()).then((u) => (unlisten = u));
+    // The advice pass runs in the background and lands minutes later. Without
+    // this the list it produced would sit in the cache unread: `refresh` does
+    // not touch advice (it runs on a 400ms debounce and regenerating is
+    // expensive), and `loadAdvice` returns early once it has an answer. So a
+    // card would keep saying no rewrite had been drafted yet after one had, or
+    // after the guard had refused one, which is the same class of stale claim
+    // the three-state copy exists to stop.
+    onAdviceUpdated(() => void loadAdvice(true)).then((u) => (unlistenAdvice = u));
 
     const onVisible = () => {
       if (document.visibilityState === "visible") void refresh();
@@ -40,9 +50,10 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       unlisten?.();
+      unlistenAdvice?.();
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [refresh]);
+  }, [refresh, loadAdvice]);
 
   // Full-bleed states (no sidebar): booting progress, no-Claude, first-run.
   if (booting) {

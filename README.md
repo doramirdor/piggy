@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/release-v0.1.0-e8a33d" alt="Release: v0.1.0">
   <img src="https://img.shields.io/badge/license-MIT-3d7fd8" alt="License: MIT">
   <img src="https://img.shields.io/badge/platform-macOS-6b7280" alt="Platform: macOS">
-  <img src="https://img.shields.io/badge/tests-159%20local-6b7280" alt="159 tests, run locally">
+  <img src="https://img.shields.io/badge/tests-559-6b7280" alt="559 tests">
 </p>
 
 Piggy is a free, open-source macOS menu bar app for Claude Code users who keep hitting usage
@@ -32,7 +32,7 @@ files - and then does something nobody else does: **it measures whether they act
 </p>
 
 <p align="center">
-  <sub><strong>▶ <a href="docs/piggy-demo.mp4">Watch the full 33-second demo</a></strong> — the loop above is a silent highlight</sub>
+  <sub><strong>▶ <a href="docs/piggy-demo.mp4">Watch the full 33-second demo</a></strong> (the loop above is a silent highlight)</sub>
 </p>
 
 <p align="center">
@@ -124,7 +124,7 @@ Under the hood it's three pieces, and only the first holds any optimization logi
   SQLite, runs the pricing and holdout math, and owns every write to `~/.claude/settings.json`:
   timestamped backup, atomic replace, your existing hooks preserved byte-for-byte.
 - **`piggy` CLI** (Rust) is that same core on the command line: `stats`, `doctor`, `report`,
-  `sweep`, and more. It ships inside the app.
+  `sweep`, `ledger`, `claudemd`, `probe`, `advise`, and more. It ships inside the app.
 - **The app** is a Tauri v2 menu bar tray plus desktop window, Rust backend, React + Tailwind front end.
 - **`registry/catalog.json`** is the saver list, data not code, so a new saver is a pull request.
 
@@ -233,7 +233,11 @@ release artifacts, PyPI, the Claude plugin marketplace) and pins a known-good ve
 source supports it - a release tag or a PyPI version. Where you ship a checksums file alongside a
 GitHub release, Piggy verifies the download against it.
 Want your tool listed? Open a PR against `registry/catalog.json`. Honest measurement is
-applied equally to everyone.
+applied equally to everyone. The shape of an entry is defined by the serde types in
+`crates/piggy-core/src/registry.rs` and enforced by `crates/piggy-core/tests/registry_tests.rs`,
+which parses the catalog and checks every step kind, pin and conflict in it. There is no separate
+JSON Schema on purpose: a second description of the same shape that nothing checks would drift
+from the one the app actually reads.
 
 <p align="center">
   <img src="docs/screenshots/discovery.png" alt="Piggy's Discover tab: candidate repositories found on GitHub, each with the author's own savings figure labeled 'author claims', above a 'Listed for transparency' section containing a red card headed 'Why Piggy won't install it' that names the specific rules a tool broke">
@@ -255,8 +259,15 @@ Piggy is built so the interesting parts grow without a rewrite:
   prompts to cheaper or local models) is deferred pending a v2 install path, and **token-optimizer-mcp**
   is listed for transparency only. (The two &sup2; rows above, Claude Token Optimizer and Context Mode,
   are curated but likewise wait on install work.)
-- **Discovery → measurement.** The Discover tab already surfaces candidate savers spotted on GitHub.
-  The next step is wiring a spotted tool straight into a measured holdout test.
+- **Discovery → measurement.** The Discover feed at the foot of Savers already surfaces candidate
+  savers spotted on GitHub. The next step is wiring a spotted tool straight into a measured holdout
+  test.
+- **Drafted CLAUDE.md rewrites that are worth reviewing.** The advisor drafts one, and the guard
+  refuses anything that does not shrink the file by at least a tenth, introduces a path or a URL
+  the source did not have, or changes one of your own numbers. The pinned 4B models usually will
+  not clear that bar, so a trim ships as a burden report ("this file costs ~135k tokens a month")
+  and says plainly when the model tried and could not do better. A larger pinned model, or a
+  better prompt, is what moves that.
 - **Notarized, signed builds** so install is a plain double-click. (The `npx @amirdor/piggybank`
   one-liner is already live on npm; notarization is the piece still to come.)
 - **Registry updates without an app release.** The refresh-from-GitHub path is designed but stubbed
@@ -269,11 +280,24 @@ Want your tool in the box? See [For saver authors](#for-saver-authors).
 ## Status
 
 **v0.1.0 shipped** as an unsigned developer preview: a universal `.dmg` on the
-[Releases](../../releases) page. All four milestones are built and tested: ✅ measurement core ·
-✅ install engine · ✅ holdout measurement · ✅ menu bar app (159 tests, run locally - this repo has
-no CI). The `npx @amirdor/piggybank` installer is live on npm; next up is Apple notarization (see
-[What can be inside](#what-can-be-inside)); the signing/notarization steps live in
-[docs/releasing.md](docs/releasing.md). Design notes are in [DESIGN.md](DESIGN.md).
+[Releases](../../releases) page. **v0.2.0 is tagged**, and the tag is what builds it:
+[`.github/workflows/release.yml`](.github/workflows/release.yml) gates on the tests, checks that
+every version stamp agrees with the tag, and stages a draft release with the `.dmg`, the updater
+artifacts and checksums.
+
+All five milestones are built and tested: ✅ measurement core · ✅ install engine ·
+✅ holdout measurement · ✅ menu bar app · ✅ advisor actions (559 tests: 438 Rust, 121 frontend).
+M5 is the one that turned the local advisor from narration into product: it measures what your MCP
+servers' tool schemas cost by launching one, reads what your CLAUDE.md files cost per month,
+proposes what to switch off, move, clean up or trim, and applies each one through the same
+reversible plumbing everything else uses. The advisor itself is compiled into shipped builds and
+stays off until you download a model in Settings; with no model, the same suggestions arrive in the
+same order with Piggy's own wording and no drafted rewrites.
+
+Next up is Apple notarization (see [What can be inside](#what-can-be-inside)); the
+signing/notarization steps live in [docs/releasing.md](docs/releasing.md). Design notes are in
+[DESIGN.md](DESIGN.md), and the M5 decisions, including everything the build did differently, are
+in [docs/m5-spec.md](docs/m5-spec.md).
 
 ## License
 

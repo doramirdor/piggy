@@ -13,8 +13,10 @@
 //! and per-skill usage, which is *not* recoverable from tool names, is read from
 //! `~/.claude.json`'s own `pluginUsage` / `skillUsage` counters.
 //!
-//! Every token cost is an **estimate** (config-size / file-size heuristic) and is
-//! always labelled as such; Piggy never presents a guessed number as measured.
+//! Every token cost is an **estimate** (config-size / file-size heuristic)
+//! except an MCP server the manifest probe has measured, and every number
+//! carries the label that says which it is ([`SweepItem::cost_basis`]) - Piggy
+//! never presents a guessed number as measured, or the reverse.
 //!
 //! Disable is reversible: MCP servers are removed but their exact JSON is
 //! snapshotted into `state.json`; plugins are set `enabledPlugins=false`; skills
@@ -28,12 +30,22 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
 
 use crate::config;
+use crate::probe;
 use crate::settings;
 use crate::state::{PiggyState, SweepDisabled};
-use crate::store::Store;
+use crate::store::{McpManifest, Store};
 
 /// Default look-back window for usage cross-reference.
 pub const DEFAULT_N_SESSIONS: usize = 50;
+
+/// [`SweepItem::cost_basis`] when `est_tokens` is the config-size heuristic:
+/// a guess, and labelled as one everywhere it is shown.
+pub const COST_BASIS_ESTIMATE: &str = "rough estimate";
+
+/// [`SweepItem::cost_basis`] when `est_tokens` came from [`crate::probe`]
+/// measuring this server's *current* config: a real byte count of the tool
+/// schemas, not a guess.
+pub const COST_BASIS_MEASURED: &str = "measured manifest";
 
 /// Tool-call counts over the window, keyed by tool name then by the project the
 /// calls came from (see [`Store::recent_tool_usage`]).
@@ -62,8 +74,29 @@ pub struct SweepItem {
     /// Lets callers avoid presenting a lifetime number under a "last N sessions"
     /// window label.
     pub used_windowed: bool,
-    /// Estimated per-session context cost, in tokens. **Always an estimate.**
+    /// Per-session context cost, in tokens. An estimate unless
+    /// [`Self::cost_basis`] says otherwise.
     pub est_tokens: u64,
+    /// Where [`Self::est_tokens`] came from: [`COST_BASIS_ESTIMATE`] (the
+    /// config-size heuristic) or [`COST_BASIS_MEASURED`] (a probe measurement of
+    /// this server's current config). The label travels with the number so no
+    /// surface can show a measured figure as a guess, or the reverse.
+    pub cost_basis: String,
+    /// Whether [`Self::est_tokens`] is an estimated *token count*, which is a
+    /// different question from [`Self::cost_basis`].
+    ///
+    /// A probed server's schema bytes are genuinely measured, so its
+    /// `cost_basis` is [`COST_BASIS_MEASURED`] and stays that way. Turning those
+    /// bytes into tokens is a separate step, and the shipped
+    /// [`crate::probe::BytesEstimate`] tokenizer divides by 3.5 rather than
+    /// tokenizing anything. Reading the tilde off `cost_basis` therefore printed
+    /// every probed row as an exact count it never was. This field carries the
+    /// tokenizer's own verdict instead, so the row reads "~12,345 measured
+    /// manifest": the bytes are real, the tokens are not.
+    ///
+    /// Always true for the plugin, skill and hook rows, whose figures are
+    /// file-size heuristics with no tokenizer behind them at all.
+    pub tokens_estimated: bool,
     /// Whether Piggy recommends turning it off (unused in the window).
     pub recommend_disable: bool,
     /// For a user-scope MCP server whose calls all come from one project: that
@@ -108,10 +141,13 @@ pub fn scan(store: &Store, n_sessions: usize) -> Result<SweepReport> {
     let usage = store.recent_tool_usage(n_sessions)?;
     let sessions_considered = store.recent_session_count(n_sessions)?;
     let usage_maps = UsageMaps::load();
+    // Anything the probe has measured, so a real schema cost can replace the
+    // heuristic for the servers that have one.
+    let manifests = store.mcp_manifests()?;
 
     let mut items: Vec<SweepItem> = Vec::new();
 
-    scan_mcp_servers(&usage, &mut items)?;
+    scan_mcp_servers(&usage, &manifests, &mut items)?;
     scan_plugins(&usage_maps, &mut items)?;
     scan_skills(&usage_maps, &mut items)?;
     scan_hooks(&mut items)?;
@@ -137,7 +173,11 @@ pub fn scan(store: &Store, n_sessions: usize) -> Result<SweepReport> {
 // Scanning each source
 // ---------------------------------------------------------------------------
 
-fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()> {
+fn scan_mcp_servers(
+    usage: &ProjectUsage,
+    manifests: &[McpManifest],
+    out: &mut Vec<SweepItem>,
+) -> Result<()> {
     let path = config::claude_json_path();
     if !path.exists() {
         return Ok(());
@@ -158,30 +198,13 @@ fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()
     }
 
     // Dedup servers by name (a server can be configured in several places; we
-    // report the first). User scope goes first because that is the copy every
-    // session pays for, so it is the one whose placement is worth judging.
+    // report the first). The enumeration itself lives in `probe`, which lists
+    // user scope first - the copy every session pays for, so the one whose
+    // placement is worth judging - and then each project's.
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (server, cfg) in root
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-    {
-        if seen.insert(server.clone()) {
-            out.push(mcp_item(server, cfg, None, &server_used));
-        }
-    }
-    let Some(projects) = root.get("projects").and_then(Value::as_object) else {
-        return Ok(());
-    };
-    for (proj_path, proj) in projects {
-        let Some(servers) = proj.get("mcpServers").and_then(Value::as_object) else {
-            continue;
-        };
-        for (server, cfg) in servers {
-            if seen.insert(server.clone()) {
-                out.push(mcp_item(server, cfg, Some(proj_path.clone()), &server_used));
-            }
+    for server in probe::servers_from_root(&root) {
+        if seen.insert(server.key.clone()) {
+            out.push(mcp_item(&server, &server_used, manifests));
         }
     }
     Ok(())
@@ -190,22 +213,21 @@ fn scan_mcp_servers(usage: &ProjectUsage, out: &mut Vec<SweepItem>) -> Result<()
 /// Share of a user-scope server's calls that must come from a single project
 /// before Sweep calls it that project's tool rather than a global one. Not 1.0:
 /// one stray call from another cwd should not keep a server loaded everywhere.
-const SCOPE_CONCENTRATION: f64 = 0.9;
+pub(crate) const SCOPE_CONCENTRATION: f64 = 0.9;
 
-/// One configured MCP server as a sweep item. `source` is the project path it is
-/// configured under, or `None` for user scope.
+/// One configured MCP server as a sweep item.
 ///
 /// The scope call only applies to user scope: a project-scoped server already
 /// costs nothing outside its own project, so telling its owner where it is used
 /// would be noise. A user-scope server is loaded by every session, which is only
 /// worth it if more than one project actually calls it.
 fn mcp_item(
-    server: &str,
-    cfg: &Value,
-    source: Option<String>,
+    server: &probe::ConfiguredServer,
     server_used: &ProjectUsage,
+    manifests: &[McpManifest],
 ) -> SweepItem {
-    let by_project = server_used.get(&normalize(server)).map(fold_subpaths);
+    let source = server.project.clone();
+    let by_project = server_used.get(&normalize(&server.key)).map(fold_subpaths);
     let used: u64 = by_project.as_ref().map(|m| m.values().sum()).unwrap_or(0);
     // Sessions with no recorded project cannot vote on where a server belongs,
     // so they count toward `used` but never toward the concentration.
@@ -229,7 +251,7 @@ fn mcp_item(
         format!(
             "{used} tool call(s) in the window, effectively all from {project}. \
              It loads at user scope, so every other session pays for it too: \
-             re-add it in that project instead."
+             pin it to that project instead (`piggy advise`)."
         )
     } else if source.is_none() {
         format!("{used} tool call(s) across {n_projects} project(s) - global, keep at user scope")
@@ -237,14 +259,30 @@ fn mcp_item(
         format!("{used} tool call(s) in the window")
     };
 
+    // A probe measurement of *this* config beats the heuristic. Anything else -
+    // never probed, config changed since, or a failed probe - keeps the estimate
+    // and its label. The row's own tokenizer says whether the count it carries
+    // is exact, which is not the same question as where the bytes came from.
+    let (est_tokens, cost_basis, tokens_estimated) = match probe::measured_manifest(manifests, server)
+    {
+        Some(m) => (
+            m.schema_tokens.max(0) as u64,
+            COST_BASIS_MEASURED,
+            m.tokenizer == probe::TOKENIZER_BYTES_ESTIMATE,
+        ),
+        None => (est_mcp_tokens(&server.config), COST_BASIS_ESTIMATE, true),
+    };
+
     SweepItem {
         idx: 0,
         kind: "mcp".into(),
-        id: server.to_string(),
+        id: server.key.clone(),
         source,
         used,
         used_windowed: true,
-        est_tokens: est_mcp_tokens(cfg),
+        est_tokens,
+        cost_basis: cost_basis.into(),
+        tokens_estimated,
         recommend_disable: used == 0,
         scope_to,
         reason,
@@ -255,7 +293,7 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
     let settings_path = config::claude_settings_path();
     let loaded = match settings::load(&settings_path) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // unreadable settings, nothing to scan
+        Err(_) => return Ok(()), // unreadable settings - nothing to scan
     };
     let Some(enabled) = loaded
         .value
@@ -279,6 +317,8 @@ fn scan_plugins(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             // pluginUsage is a lifetime counter in ~/.claude.json, not windowed.
             used_windowed: false,
             est_tokens: 800, // estimate: a plugin's skills/commands manifest
+            cost_basis: COST_BASIS_ESTIMATE.into(),
+            tokens_estimated: true,
             recommend_disable: recommend,
             scope_to: None, // plugins have no per-project scope to move to
             reason: if recommend {
@@ -324,6 +364,8 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
             // skillUsage is a lifetime counter in ~/.claude.json, not windowed.
             used_windowed: false,
             est_tokens: est,
+            cost_basis: COST_BASIS_ESTIMATE.into(),
+            tokens_estimated: true,
             recommend_disable: recommend,
             scope_to: None, // skills are user-wide; Claude Code has no project scope for them
             reason: if recommend {
@@ -338,7 +380,7 @@ fn scan_skills(usage: &UsageMaps, out: &mut Vec<SweepItem>) -> Result<()> {
 
 /// Names of skill directories under `~/.claude/skills` that a Piggy saver
 /// installed, taken from the files each installed saver recorded in
-/// `state.json`. Empty when state is unreadable; a scan never fails on it.
+/// `state.json`. Empty when state is unreadable - a scan never fails on it.
 fn piggy_owned_skill_dirs() -> std::collections::BTreeSet<String> {
     let skills_dir = config::claude_skills_dir();
     let Ok(state) = PiggyState::load() else {
@@ -361,7 +403,7 @@ fn piggy_owned_skill_dirs() -> std::collections::BTreeSet<String> {
 
 /// Surface the user's own hooks from `settings.json` (a spec'd data source).
 ///
-/// Hooks are the one source Piggy cannot usage-measure: they fire on events
+/// Hooks are the one source Piggy cannot usage-measure - they fire on events
 /// rather than appearing as tool calls, and unlike MCP servers / plugins / skills
 /// they cost **no** per-request context tokens. So they are listed as
 /// informational only and never auto-recommended for removal. Piggy-owned hooks
@@ -370,7 +412,7 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
     let settings_path = config::claude_settings_path();
     let loaded = match settings::load(&settings_path) {
         Ok(l) => l,
-        Err(_) => return Ok(()), // unreadable settings, nothing to scan
+        Err(_) => return Ok(()), // unreadable settings - nothing to scan
     };
     let Some(hooks) = loaded.value.get("hooks").and_then(Value::as_object) else {
         return Ok(());
@@ -403,9 +445,11 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
                 used: 0,
                 used_windowed: false,
                 est_tokens: 0, // hooks fire on events; they cost no context tokens
+                cost_basis: COST_BASIS_ESTIMATE.into(),
+                tokens_estimated: true,
                 recommend_disable: false,
                 scope_to: None,
-                reason: "hook: fires on events, not usage-measurable and costs no context tokens (informational)".into(),
+                reason: "hook - fires on events, not usage-measurable and costs no context tokens (informational)".into(),
             });
         }
     }
@@ -418,6 +462,9 @@ fn scan_hooks(out: &mut Vec<SweepItem>) -> Result<()> {
 
 /// Disable the item at 1-based `idx` from a fresh scan, recording a restore
 /// snapshot in `state`. Returns the disabled item's human id.
+///
+/// Items carrying a [`SweepItem::scope_to`] are refused: that row's advice is
+/// about *where* an in-use server is configured, not about removing it.
 pub fn apply(
     store: &Store,
     state: &mut PiggyState,
@@ -432,12 +479,26 @@ pub fn apply(
         .ok_or_else(|| anyhow!("no sweep item #{idx} (run `piggy sweep` to see the list)"))?
         .clone();
 
+    // A "scope to <project>" row belongs to a server the user actually calls, so
+    // disabling it would take away the tool its own suggestion told them to keep.
+    // Moving it is a different action with a different undo, and it lives in
+    // `crate::advice` (`ServerScope`); this path only switches things off.
+    if let Some(project) = item.scope_to.as_deref().filter(|_| !item.recommend_disable) {
+        bail!(
+            "'{}' is in use ({} tool call(s) in the window) and only needs re-scoping, not removing. \
+             `piggy advise` lists the move into {project}, and the app applies it with a one-click undo; \
+             sweep only switches add-ons off.",
+            item.id,
+            item.used
+        );
+    }
+
     match item.kind.as_str() {
         "mcp" => disable_mcp(state, &item)?,
         "plugin" => disable_plugin(state, &item)?,
         "skill" => disable_skill(state, &item)?,
         "hook" => bail!(
-            "hooks are listed for information only and are not removable via sweep; edit them in Claude's settings yourself"
+            "hooks are listed for information only and are not removable via sweep - edit them in Claude's settings yourself"
         ),
         other => bail!("cannot disable unknown sweep kind '{other}'"),
     }
@@ -534,6 +595,32 @@ pub struct RestoreFailure {
 pub struct RestoreOutcome {
     pub restored: usize,
     pub failures: Vec<RestoreFailure>,
+}
+
+/// Restore the newest Sweep-disabled item matching `(kind, id, source)`,
+/// dropping its record on success. Returns false when there is no such record.
+///
+/// The single-item counterpart of [`restore_all`], for the advice engine's Undo:
+/// an advice row's apply disabled exactly one item, so its Undo must put back
+/// exactly that one and leave every other swept item alone. A failure keeps the
+/// record (the snapshot is its only copy) and surfaces as the error.
+pub fn restore_item(
+    state: &mut PiggyState,
+    kind: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<bool> {
+    let Some(pos) = state
+        .sweep_disabled
+        .iter()
+        .rposition(|d| d.kind == kind && d.id == id && d.source.as_deref() == source)
+    else {
+        return Ok(false);
+    };
+    let item = state.sweep_disabled[pos].clone();
+    restore_one(state, &item)?;
+    state.sweep_disabled.remove(pos);
+    Ok(true)
 }
 
 /// Restore every Sweep-disabled item and clear the list. Items that fail stay
@@ -672,28 +759,40 @@ fn read_usage(v: Option<&Value>, out: &mut BTreeMap<String, u64>) {
 /// `…/Stacked/app/src`). Left split, a server used in exactly one repo counts as
 /// two projects and passes as global, which is the one wrong answer this whole
 /// scope call exists to avoid.
-fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+pub(crate) fn fold_subpaths(by_project: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
     let mut out: BTreeMap<String, u64> = BTreeMap::new();
     for (project, n) in by_project {
-        let root = by_project
-            .keys()
-            .filter(|p| {
-                !p.is_empty()
-                    && project
-                        .strip_prefix(p.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-            .min_by_key(|p| p.len())
-            .unwrap_or(project);
-        *out.entry(root.clone()).or_insert(0) += n;
+        *out.entry(fold_root_of(by_project, project).to_string())
+            .or_insert(0) += n;
     }
     out
+}
+
+/// The key `project` folds into: the shortest key in the map it sits under, or
+/// itself when none of them is an ancestor of it.
+///
+/// Split out of [`fold_subpaths`] so a caller that has to go the other way -
+/// from a folded root back to the exact working directories behind it, which is
+/// what `~/.claude.json` is keyed by - asks the same function instead of
+/// carrying a second copy of the rule.
+pub(crate) fn fold_root_of<'a>(by_project: &'a BTreeMap<String, u64>, project: &'a str) -> &'a str {
+    by_project
+        .keys()
+        .filter(|p| {
+            !p.is_empty()
+                && project
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+        .min_by_key(|p| p.len())
+        .map(String::as_str)
+        .unwrap_or(project)
 }
 
 /// The `mcpServers` map a server lives in inside `~/.claude.json`: the top level
 /// when `source` is `None` (user scope), otherwise that project's. `create`
 /// inserts the map when it is missing, which restore needs and disable does not.
-fn mcp_servers_mut<'a>(
+pub(crate) fn mcp_servers_mut<'a>(
     root: &'a mut Value,
     source: Option<&str>,
     create: bool,
@@ -714,13 +813,13 @@ fn mcp_servers_mut<'a>(
 }
 
 /// The server segment of an `mcp__<server>__<tool>` name (`None` otherwise).
-fn mcp_server_of(name: &str) -> Option<&str> {
+pub(crate) fn mcp_server_of(name: &str) -> Option<&str> {
     name.strip_prefix("mcp__")?.split("__").next()
 }
 
 /// Normalize a server name for matching config keys against tool-name segments
 /// (lowercase; non-alphanumerics folded to `_`).
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -733,9 +832,10 @@ fn normalize(s: &str) -> String {
 }
 
 /// Estimate an MCP server's per-session context cost from its config size. This
-/// is a deliberately rough, clearly-labelled heuristic; the true cost is the
-/// server's tool-schema manifest, which Piggy cannot see without connecting.
-fn est_mcp_tokens(cfg: &Value) -> u64 {
+/// is a deliberately rough, clearly-labelled heuristic - the true cost is the
+/// server's tool-schema manifest, which [`crate::probe`] can only see by
+/// connecting, and which the user has to ask for one server at a time.
+pub(crate) fn est_mcp_tokens(cfg: &Value) -> u64 {
     let len = cfg.to_string().len() as u64;
     (300 + len / 3).min(4000)
 }
@@ -768,7 +868,7 @@ fn unique_bak_path(dir: &Path, stem: &str) -> std::path::PathBuf {
 /// every key in place and `arbitrary_precision` keeps every number's exact source
 /// text (so Claude Code's telemetry floats no longer shift by a ULP). The net
 /// diff is therefore just the one entry `mutate` changed.
-fn edit_json_atomic<F>(path: &Path, mutate: F) -> Result<()>
+pub(crate) fn edit_json_atomic<F>(path: &Path, mutate: F) -> Result<()>
 where
     F: FnOnce(&mut Value) -> Result<()>,
 {

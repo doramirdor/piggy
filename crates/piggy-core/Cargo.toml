@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 # settings.json produce minimal diffs (matches Claude Code's own 2-space writer).
 # arbitrary_precision stores every JSON number as its exact source text, so unknown
 # numeric config (huge integers, high-precision decimals, telemetry floats) round-trips
-# byte-for-byte instead of being reformatted through f64 — see settings.rs / sweep.rs.
+# byte-for-byte instead of being reformatted through f64 - see settings.rs / sweep.rs.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"

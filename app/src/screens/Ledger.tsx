@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { PiggyMark } from "../components/PiggyMark";
+import { AdviceSection } from "../components/AdviceSection";
 import { UsageChart } from "../components/UsageChart";
 import { Sparkline } from "../components/Sparkline";
 import { formatTokens, commafy, pctMagnitude } from "../lib/format";
@@ -20,7 +21,7 @@ import type {
 const CONVERSATION = "__conversation";
 
 /** Rows below this are collapsed. A real tree has 24 sources and 14 of them
- *  round to 0.0% — listing them all buries the four that matter. */
+ *  round to 0.0%, and listing them all buries the four that matter. */
 const TAIL_SHARE = 0.005;
 
 function pct(fraction: number): string {
@@ -51,7 +52,7 @@ function toneOf(src: LedgerSource): "floor" | "work" | "inject" {
  * act on: they do not know how big cache writes are relative to their bill, so
  * the percentage could equally have meant "most of your money" or "a rounding
  * error", and the screen never said which. A per-session token count is a thing
- * a human can hold — it is the same number the context window is measured in —
+ * a human can hold (it is the same number the context window is measured in),
  * and the share follows as supporting detail, with its denominator spelled out
  * in the same sentence rather than in a label two lines away.
  */
@@ -293,7 +294,7 @@ function ProjectRow({ p }: { p: LedgerProject }) {
 /**
  * The other half of the same question: not what caused the tokens, but when
  * they were spent. Day-over-day totals, the four streams stacked, and cache
- * reuse — the one lever that changes the shape of the chart.
+ * reuse, the one lever that changes the shape of the chart.
  */
 function OverTime() {
   const series = useStore((s) => s.series);
@@ -392,6 +393,12 @@ type TaskSort = keyof typeof TASK_SORTS;
  *  than the total beside it. */
 const SPARK_MAX_DAYS = 120;
 
+/** What a task cell shows when the figure was never recorded. One constant so
+ *  the footnote below quotes the same character the columns print. An en dash,
+ *  the typographic placeholder for an empty cell, and deliberately not an em
+ *  dash: those are out everywhere in this product. */
+const NO_VALUE = "–";
+
 /** Two states, not a three-tone ramp.
  *
  *  Colour has to be earned here: `--amber` and `--red` both resolve to the same
@@ -415,7 +422,7 @@ function TaskRowCells({ r }: { r: TaskRow }) {
       </span>
       <span className="t-num">{commafy(r.sessions)}</span>
       <span className={`t-num${unrecorded ? " t-none" : ""}`}>
-        {unrecorded ? "—" : commafy(r.tasks)}
+        {unrecorded ? NO_VALUE : commafy(r.tasks)}
       </span>
       {/* The value and its denominator in one cell: a share with no basis beside
           it is the exact shape this product refuses. */}
@@ -424,11 +431,11 @@ function TaskRowCells({ r }: { r: TaskRow }) {
         <i>{pct(r.share)} of window</i>
       </span>
       <span className={`t-num${unrecorded ? " t-none" : ""}`}>
-        {r.turnsPerTask == null ? "—" : r.turnsPerTask.toFixed(1)}
+        {r.turnsPerTask == null ? NO_VALUE : r.turnsPerTask.toFixed(1)}
       </span>
       <span className={`t-failcell${unrecorded ? " t-none" : ""}`}>
         {r.failureRate == null ? (
-          "—"
+          NO_VALUE
         ) : (
           <>
             <b className={failTone(r.failureRate)}>{pct(r.failureRate)}</b>
@@ -444,7 +451,7 @@ function TaskRowCells({ r }: { r: TaskRow }) {
           spending less is not a proven saving, so the sign carries the
           direction and no colour claims a verdict. */}
       <span className={`t-num${delta == null ? " t-none" : ""}`}>
-        {delta == null ? "—" : `${delta > 0 ? "+" : "−"}${pctMagnitude(delta)}`}
+        {delta == null ? NO_VALUE : `${delta > 0 ? "+" : "−"}${pctMagnitude(delta)}`}
       </span>
       <span className="t-spark">
         <Sparkline points={r.daily} label={r.name} />
@@ -554,8 +561,8 @@ function Tasks() {
       {table.tasksUnrecorded && (
         <div className="foot-note" style={{ marginTop: 0, marginBottom: 12 }}>
           No task boundaries were recorded in this window. These session logs predate the prompt
-          identifier Piggy groups tasks by, so the task, turn and failure columns read “—” rather
-          than zero. Token columns are unaffected and exact.
+          identifier Piggy groups tasks by, so the task, turn and failure columns read “{NO_VALUE}”
+          rather than zero. Token columns are unaffected and exact.
         </div>
       )}
 
@@ -737,6 +744,13 @@ export function Ledger() {
           <div className="sub">See where your tokens went and what caused them.</div>
         </div>
       </div>
+      {/* What to act on, above the breakdown that explains it. Inside
+          `.analytics` rather than beside it, so Spend still animates as one
+          page turn - and outside `.slice`, which dims and disables itself
+          during a period switch. Advice is not period-scoped: the advice table
+          has no period column. */}
+      <AdviceSection />
+
       {/* The bar stays put through an empty period and through a slice swap:
           the controls that got you into a window are the ones that get you out
           of it. */}

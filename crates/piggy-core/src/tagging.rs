@@ -27,8 +27,8 @@ fn source_for(s: &SaverState) -> &'static str {
 ///
 /// Each installed saver contributes one `(saver_id, enabled, source)` row. A
 /// session with no installed savers is still marked (an empty snapshot would be
-/// indistinguishable from "untagged"), so we record nothing and report `false`.
-/// There is genuinely nothing to attribute.
+/// indistinguishable from "untagged"), so we record nothing and report `false` -
+/// there is genuinely nothing to attribute.
 pub fn snapshot_new_session(
     store: &mut Store,
     state: &PiggyState,
