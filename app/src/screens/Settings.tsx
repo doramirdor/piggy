@@ -8,7 +8,7 @@ import type { Doctor, Settings as SettingsData, UpdateInfo } from "../types";
 
 // Single source of truth for the version shown in the UI (the sidebar imports it
 // too). Bump this in step with tauri.conf.json / Cargo.toml / package.json.
-export const APP_VERSION = "0.2.0";
+export const APP_VERSION = "0.3.0";
 
 export function Settings() {
   const showError = useStore((s) => s.showError);
